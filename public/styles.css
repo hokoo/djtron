@@ -306,12 +306,12 @@ button.play:disabled {
 button.secondary {
   background: var(--primary);
   color: #fff;
-  border: 1px solid #7f1d1d;
+  border: 1px solid var(--border-strong);
   padding: 10px 14px;
   border-radius: 10px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 10px 20px rgba(185, 28, 28, 0.35);
+  box-shadow: 0 10px 20px var(--shadow-accent);
 }
 
 button.secondary.ghost {
