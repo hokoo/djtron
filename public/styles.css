@@ -297,9 +297,21 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   transition: none;
 }
 
-#addPlaylist {
+.playlist-controls {
   justify-self: end;
   align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#addPlaylist,
+#refreshPlaylists {
+  align-self: center;
+}
+
+#refreshPlaylists[data-loading='true'] {
+  opacity: 0.8;
 }
 
 .panel {
@@ -1201,8 +1213,13 @@ body[data-role='slave'] .track-card.is-host-paused {
     grid-template-columns: 1fr;
   }
 
-  #addPlaylist {
+  .playlist-controls {
     justify-self: stretch;
+  }
+
+  #addPlaylist,
+  #refreshPlaylists {
+    flex: 1 1 auto;
   }
 }
 

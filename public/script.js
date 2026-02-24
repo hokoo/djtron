@@ -1,6 +1,7 @@
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
+const refreshPlaylistsBtn = document.getElementById('refreshPlaylists');
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
@@ -49,6 +50,7 @@ const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const HOST_PROGRESS_REFRESH_INTERVAL_MS = 250;
+const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
 const TOUCH_COPY_HOLD_MS = 360;
 const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
@@ -96,6 +98,12 @@ let playlistMeta = [{ type: PLAYLIST_TYPE_MANUAL }];
 let playlistAutoplay = [false];
 let availableFiles = [];
 let availableFolders = [];
+let audioCatalogSignature = '';
+let audioCatalogPollTimer = null;
+let audioCatalogPollInFlight = false;
+let tracksReloadInFlight = false;
+let tracksReloadQueued = false;
+let tracksReloadQueuedReason = 'auto';
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
@@ -4014,7 +4022,7 @@ async function handleDrop(event, targetZoneIndex) {
   }
 }
 
-async function fetchFileList(url) {
+async function fetchFileList(url, { logErrors = true } = {}) {
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error('Не удалось получить список файлов');
@@ -4025,25 +4033,71 @@ async function fetchFileList(url) {
       ok: true,
     };
   } catch (err) {
-    console.error(err);
+    if (logErrors) {
+      console.error(err);
+    }
     return { files: [], folders: [], ok: false };
   }
 }
 
-async function loadTracks() {
+function buildAudioCatalogSignature(files, folders) {
+  const normalizedFiles = Array.isArray(files)
+    ? files.filter((file) => typeof file === 'string' && file.trim()).slice().sort((left, right) => left.localeCompare(right, 'ru'))
+    : [];
+  const normalizedFolders = Array.isArray(folders)
+    ? folders
+        .map((folder) => ({
+          key: typeof folder.key === 'string' ? folder.key : '',
+          files: Array.isArray(folder.files)
+            ? folder.files
+                .filter((file) => typeof file === 'string' && file.trim())
+                .slice()
+                .sort((left, right) => left.localeCompare(right, 'ru'))
+            : [],
+        }))
+        .filter((folder) => folder.key)
+        .sort((left, right) => left.key.localeCompare(right.key, 'ru'))
+    : [];
+
+  return JSON.stringify({ files: normalizedFiles, folders: normalizedFolders });
+}
+
+function setPlaylistControlsLoading(isLoading) {
+  if (refreshPlaylistsBtn) {
+    refreshPlaylistsBtn.disabled = isLoading;
+    refreshPlaylistsBtn.dataset.loading = isLoading ? 'true' : 'false';
+    refreshPlaylistsBtn.textContent = isLoading ? 'Обновление...' : 'Обновить';
+  }
+  if (addPlaylistBtn) {
+    addPlaylistBtn.disabled = isLoading;
+  }
+}
+
+function getTrackReloadStatusMessage(reason, fileCount) {
+  if (reason === 'manual') {
+    return `Список обновлен: ${fileCount} треков.`;
+  }
+  if (reason === 'auto') {
+    return `Обнаружены изменения в /audio. Треков: ${fileCount}.`;
+  }
+  return `Найдено файлов: ${fileCount}`;
+}
+
+async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
   clearLayoutStreamConnection();
-  const audioResult = await fetchFileList('/api/audio');
+  const catalogResult = audioResult || (await fetchFileList('/api/audio'));
   resetTrackReferences();
 
-  if (!audioResult.ok) {
+  if (!catalogResult.ok) {
     renderEmpty();
     syncCurrentTrackState();
     setStatus('Ошибка загрузки списка файлов. Проверьте сервер.');
     return;
   }
 
-  availableFiles = audioResult.files;
-  availableFolders = normalizeAudioFolderTemplates(audioResult.folders, availableFiles);
+  audioCatalogSignature = buildAudioCatalogSignature(catalogResult.files, catalogResult.folders);
+  availableFiles = catalogResult.files;
+  availableFolders = normalizeAudioFolderTemplates(catalogResult.folders, availableFiles);
   keepKnownDurationsForFiles(availableFiles);
   keepKnownTrackAttributesForFiles(availableFiles, '/audio');
   keepTrackTitleModesForFiles(availableFiles, '/audio');
@@ -4078,8 +4132,69 @@ async function loadTracks() {
 
   renderZones();
   syncCurrentTrackState();
-  setStatus(`Найдено файлов: ${availableFiles.length}`);
+  setStatus(getTrackReloadStatusMessage(reason, availableFiles.length));
   connectLayoutStream();
+}
+
+function requestTracksReload({ reason = 'manual', audioResult = null } = {}) {
+  if (tracksReloadInFlight) {
+    tracksReloadQueued = true;
+    if (reason === 'manual') {
+      tracksReloadQueuedReason = 'manual';
+    }
+    return;
+  }
+
+  tracksReloadInFlight = true;
+  setPlaylistControlsLoading(true);
+
+  loadTracks({ reason, audioResult })
+    .catch((err) => {
+      console.error('Не удалось обновить список треков', err);
+      setStatus('Не удалось обновить список треков.');
+    })
+    .finally(() => {
+      tracksReloadInFlight = false;
+      setPlaylistControlsLoading(false);
+
+      if (!tracksReloadQueued) return;
+      const queuedReason = tracksReloadQueuedReason === 'manual' ? 'manual' : 'auto';
+      tracksReloadQueued = false;
+      tracksReloadQueuedReason = 'auto';
+      requestTracksReload({ reason: queuedReason });
+    });
+}
+
+async function pollAudioCatalogChanges() {
+  if (audioCatalogPollInFlight || tracksReloadInFlight) return;
+  if (!audioCatalogSignature) return;
+
+  audioCatalogPollInFlight = true;
+  try {
+    const catalogResult = await fetchFileList('/api/audio', { logErrors: false });
+    if (!catalogResult.ok) return;
+
+    const nextSignature = buildAudioCatalogSignature(catalogResult.files, catalogResult.folders);
+    if (nextSignature === audioCatalogSignature) return;
+
+    requestTracksReload({ reason: 'auto', audioResult: catalogResult });
+  } finally {
+    audioCatalogPollInFlight = false;
+  }
+}
+
+function startAudioCatalogAutoRefresh() {
+  stopAudioCatalogAutoRefresh();
+  audioCatalogPollTimer = setInterval(() => {
+    pollAudioCatalogChanges();
+  }, AUDIO_CATALOG_POLL_INTERVAL_MS);
+}
+
+function stopAudioCatalogAutoRefresh() {
+  if (audioCatalogPollTimer !== null) {
+    clearInterval(audioCatalogPollTimer);
+    audioCatalogPollTimer = null;
+  }
 }
 
 function resetFadeState() {
@@ -4422,8 +4537,18 @@ function initServerControls() {
 }
 
 function initPlaylistControls() {
-  if (!addPlaylistBtn) return;
-  addPlaylistBtn.addEventListener('click', addPlaylist);
+  if (addPlaylistBtn) {
+    addPlaylistBtn.addEventListener('click', addPlaylist);
+  }
+
+  if (refreshPlaylistsBtn) {
+    refreshPlaylistsBtn.addEventListener('click', () => {
+      setStatus('Обновляем список файлов и плей-листов...');
+      requestTracksReload({ reason: 'manual' });
+    });
+  }
+
+  setPlaylistControlsLoading(false);
 }
 
 function initNowPlayingControls() {
@@ -4622,7 +4747,9 @@ async function bootstrap() {
   initNowPlayingControls();
   initZonesPanControls();
   initUpdater();
+  startAudioCatalogAutoRefresh();
   window.addEventListener('beforeunload', () => {
+    stopAudioCatalogAutoRefresh();
     clearLayoutStreamConnection();
     stopHostProgressLoop();
     cleanupNowPlayingSeekInteraction();
@@ -4635,7 +4762,7 @@ async function bootstrap() {
       cleanupTouchCopyDrag({ restoreLayout: false });
     }
   });
-  loadTracks();
+  requestTracksReload({ reason: 'initial' });
   loadVersion();
   document.addEventListener('dragover', handleGlobalDragOver);
 }
