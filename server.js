@@ -175,7 +175,6 @@ function sanitizePlaylistName(value, index) {
 function sanitizeLayout(layout) {
   if (!Array.isArray(layout)) return null;
 
-  const seen = new Set();
   const normalized = [];
 
   layout.forEach((playlist) => {
@@ -186,8 +185,6 @@ function sanitizeLayout(layout) {
       if (typeof value !== 'string') return;
       const file = value.trim();
       if (!file) return;
-      if (seen.has(file)) return;
-      seen.add(file);
       clean.push(file);
     });
 

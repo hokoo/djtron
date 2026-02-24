@@ -45,6 +45,7 @@ let progressRaf = null;
 let progressAudio = null;
 let draggingCard = null;
 let dragDropHandled = false;
+let dragContext = null;
 let layout = [[]]; // array of playlists -> array of filenames
 let playlistNames = ['Плей-лист 1'];
 let availableFiles = [];
@@ -79,6 +80,44 @@ function clampVolume(value) {
 
 function trackKey(file, basePath = '/audio') {
   return `${basePath}|${file}`;
+}
+
+function getOrCreateSet(map, key) {
+  const existing = map.get(key);
+  if (existing) return existing;
+  const created = new Set();
+  map.set(key, created);
+  return created;
+}
+
+function addToMultiMap(map, key, value) {
+  getOrCreateSet(map, key).add(value);
+}
+
+function getFirstFromMultiMap(map, key) {
+  const values = map.get(key);
+  if (!values || !values.size) return null;
+  return values.values().next().value || null;
+}
+
+function cloneLayoutState(layoutState) {
+  return ensurePlaylists(layoutState).map((playlist) => playlist.slice());
+}
+
+function isCopyDragModifier(event) {
+  return Boolean(event && (event.ctrlKey || event.metaKey));
+}
+
+function setDropEffectFromEvent(event) {
+  if (!event || !event.dataTransfer) return;
+  event.dataTransfer.dropEffect = isCopyDragModifier(event) ? 'copy' : 'move';
+}
+
+function handleGlobalDragOver(event) {
+  if (!draggingCard || !event.dataTransfer) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target && zonesContainer.contains(target)) return;
+  event.dataTransfer.dropEffect = 'none';
 }
 
 function trackDisplayName(file, hotkeyLabel) {
@@ -301,21 +340,29 @@ function renderEmpty() {
 }
 
 function setButtonPlaying(fileKey, isPlaying) {
-  const btn = buttonsByFile.get(fileKey);
-  const card = cardsByFile.get(fileKey);
-  const progress = progressByFile.get(fileKey);
-  if (btn) {
-    btn.textContent = isPlaying ? '■' : '▶';
-    btn.title = isPlaying ? 'Остановить' : 'Воспроизвести';
+  const buttons = buttonsByFile.get(fileKey);
+  const cards = cardsByFile.get(fileKey);
+  const progressEntries = progressByFile.get(fileKey);
+
+  if (buttons) {
+    for (const btn of buttons) {
+      btn.textContent = isPlaying ? '■' : '▶';
+      btn.title = isPlaying ? 'Остановить' : 'Воспроизвести';
+    }
   }
-  if (card) {
-    card.classList.toggle('is-playing', isPlaying);
+
+  if (cards) {
+    for (const card of cards) {
+      card.classList.toggle('is-playing', isPlaying);
+    }
   }
-  if (progress) {
-    const { container, bar } = progress;
-    container.classList.toggle('visible', isPlaying);
-    if (!isPlaying && bar) {
-      bar.style.width = '0%';
+
+  if (progressEntries) {
+    for (const { container, bar } of progressEntries) {
+      container.classList.toggle('visible', isPlaying);
+      if (!isPlaying && bar) {
+        bar.style.width = '0%';
+      }
     }
   }
 }
@@ -327,24 +374,23 @@ function getDuration(audio) {
 }
 
 function updateProgress(fileKey, currentTime, duration) {
-  const entry = progressByFile.get(fileKey);
-  if (!entry) return;
-  const { bar } = entry;
-
-  if (!duration) {
-    bar.style.width = '0%';
-    return;
-  }
+  const entries = progressByFile.get(fileKey);
+  if (!entries || !entries.size) return;
 
   const safeTime = Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
-  const percent = Math.min(100, (safeTime / duration) * 100);
-  bar.style.width = `${percent}%`;
+  const percent = duration ? Math.min(100, (safeTime / duration) * 100) : 0;
+
+  for (const { bar } of entries) {
+    bar.style.width = `${percent}%`;
+  }
 }
 
 function resetProgress(fileKey) {
-  const entry = progressByFile.get(fileKey);
-  if (!entry) return;
-  entry.bar.style.width = '0%';
+  const entries = progressByFile.get(fileKey);
+  if (!entries || !entries.size) return;
+  for (const entry of entries) {
+    entry.bar.style.width = '0%';
+  }
 }
 
 function bindProgress(audio, fileKey) {
@@ -385,7 +431,7 @@ function buildTrackCard(file, basePath = '/audio', { draggable = true, hotkeyLab
   card.draggable = draggable;
   card.dataset.file = file;
   card.dataset.basePath = basePath;
-  cardsByFile.set(key, card);
+  addToMultiMap(cardsByFile, key, card);
 
   const info = document.createElement('div');
   const name = document.createElement('p');
@@ -401,14 +447,14 @@ function buildTrackCard(file, basePath = '/audio', { draggable = true, hotkeyLab
   playButton.textContent = '▶';
   playButton.title = 'Воспроизвести';
   playButton.addEventListener('click', () => handlePlay(file, playButton, basePath));
-  buttonsByFile.set(key, playButton);
+  addToMultiMap(buttonsByFile, key, playButton);
 
   const progress = document.createElement('div');
   progress.className = 'play-progress';
   const progressBar = document.createElement('div');
   progressBar.className = 'play-progress__bar';
   progress.append(progressBar);
-  progressByFile.set(key, { container: progress, bar: progressBar });
+  addToMultiMap(progressByFile, key, { container: progress, bar: progressBar });
 
   const playBlock = document.createElement('div');
   playBlock.className = 'play-block';
@@ -457,8 +503,21 @@ function buildTrackCard(file, basePath = '/audio', { draggable = true, hotkeyLab
 
 function attachDragHandlers(card) {
   card.addEventListener('dragstart', (e) => {
-    e.dataTransfer.effectAllowed = 'move';
+    const sourceZone = card.closest('.zone');
+    const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
+    const sourceBody = card.parentElement;
+    const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+
+    dragContext = {
+      file: card.dataset.file || '',
+      sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
+      sourceIndex,
+      snapshotLayout: cloneLayoutState(layout),
+    };
+
+    e.dataTransfer.effectAllowed = 'copyMove';
     e.dataTransfer.setData('text/plain', card.dataset.file);
+    setDropEffectFromEvent(e);
     card.classList.add('dragging');
     draggingCard = card;
     dragDropHandled = false;
@@ -470,6 +529,7 @@ function attachDragHandlers(card) {
       renderZones();
     }
     draggingCard = null;
+    dragContext = null;
     dragDropHandled = false;
     document.querySelectorAll('.zone.drag-over').forEach((zone) => zone.classList.remove('drag-over'));
   });
@@ -494,6 +554,7 @@ function getDragInsertBefore(container, event) {
 function applyDragPreview(zoneBody, event) {
   if (!draggingCard || !zoneBody) return;
   event.preventDefault();
+  setDropEffectFromEvent(event);
   const beforeElement = getDragInsertBefore(zoneBody, event);
   if (beforeElement) {
     zoneBody.insertBefore(draggingCard, beforeElement);
@@ -551,21 +612,20 @@ function playlistNamesEqual(left, right, expectedLength) {
 function normalizeLayoutForFiles(rawLayout, files) {
   const normalized = ensurePlaylists(rawLayout);
   const allowedFiles = new Set(Array.isArray(files) ? files : []);
-  const seen = new Set();
+  const present = new Set();
 
   const filtered = normalized.map((playlist) => {
     const clean = [];
     playlist.forEach((file) => {
       if (typeof file !== 'string') return;
       if (!allowedFiles.has(file)) return;
-      if (seen.has(file)) return;
-      seen.add(file);
       clean.push(file);
+      present.add(file);
     });
     return clean;
   });
 
-  const missing = Array.isArray(files) ? files.filter((file) => !seen.has(file)) : [];
+  const missing = Array.isArray(files) ? files.filter((file) => !present.has(file)) : [];
   if (missing.length) {
     filtered[0] = filtered[0].concat(missing);
   }
@@ -879,6 +939,7 @@ async function deletePlaylist(playlistIndex) {
 
 function renderZones() {
   zonesContainer.innerHTML = '';
+  resetTrackReferences();
   layout = ensurePlaylists(layout);
 
   layout.forEach((playlistFiles, playlistIndex) => {
@@ -888,6 +949,7 @@ function renderZones() {
 
     zone.addEventListener('dragover', (e) => {
       e.preventDefault();
+      setDropEffectFromEvent(e);
       zone.classList.add('drag-over');
     });
     zone.addEventListener('dragleave', () => {
@@ -967,27 +1029,58 @@ function syncCurrentTrackState() {
 
 async function handleDrop(event, targetZoneIndex) {
   event.preventDefault();
-  const file = event.dataTransfer.getData('text/plain');
-  const sourceZoneIndex = findZoneIndex(file);
-  if (sourceZoneIndex === -1 || file === '') return;
+  if (!draggingCard || !dragContext) return;
+  if (!Number.isInteger(targetZoneIndex) || targetZoneIndex < 0) return;
 
   const targetZone = event.currentTarget;
+  if (!targetZone) return;
   targetZone.classList.remove('drag-over');
   dragDropHandled = true;
 
-  syncLayoutFromDom();
+  const previousLayout = cloneLayoutState(layout);
+  const isCopyDrop = isCopyDragModifier(event);
+
+  let nextLayout;
+  if (isCopyDrop) {
+    if (!dragContext.file) return;
+    nextLayout = cloneLayoutState(dragContext.snapshotLayout);
+    if (!Array.isArray(nextLayout[targetZoneIndex])) return;
+
+    const targetBody = targetZone.querySelector('.zone-body');
+    const cards = targetBody ? Array.from(targetBody.querySelectorAll('.track-card')) : [];
+    const droppedIndexWithoutSource = cards.indexOf(draggingCard);
+    const fallbackIndex = nextLayout[targetZoneIndex].length;
+    let insertIndex = droppedIndexWithoutSource === -1 ? fallbackIndex : droppedIndexWithoutSource;
+
+    if (
+      dragContext.sourceZoneIndex === targetZoneIndex &&
+      Number.isInteger(dragContext.sourceIndex) &&
+      dragContext.sourceIndex >= 0 &&
+      insertIndex >= dragContext.sourceIndex
+    ) {
+      insertIndex += 1;
+    }
+
+    insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
+    nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+  } else {
+    syncLayoutFromDom();
+    nextLayout = cloneLayoutState(layout);
+  }
+
+  layout = ensurePlaylists(nextLayout);
+  playlistNames = normalizePlaylistNames(playlistNames, layout.length);
   renderZones();
   try {
     await pushSharedLayout();
-    setStatus('Плей-листы обновлены и синхронизированы.');
+    setStatus(isCopyDrop ? 'Трек продублирован и синхронизирован.' : 'Плей-листы обновлены и синхронизированы.');
   } catch (err) {
     console.error(err);
-    setStatus('Не удалось синхронизировать плей-листы.');
+    layout = previousLayout;
+    playlistNames = normalizePlaylistNames(playlistNames, layout.length);
+    renderZones();
+    setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
   }
-}
-
-function findZoneIndex(file) {
-  return layout.findIndex((zone) => zone.includes(file));
 }
 
 async function fetchFileList(url) {
@@ -1495,7 +1588,7 @@ function handleHotkey(event) {
   if (!file) return;
 
   const fileKey = trackKey(file, '/audio');
-  const button = buttonsByFile.get(fileKey);
+  const button = getFirstFromMultiMap(buttonsByFile, fileKey);
   if (!button) return;
   event.preventDefault();
   handlePlay(file, button, '/audio');
@@ -1514,6 +1607,7 @@ async function bootstrap() {
   loadTracks();
   loadVersion();
   document.addEventListener('keydown', handleHotkey);
+  document.addEventListener('dragover', handleGlobalDragOver);
 }
 
 bootstrap();
