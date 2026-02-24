@@ -921,9 +921,9 @@ button.danger {
 }
 
 .sidebar-toggle {
-  position: absolute;
+  position: fixed;
   top: 12px;
-  right: -52px;
+  left: calc(320px + 8px);
   width: 44px;
   height: 44px;
   border-radius: 12px;
@@ -932,7 +932,12 @@ button.danger {
   justify-content: center;
   font-size: 22px;
   padding: 0;
-  z-index: 5;
+  z-index: 120;
+  transition: left 0.2s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.sidebar.collapsed .sidebar-toggle {
+  left: 8px;
 }
 
 .track-card.is-playing button.play {
