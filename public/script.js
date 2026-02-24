@@ -1,7 +1,6 @@
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
-const assetsContainer = document.getElementById('assetsTracks');
-const assetsStatusEl = document.getElementById('assetsStatus');
+const addPlaylistBtn = document.getElementById('addPlaylist');
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
@@ -26,11 +25,15 @@ const authError = document.getElementById('authError');
 const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
   overlayCurve: 'player:overlayCurve',
-  layout: 'player:zones',
   stopFade: 'player:stopFade',
   sidebarOpen: 'player:sidebarOpen',
   allowPrerelease: 'player:allowPrerelease',
 };
+const LAYOUT_STORAGE_KEY = 'player:playlists';
+const LEGACY_LAYOUT_KEY = 'player:zones';
+const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
+const LAYOUT_STREAM_RETRY_MS = 1500;
+const PLAYLIST_NAME_MAX_LENGTH = 80;
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -42,13 +45,15 @@ let progressRaf = null;
 let progressAudio = null;
 let draggingCard = null;
 let dragDropHandled = false;
-const MAX_ZONES = 5;
-let layout = Array.from({ length: MAX_ZONES }, () => []); // array of zones -> array of filenames
+let layout = [[]]; // array of playlists -> array of filenames
+let playlistNames = ['Плей-лист 1'];
 let availableFiles = [];
-let assetFiles = [];
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
+let layoutVersion = 0;
+let layoutStream = null;
+let layoutStreamReconnectTimer = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const HOTKEY_ROWS = [
@@ -63,8 +68,7 @@ const HOTKEY_CODES = [
   ['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG'],
   ['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB'],
 ];
-const ASSET_HOTKEY_LABELS = ['0', '9', '8', '7', '6'];
-const ASSET_HOTKEY_CODES = ['Digit0', 'Digit9', 'Digit8', 'Digit7', 'Digit6'];
+const clientId = getClientId();
 
 function clampVolume(value) {
   if (!Number.isFinite(value)) return 0;
@@ -88,6 +92,21 @@ function stripExtension(filename) {
   return filename.slice(0, lastDot);
 }
 
+function getClientId() {
+  const randomId = () => `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+  try {
+    const existing = sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (existing) return existing;
+
+    const created = randomId();
+    sessionStorage.setItem(CLIENT_ID_STORAGE_KEY, created);
+    return created;
+  } catch (err) {
+    return randomId();
+  }
+}
+
 const easing = (t, type) => {
   switch (type) {
     case 'ease-in':
@@ -103,10 +122,6 @@ const easing = (t, type) => {
 
 function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
-}
-
-function setAssetsStatus(message) {
-  if (assetsStatusEl) assetsStatusEl.textContent = message;
 }
 
 function setAuthOverlayVisible(visible) {
@@ -487,6 +502,94 @@ function applyDragPreview(zoneBody, event) {
   }
 }
 
+function ensurePlaylists(playlists) {
+  const normalized = Array.isArray(playlists) ? playlists.map((playlist) => (Array.isArray(playlist) ? playlist : [])) : [];
+  if (!normalized.length) normalized.push([]);
+  return normalized;
+}
+
+function defaultPlaylistName(index) {
+  return `Плей-лист ${index + 1}`;
+}
+
+function sanitizePlaylistName(value, index) {
+  if (typeof value !== 'string') return defaultPlaylistName(index);
+
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return defaultPlaylistName(index);
+  return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+}
+
+function normalizePlaylistNames(names, expectedLength) {
+  const result = [];
+
+  for (let index = 0; index < expectedLength; index += 1) {
+    const rawName = Array.isArray(names) ? names[index] : null;
+    result.push(sanitizePlaylistName(rawName, index));
+  }
+
+  return result;
+}
+
+function serializeLayout(playlists) {
+  return JSON.stringify(ensurePlaylists(playlists));
+}
+
+function layoutsEqual(left, right) {
+  return serializeLayout(left) === serializeLayout(right);
+}
+
+function serializePlaylistNames(names, lengthHint = null) {
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  return JSON.stringify(normalizePlaylistNames(names, expectedLength));
+}
+
+function playlistNamesEqual(left, right, expectedLength) {
+  return serializePlaylistNames(left, expectedLength) === serializePlaylistNames(right, expectedLength);
+}
+
+function normalizeLayoutForFiles(rawLayout, files) {
+  const normalized = ensurePlaylists(rawLayout);
+  const allowedFiles = new Set(Array.isArray(files) ? files : []);
+  const seen = new Set();
+
+  const filtered = normalized.map((playlist) => {
+    const clean = [];
+    playlist.forEach((file) => {
+      if (typeof file !== 'string') return;
+      if (!allowedFiles.has(file)) return;
+      if (seen.has(file)) return;
+      seen.add(file);
+      clean.push(file);
+    });
+    return clean;
+  });
+
+  const missing = Array.isArray(files) ? files.filter((file) => !seen.has(file)) : [];
+  if (missing.length) {
+    filtered[0] = filtered[0].concat(missing);
+  }
+
+  return ensurePlaylists(filtered);
+}
+
+function isServerLayoutEmpty(playlists) {
+  const normalized = ensurePlaylists(playlists);
+  return normalized.length === 1 && normalized[0].length === 0;
+}
+
+function readLegacyLocalLayout(files) {
+  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY) || localStorage.getItem(LEGACY_LAYOUT_KEY);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    return normalizeLayoutForFiles(parsed, files);
+  } catch (err) {
+    return null;
+  }
+}
+
 function syncLayoutFromDom() {
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
   const nextLayout = zones.map((zone) => {
@@ -496,16 +599,8 @@ function syncLayoutFromDom() {
       .map((card) => card.dataset.file)
       .filter(Boolean);
   });
-  layout = ensureZoneCount(nextLayout);
-  saveLayout();
-}
-
-function ensureZoneCount(zones) {
-  const normalized = Array.isArray(zones) ? zones.slice(0, MAX_ZONES) : [];
-  while (normalized.length < MAX_ZONES) {
-    normalized.push([]);
-  }
-  return normalized.map((zone) => (Array.isArray(zone) ? zone : []));
+  layout = ensurePlaylists(nextLayout);
+  playlistNames = normalizePlaylistNames(playlistNames, layout.length);
 }
 
 function resetTrackReferences() {
@@ -514,46 +609,190 @@ function resetTrackReferences() {
   progressByFile = new Map();
 }
 
-function loadLayout(files) {
-  availableFiles = files;
-  const raw = localStorage.getItem(SETTINGS_KEYS.layout);
-  let parsed = [];
-  try {
-    parsed = raw ? JSON.parse(raw) : [];
-  } catch (err) {
-    parsed = [];
+function applyIncomingLayoutState(nextLayout, nextPlaylistNames, version = null, render = true) {
+  const normalizedLayout = normalizeLayoutForFiles(nextLayout, availableFiles);
+  const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
+  const changed =
+    !layoutsEqual(layout, normalizedLayout) || !playlistNamesEqual(playlistNames, normalizedNames, normalizedLayout.length);
+
+  layout = normalizedLayout;
+  playlistNames = normalizedNames;
+
+  const numericVersion = Number(version);
+  if (Number.isFinite(numericVersion)) {
+    layoutVersion = numericVersion;
   }
 
-  parsed = ensureZoneCount(
-    parsed.slice(0, MAX_ZONES).map((zone) => (Array.isArray(zone) ? zone.filter((file) => files.includes(file)) : [])),
-  );
-
-  const used = new Set(parsed.flat());
-  const missing = files.filter((f) => !used.has(f));
-
-  const allZonesEmpty = parsed.every((zone) => zone.length === 0);
-  if (allZonesEmpty) {
-    parsed[0] = files.slice();
-  } else if (missing.length) {
-    parsed[0] = parsed[0].concat(missing);
+  if (changed && render) {
+    renderZones();
   }
 
-  layout = parsed;
-  saveLayout();
+  return changed;
 }
 
-function saveLayout() {
-  localStorage.setItem(SETTINGS_KEYS.layout, JSON.stringify(layout));
+async function fetchSharedLayoutState() {
+  const response = await fetch('/api/layout');
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось получить конфигурацию плей-листов');
+  }
+
+  return {
+    layout: Array.isArray(data.layout) ? data.layout : [[]],
+    playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
+    version: Number.isFinite(Number(data.version)) ? Number(data.version) : 0,
+  };
+}
+
+async function pushSharedLayout({ renderOnApply = true } = {}) {
+  const response = await fetch('/api/layout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ layout, playlistNames, clientId, version: layoutVersion }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось синхронизировать плей-листы');
+  }
+
+  applyIncomingLayoutState(data.layout, data.playlistNames, data.version, renderOnApply);
+}
+
+function clearLayoutStreamConnection() {
+  if (layoutStream) {
+    layoutStream.close();
+    layoutStream = null;
+  }
+  if (layoutStreamReconnectTimer !== null) {
+    clearTimeout(layoutStreamReconnectTimer);
+    layoutStreamReconnectTimer = null;
+  }
+}
+
+function scheduleLayoutStreamReconnect() {
+  if (layoutStreamReconnectTimer !== null) return;
+  layoutStreamReconnectTimer = setTimeout(() => {
+    layoutStreamReconnectTimer = null;
+    connectLayoutStream();
+  }, LAYOUT_STREAM_RETRY_MS);
+}
+
+function connectLayoutStream() {
+  if (typeof EventSource === 'undefined') return;
+  if (layoutStream) return;
+
+  const stream = new EventSource('/api/layout/stream');
+  layoutStream = stream;
+
+  stream.addEventListener('layout', (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+
+    if (!payload || !Array.isArray(payload.layout)) return;
+    applyIncomingLayoutState(payload.layout, payload.playlistNames, payload.version, true);
+  });
+
+  stream.onerror = () => {
+    if (layoutStream !== stream) return;
+    stream.close();
+    layoutStream = null;
+    scheduleLayoutStreamReconnect();
+  };
+}
+
+async function initializeLayoutState() {
+  const serverState = await fetchSharedLayoutState();
+  const incomingLayout = ensurePlaylists(serverState.layout);
+  const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
+
+  let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
+  let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
+  let shouldPush =
+    !layoutsEqual(incomingLayout, nextLayout) || !playlistNamesEqual(incomingNames, nextNames, nextLayout.length);
+
+  if (currentRole === 'host' && isServerLayoutEmpty(incomingLayout)) {
+    const legacyLayout = readLegacyLocalLayout(availableFiles);
+    if (legacyLayout && !layoutsEqual(legacyLayout, nextLayout)) {
+      nextLayout = legacyLayout;
+      nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
+      shouldPush = true;
+    }
+  }
+
+  layout = nextLayout;
+  playlistNames = nextNames;
+  layoutVersion = serverState.version;
+
+  if (shouldPush) {
+    await pushSharedLayout({ renderOnApply: false });
+  }
+
+  try {
+    localStorage.removeItem(LAYOUT_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_LAYOUT_KEY);
+  } catch (err) {
+    // Ignore storage cleanup errors.
+  }
+}
+
+async function addPlaylist() {
+  layout = ensurePlaylists(layout);
+  layout.push([]);
+  playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(`Добавлен плей-лист ${layout.length}.`);
+  } catch (err) {
+    console.error(err);
+    setStatus('Не удалось синхронизировать новый плей-лист.');
+  }
+}
+
+async function renamePlaylist(playlistIndex, rawName) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+
+  const nextNames = playlistNames.slice();
+  nextNames[playlistIndex] = rawName;
+  const normalizedNames = normalizePlaylistNames(nextNames, layout.length);
+
+  if (playlistNamesEqual(playlistNames, normalizedNames, layout.length)) {
+    renderZones();
+    return;
+  }
+
+  const previousNames = playlistNames.slice();
+  playlistNames = normalizedNames;
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(`Переименован плей-лист ${playlistIndex + 1}.`);
+  } catch (err) {
+    console.error(err);
+    playlistNames = previousNames;
+    renderZones();
+    setStatus('Не удалось синхронизировать название плей-листа.');
+  }
 }
 
 function renderZones() {
   zonesContainer.innerHTML = '';
-  layout = ensureZoneCount(layout);
+  layout = ensurePlaylists(layout);
 
-  layout.forEach((zoneFiles, zoneIndex) => {
+  layout.forEach((playlistFiles, playlistIndex) => {
     const zone = document.createElement('div');
     zone.className = 'zone';
-    zone.dataset.zoneIndex = zoneIndex.toString();
+    zone.dataset.zoneIndex = playlistIndex.toString();
 
     zone.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -562,36 +801,48 @@ function renderZones() {
     zone.addEventListener('dragleave', () => {
       zone.classList.remove('drag-over');
     });
-    zone.addEventListener('drop', (e) => handleDrop(e, zoneIndex));
+    zone.addEventListener('drop', (e) => handleDrop(e, playlistIndex));
+
+    const header = document.createElement('div');
+    header.className = 'playlist-header';
+    const titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.className = 'playlist-title-input';
+    titleInput.value = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+    titleInput.maxLength = PLAYLIST_NAME_MAX_LENGTH;
+    titleInput.addEventListener('change', () => {
+      renamePlaylist(playlistIndex, titleInput.value);
+    });
+    titleInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        titleInput.blur();
+      }
+    });
+    titleInput.addEventListener('blur', () => {
+      const normalized = sanitizePlaylistName(titleInput.value, playlistIndex);
+      if (titleInput.value !== normalized) {
+        titleInput.value = normalized;
+      }
+    });
+
+    const count = document.createElement('span');
+    count.className = 'playlist-count';
+    count.textContent = `${playlistFiles.length}`;
+    header.append(titleInput, count);
 
     const body = document.createElement('div');
     body.className = 'zone-body';
 
-    zoneFiles.forEach((file, rowIndex) => {
-      const hotkeyLabel = HOTKEY_ROWS[rowIndex]?.[zoneIndex] ?? null;
+    playlistFiles.forEach((file, rowIndex) => {
+      const hotkeyLabel = HOTKEY_ROWS[rowIndex]?.[playlistIndex] ?? null;
       body.appendChild(buildTrackCard(file, '/audio', { draggable: true, hotkeyLabel }));
     });
 
     body.addEventListener('dragover', (e) => applyDragPreview(body, e));
 
-    zone.append(body);
+    zone.append(header, body);
     zonesContainer.appendChild(zone);
-  });
-}
-
-function renderAssetTracks() {
-  if (!assetsContainer) return;
-  assetsContainer.innerHTML = '';
-
-  if (!assetFiles.length) {
-    assetsContainer.innerHTML = '<p class="assets-empty">В папке /assets/audio не найдено аудиофайлов.</p>';
-    return;
-  }
-
-  assetFiles.forEach((file, index) => {
-    const reversedIndex = assetFiles.length - 1 - index;
-    const hotkeyLabel = ASSET_HOTKEY_LABELS[reversedIndex] ?? null;
-    assetsContainer.appendChild(buildTrackCard(file, '/assets/audio', { draggable: false, hotkeyLabel }));
   });
 }
 
@@ -600,7 +851,7 @@ function syncCurrentTrackState() {
   setButtonPlaying(currentTrack.key, !!(currentAudio && !currentAudio.paused));
 }
 
-function handleDrop(event, targetZoneIndex) {
+async function handleDrop(event, targetZoneIndex) {
   event.preventDefault();
   const file = event.dataTransfer.getData('text/plain');
   const sourceZoneIndex = findZoneIndex(file);
@@ -612,7 +863,13 @@ function handleDrop(event, targetZoneIndex) {
 
   syncLayoutFromDom();
   renderZones();
-  setStatus('Раскладка обновлена и сохранена.');
+  try {
+    await pushSharedLayout();
+    setStatus('Плей-листы обновлены и синхронизированы.');
+  } catch (err) {
+    console.error(err);
+    setStatus('Не удалось синхронизировать плей-листы.');
+  }
 }
 
 function findZoneIndex(file) {
@@ -632,20 +889,9 @@ async function fetchFileList(url) {
 }
 
 async function loadTracks() {
-  const [audioResult, assetResult] = await Promise.all([
-    fetchFileList('/api/audio'),
-    fetchFileList('/api/assets-audio'),
-  ]);
-
-  assetFiles = assetResult.files;
+  clearLayoutStreamConnection();
+  const audioResult = await fetchFileList('/api/audio');
   resetTrackReferences();
-  renderAssetTracks();
-
-  if (assetResult.ok) {
-    setAssetsStatus('');
-  } else {
-    setAssetsStatus('Ошибка загрузки списка файлов из /assets/audio.');
-  }
 
   if (!audioResult.ok) {
     renderEmpty();
@@ -663,10 +909,19 @@ async function loadTracks() {
     return;
   }
 
-  loadLayout(availableFiles);
+  try {
+    await initializeLayoutState();
+  } catch (err) {
+    console.error(err);
+    layout = normalizeLayoutForFiles([availableFiles.slice()], availableFiles);
+    playlistNames = normalizePlaylistNames([], layout.length);
+    setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
+  }
+
   renderZones();
   syncCurrentTrackState();
   setStatus(`Найдено файлов: ${availableFiles.length}`);
+  connectLayoutStream();
 }
 
 function resetFadeState() {
@@ -924,6 +1179,11 @@ function initServerControls() {
   stopServerBtn.addEventListener('click', stopServer);
 }
 
+function initPlaylistControls() {
+  if (!addPlaylistBtn) return;
+  addPlaylistBtn.addEventListener('click', addPlaylist);
+}
+
 function initUpdater() {
   if (allowPrereleaseInput) {
     allowPrereleaseInput.checked = loadBooleanSetting(SETTINGS_KEYS.allowPrerelease, false);
@@ -1112,23 +1372,12 @@ function handleHotkey(event) {
     return;
   }
   const rowIndex = HOTKEY_CODES.findIndex((row) => row.includes(code));
-  if (rowIndex === -1) {
-    const assetIndex = ASSET_HOTKEY_CODES.indexOf(code);
-    if (assetIndex === -1) return;
-    const reversedIndex = assetFiles.length - 1 - assetIndex;
-    const file = assetFiles[reversedIndex];
-    if (!file) return;
-    const fileKey = trackKey(file, '/assets/audio');
-    const button = buttonsByFile.get(fileKey);
-    if (!button) return;
-    event.preventDefault();
-    handlePlay(file, button, '/assets/audio');
-    return;
-  }
-  const zoneIndex = HOTKEY_CODES[rowIndex].indexOf(code);
-  const zoneFiles = layout[zoneIndex];
-  if (!zoneFiles || zoneFiles.length <= rowIndex) return;
-  const file = zoneFiles[rowIndex];
+  if (rowIndex === -1) return;
+
+  const playlistIndex = HOTKEY_CODES[rowIndex].indexOf(code);
+  const playlistFiles = layout[playlistIndex];
+  if (!playlistFiles || playlistFiles.length <= rowIndex) return;
+  const file = playlistFiles[rowIndex];
   if (!file) return;
 
   const fileKey = trackKey(file, '/audio');
@@ -1145,7 +1394,9 @@ async function bootstrap() {
   initSettings();
   initSidebarToggle();
   initServerControls();
+  initPlaylistControls();
   initUpdater();
+  window.addEventListener('beforeunload', clearLayoutStreamConnection);
   loadTracks();
   loadVersion();
   document.addEventListener('keydown', handleHotkey);

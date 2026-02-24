@@ -1,6 +1,7 @@
 # Ignore audio folder
 audio/
 update-state.json
+layout-state.json
 
 # Ignore IDE specific files
 .vscode/

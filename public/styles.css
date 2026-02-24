@@ -92,7 +92,11 @@ body {
 
 .content-header {
   display: flex;
-  justify-content: flex-start;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
 }
 
 .panel {
@@ -113,35 +117,12 @@ body {
 }
 
 .zones-panel {
-  width: fit-content;
-  max-width: 1600px;
-}
-
-.assets-panel {
   width: 100%;
-  max-width: 1600px;
-  margin: 0 auto;
+  margin: 0;
   padding: 0;
-}
-
-.assets-status {
-  margin: 0 0 10px;
-  text-align: center;
-}
-
-.assets-tracks {
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-}
-
-.assets-empty {
-  width: 100%;
-  text-align: center;
-  color: var(--muted);
-  margin: 12px 0 4px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
 
 .settings {
@@ -181,7 +162,8 @@ body {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
   min-height: 135px;
   cursor: grab;
-  max-width: 250px;
+  width: 100%;
+  max-width: none;
 }
 
 .zones-actions {
@@ -202,7 +184,10 @@ body {
   display: flex;
   gap: 12px;
   flex-wrap: nowrap;
-  max-width: 1600px;
+  width: 100%;
+  overflow-x: auto;
+  align-items: stretch;
+  padding-bottom: 6px;
 }
 
 .zone {
@@ -215,7 +200,47 @@ body {
   flex-direction: column;
   gap: 10px;
   min-width: 272px;
-  flex: 0 0 auto;
+  flex: 1 1 300px;
+}
+
+.playlist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.playlist-title-input {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+.playlist-title-input:focus,
+.playlist-title-input:focus-visible {
+  outline: none;
+  border-color: var(--border);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.playlist-count {
+  min-width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--muted);
 }
 
 .zone-body {

@@ -40,7 +40,6 @@ loadEnvFile();
 
 const PORT = process.env.PORT || 3000;
 const AUDIO_DIR = path.join(__dirname, 'audio');
-const ASSETS_AUDIO_DIR = path.join(__dirname, 'assets', 'audio');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const USERS_DIR = path.join(__dirname, 'users');
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
@@ -51,22 +50,25 @@ const ONE_HOUR_MS = 60 * 60 * 1000;
 const githubToken = process.env.GITHUB_TOKEN || null;
 const UPDATE_CACHE_WINDOW_MS = githubToken ? 0 : ONE_HOUR_MS;
 const UPDATE_STATE_PATH = path.join(__dirname, 'update-state.json');
+const LAYOUT_STATE_PATH = path.join(__dirname, 'layout-state.json');
 
 const execFileAsync = promisify(execFile);
 const pipelineAsync = promisify(pipeline);
 
 const AUDIO_DIR_RESOLVED = path.resolve(AUDIO_DIR);
-const ASSETS_AUDIO_DIR_RESOLVED = path.resolve(ASSETS_AUDIO_DIR);
 const PUBLIC_DIR_RESOLVED = path.resolve(PUBLIC_DIR);
 const USERS_DIR_RESOLVED = path.resolve(USERS_DIR);
 const SESSION_COOKIE_NAME = 'chkg_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
+const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
+const PLAYLIST_NAME_MAX_LENGTH = 80;
 const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 
 let shuttingDown = false;
 let updateInProgress = false;
 const authSessions = new Map();
+const layoutSubscribers = new Set();
 const githubCache = {
   latestRelease: { etag: null, data: null },
   releasesList: { etag: null, data: null },
@@ -141,6 +143,156 @@ const updateCheckCache = {
   stable: { lastChecked: persistedUpdateState.stable.lastChecked, result: persistedUpdateState.stable.result },
   prerelease: { lastChecked: persistedUpdateState.prerelease.lastChecked, result: persistedUpdateState.prerelease.result },
 };
+
+function getDefaultLayoutState() {
+  return {
+    version: 0,
+    updatedAt: 0,
+    layout: [[]],
+    playlistNames: ['Плей-лист 1'],
+  };
+}
+
+function defaultPlaylistName(index) {
+  return `Плей-лист ${index + 1}`;
+}
+
+function sanitizePlaylistName(value, index) {
+  if (typeof value !== 'string') {
+    return defaultPlaylistName(index);
+  }
+
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return defaultPlaylistName(index);
+  }
+
+  return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+}
+
+function sanitizeLayout(layout) {
+  if (!Array.isArray(layout)) return null;
+
+  const seen = new Set();
+  const normalized = [];
+
+  layout.forEach((playlist) => {
+    if (!Array.isArray(playlist)) return;
+
+    const clean = [];
+    playlist.forEach((value) => {
+      if (typeof value !== 'string') return;
+      const file = value.trim();
+      if (!file) return;
+      if (seen.has(file)) return;
+      seen.add(file);
+      clean.push(file);
+    });
+
+    normalized.push(clean);
+  });
+
+  if (!normalized.length) {
+    normalized.push([]);
+  }
+
+  return normalized;
+}
+
+function normalizePlaylistNames(playlistNames, layoutLength) {
+  const result = [];
+
+  for (let index = 0; index < layoutLength; index += 1) {
+    const rawName = Array.isArray(playlistNames) ? playlistNames[index] : null;
+    result.push(sanitizePlaylistName(rawName, index));
+  }
+
+  return result;
+}
+
+function loadPersistedLayoutState() {
+  try {
+    if (!fs.existsSync(LAYOUT_STATE_PATH)) {
+      return getDefaultLayoutState();
+    }
+
+    const raw = fs.readFileSync(LAYOUT_STATE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const sanitizedLayout = sanitizeLayout(parsed.layout);
+    if (!sanitizedLayout) {
+      return getDefaultLayoutState();
+    }
+    const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
+
+    const version = Number(parsed.version);
+    const updatedAt = Number(parsed.updatedAt);
+
+    return {
+      version: Number.isFinite(version) && version >= 0 ? version : 0,
+      updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
+      layout: sanitizedLayout,
+      playlistNames: sanitizedNames,
+    };
+  } catch (err) {
+    console.error('Failed to load layout state cache', err);
+    return getDefaultLayoutState();
+  }
+}
+
+function persistLayoutState(state) {
+  try {
+    fs.writeFileSync(LAYOUT_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist layout state cache', err);
+  }
+}
+
+function sanitizeClientId(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, 128);
+}
+
+function buildLayoutPayload(sourceClientId = null) {
+  return {
+    layout: sharedLayoutState.layout,
+    playlistNames: sharedLayoutState.playlistNames,
+    version: sharedLayoutState.version,
+    updatedAt: sharedLayoutState.updatedAt,
+    sourceClientId,
+  };
+}
+
+function sendSseEvent(res, eventName, payload) {
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcastLayoutUpdate(sourceClientId = null) {
+  const payload = buildLayoutPayload(sourceClientId);
+
+  for (const res of layoutSubscribers) {
+    try {
+      sendSseEvent(res, 'layout', payload);
+    } catch (err) {
+      layoutSubscribers.delete(res);
+    }
+  }
+}
+
+function keepLayoutStreamAlive() {
+  for (const res of layoutSubscribers) {
+    try {
+      res.write(': ping\n\n');
+    } catch (err) {
+      layoutSubscribers.delete(res);
+    }
+  }
+}
+
+let sharedLayoutState = loadPersistedLayoutState();
+setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -787,12 +939,74 @@ function handleApiAudio(req, res) {
   readAudioDirectory(AUDIO_DIR, res);
 }
 
-function handleApiAssetsAudio(req, res) {
-  readAudioDirectory(ASSETS_AUDIO_DIR, res);
-}
-
 function handleApiVersion(req, res) {
   sendJson(res, 200, { version: appVersion });
+}
+
+function handleApiLayoutGet(req, res) {
+  sendJson(res, 200, buildLayoutPayload(null));
+}
+
+async function handleApiLayoutUpdate(req, res) {
+  let body;
+  try {
+    body = await readJsonBody(req, LAYOUT_BODY_LIMIT_BYTES);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const nextLayout = sanitizeLayout(body.layout);
+  if (!nextLayout) {
+    sendJson(res, 400, { error: 'Неверный формат плей-листов' });
+    return;
+  }
+  const nextPlaylistNames = normalizePlaylistNames(body.playlistNames, nextLayout.length);
+
+  const sourceClientId = sanitizeClientId(body.clientId);
+  const hasChanged =
+    JSON.stringify(nextLayout) !== JSON.stringify(sharedLayoutState.layout) ||
+    JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames);
+
+  if (hasChanged) {
+    sharedLayoutState = {
+      layout: nextLayout,
+      playlistNames: nextPlaylistNames,
+      version: sharedLayoutState.version + 1,
+      updatedAt: Date.now(),
+    };
+    persistLayoutState(sharedLayoutState);
+    broadcastLayoutUpdate(sourceClientId);
+  }
+
+  sendJson(res, 200, buildLayoutPayload(sourceClientId));
+}
+
+function handleApiLayoutStream(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(': connected\n\n');
+
+  layoutSubscribers.add(res);
+  sendSseEvent(res, 'layout', buildLayoutPayload(null));
+
+  req.on('close', () => {
+    layoutSubscribers.delete(res);
+  });
 }
 
 function handleAuthSession(req, res) {
@@ -1020,9 +1234,35 @@ const server = http.createServer((req, res) => {
     if (!auth) return;
   }
 
-  if (pathname.startsWith('/audio/') || pathname.startsWith('/assets/audio/')) {
+  if (pathname.startsWith('/audio/')) {
     const auth = requireAuthorizedRequest(req, res, 'text');
     if (!auth) return;
+  }
+
+  if (pathname === '/api/layout/stream') {
+    if (req.method !== 'GET') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleApiLayoutStream(req, res);
+    return;
+  }
+
+  if (pathname === '/api/layout') {
+    if (req.method === 'GET') {
+      handleApiLayoutGet(req, res);
+      return;
+    }
+
+    if (req.method === 'POST') {
+      handleApiLayoutUpdate(req, res);
+      return;
+    }
+
+    res.writeHead(405);
+    res.end('Method Not Allowed');
+    return;
   }
 
   if (pathname === '/api/shutdown') {
@@ -1049,16 +1289,6 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleApiAudio(req, res);
-    return;
-  }
-
-  if (pathname === '/api/assets-audio') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiAssetsAudio(req, res);
     return;
   }
 
@@ -1100,16 +1330,6 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleAudioFile(req, res, pathname, AUDIO_DIR_RESOLVED, '/audio/');
-    return;
-  }
-
-  if (pathname.startsWith('/assets/audio/')) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAudioFile(req, res, pathname, ASSETS_AUDIO_DIR_RESOLVED, '/assets/audio/');
     return;
   }
 
