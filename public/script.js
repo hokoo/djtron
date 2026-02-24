@@ -785,6 +785,98 @@ async function renamePlaylist(playlistIndex, rawName) {
   }
 }
 
+function buildPlaylistCoverage(layoutState) {
+  const coverage = new Map();
+  const normalizedLayout = ensurePlaylists(layoutState);
+
+  normalizedLayout.forEach((playlist, playlistIndex) => {
+    const filesInPlaylist = new Set();
+
+    playlist.forEach((file) => {
+      if (typeof file !== 'string' || !file || filesInPlaylist.has(file)) return;
+      filesInPlaylist.add(file);
+
+      if (!coverage.has(file)) {
+        coverage.set(file, new Set([playlistIndex]));
+        return;
+      }
+
+      coverage.get(file).add(playlistIndex);
+    });
+  });
+
+  return coverage;
+}
+
+function getPlaylistDeleteEligibility(playlistIndex) {
+  const normalizedLayout = ensurePlaylists(layout);
+
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= normalizedLayout.length) {
+    return { canDelete: false, reason: 'Плей-лист не найден.' };
+  }
+
+  if (normalizedLayout.length <= 1) {
+    return { canDelete: false, reason: 'Нельзя удалить последний плей-лист.' };
+  }
+
+  const playlist = normalizedLayout[playlistIndex];
+  if (playlist.length === 0) {
+    return { canDelete: true, reason: '' };
+  }
+
+  const coverage = buildPlaylistCoverage(normalizedLayout);
+  const everyTrackExistsInOtherPlaylists = playlist.every((file) => {
+    const owners = coverage.get(file);
+    if (!owners) return false;
+    if (owners.size > 1) return true;
+    return !owners.has(playlistIndex);
+  });
+
+  if (everyTrackExistsInOtherPlaylists) {
+    return { canDelete: true, reason: '' };
+  }
+
+  return { canDelete: false, reason: 'В этом плей-листе есть треки, которых нет в других плей-листах.' };
+}
+
+async function deletePlaylist(playlistIndex) {
+  const eligibility = getPlaylistDeleteEligibility(playlistIndex);
+  if (!eligibility.canDelete) {
+    setStatus(`Удаление запрещено: ${eligibility.reason}`);
+    return;
+  }
+
+  const safeTitle = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+  const confirmed = window.confirm(`Удалить плей-лист "${safeTitle}"?`);
+  if (!confirmed) {
+    return;
+  }
+
+  const previousLayout = ensurePlaylists(layout).map((playlist) => playlist.slice());
+  const previousNames = playlistNames.slice();
+
+  const nextLayout = previousLayout.map((playlist) => playlist.slice());
+  nextLayout.splice(playlistIndex, 1);
+
+  const nextNames = previousNames.slice();
+  nextNames.splice(playlistIndex, 1);
+
+  layout = ensurePlaylists(nextLayout);
+  playlistNames = normalizePlaylistNames(nextNames, layout.length);
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(`Плей-лист "${safeTitle}" удален.`);
+  } catch (err) {
+    console.error(err);
+    layout = previousLayout;
+    playlistNames = previousNames;
+    renderZones();
+    setStatus('Не удалось синхронизировать удаление плей-листа.');
+  }
+}
+
 function renderZones() {
   zonesContainer.innerHTML = '';
   layout = ensurePlaylists(layout);
@@ -829,7 +921,29 @@ function renderZones() {
     const count = document.createElement('span');
     count.className = 'playlist-count';
     count.textContent = `${playlistFiles.length}`;
-    header.append(titleInput, count);
+
+    const headerMeta = document.createElement('div');
+    headerMeta.className = 'playlist-header-meta';
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'playlist-delete-btn';
+    deleteButton.textContent = 'Удалить';
+    const deleteEligibility = getPlaylistDeleteEligibility(playlistIndex);
+    deleteButton.title = deleteEligibility.canDelete
+      ? 'Удалить плей-лист'
+      : `Удаление недоступно: ${deleteEligibility.reason}`;
+    if (!deleteEligibility.canDelete) {
+      deleteButton.classList.add('is-blocked');
+    }
+    deleteButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deletePlaylist(playlistIndex);
+    });
+
+    headerMeta.append(count, deleteButton);
+    header.append(titleInput, headerMeta);
 
     const body = document.createElement('div');
     body.className = 'zone-body';

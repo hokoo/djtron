@@ -210,6 +210,12 @@ body {
   gap: 8px;
 }
 
+.playlist-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .playlist-title-input {
   flex: 1;
   min-width: 0;
@@ -241,6 +247,31 @@ body {
   font-weight: 700;
   border: 1px solid var(--border);
   color: var(--muted);
+}
+
+.playlist-delete-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.playlist-delete-btn:hover,
+.playlist-delete-btn:focus-visible {
+  outline: none;
+  border-color: var(--border-strong);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.playlist-delete-btn.is-blocked {
+  opacity: 0.75;
 }
 
 .zone-body {
