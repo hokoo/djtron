@@ -50,6 +50,9 @@ const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
+const NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX = 6;
+const NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS = 320;
+const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
 const PLAYLIST_TYPE_MANUAL = 'manual';
 const PLAYLIST_TYPE_FOLDER = 'folder';
 
@@ -106,6 +109,11 @@ let desktopDragGhostOffsetX = 16;
 let desktopDragGhostOffsetY = 16;
 let emptyDragImage = null;
 let trashDropzoneEl = null;
+let nowPlayingSeekActive = false;
+let nowPlayingSeekMoved = false;
+let nowPlayingSeekPointerId = null;
+let nowPlayingSeekStartX = 0;
+let nowPlayingSeekSuppressClickUntil = 0;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -1500,6 +1508,9 @@ function syncNowPlayingPanel() {
   activeDurationTrackKey = nextActiveKey;
 
   if (!currentTrack || !currentAudio) {
+    if (nowPlayingSeekActive) {
+      cleanupNowPlayingSeekInteraction();
+    }
     nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
     nowPlayingControlLabelEl.textContent = '▶';
     nowPlayingControlBtn.disabled = true;
@@ -1515,6 +1526,158 @@ function syncNowPlayingPanel() {
   setNowPlayingTime(getCurrentTrackRemainingSeconds(), { useCeil: true });
   refreshTrackDurationLabels(currentTrack.key);
   requestHostPlaybackSync(false);
+}
+
+function getCurrentTrackDurationSeconds() {
+  if (!currentTrack || !currentAudio) return null;
+  return getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
+}
+
+function canSeekNowPlaying() {
+  if (currentRole !== 'slave') return false;
+  if (!currentTrack || !currentAudio) return false;
+  const duration = getCurrentTrackDurationSeconds();
+  return Boolean(Number.isFinite(duration) && duration > 0);
+}
+
+function resolveNowPlayingSeekRatioFromClientX(clientX) {
+  if (!nowPlayingControlBtn || !Number.isFinite(clientX)) return null;
+  const rect = nowPlayingControlBtn.getBoundingClientRect();
+  if (!Number.isFinite(rect.width) || rect.width <= 0) return null;
+  const ratio = (clientX - rect.left) / rect.width;
+  return Math.max(0, Math.min(1, ratio));
+}
+
+function isNowPlayingToggleZone(clientX, clientY) {
+  if (!nowPlayingControlBtn || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  const rect = nowPlayingControlBtn.getBoundingClientRect();
+  if (clientY < rect.top || clientY > rect.bottom) return false;
+  const centerX = rect.left + rect.width / 2;
+  return Math.abs(clientX - centerX) <= NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX;
+}
+
+function applyNowPlayingSeekFromClientX(clientX) {
+  if (!canSeekNowPlaying() || !currentTrack || !currentAudio) return false;
+  const ratio = resolveNowPlayingSeekRatioFromClientX(clientX);
+  if (ratio === null) return false;
+
+  const duration = getCurrentTrackDurationSeconds();
+  if (!Number.isFinite(duration) || duration <= 0) return false;
+  const nextTime = Math.max(0, Math.min(duration, ratio * duration));
+
+  try {
+    if (typeof currentAudio.fastSeek === 'function') {
+      currentAudio.fastSeek(nextTime);
+    } else {
+      currentAudio.currentTime = nextTime;
+    }
+  } catch (err) {
+    try {
+      currentAudio.currentTime = nextTime;
+    } catch (fallbackErr) {
+      return false;
+    }
+  }
+
+  updateProgress(currentTrack.key, nextTime, duration);
+  syncNowPlayingPanel();
+  return true;
+}
+
+function cleanupNowPlayingSeekInteraction() {
+  if (nowPlayingControlBtn) {
+    nowPlayingControlBtn.classList.remove('is-seeking');
+    if (nowPlayingSeekPointerId !== null && typeof nowPlayingControlBtn.releasePointerCapture === 'function') {
+      try {
+        if (nowPlayingControlBtn.hasPointerCapture && nowPlayingControlBtn.hasPointerCapture(nowPlayingSeekPointerId)) {
+          nowPlayingControlBtn.releasePointerCapture(nowPlayingSeekPointerId);
+        }
+      } catch (err) {
+        // ignore pointer capture release errors
+      }
+    }
+  }
+
+  nowPlayingSeekActive = false;
+  nowPlayingSeekMoved = false;
+  nowPlayingSeekPointerId = null;
+  nowPlayingSeekStartX = 0;
+  window.removeEventListener('pointermove', onNowPlayingSeekPointerMove, true);
+  window.removeEventListener('pointerup', onNowPlayingSeekPointerUp, true);
+  window.removeEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
+}
+
+function onNowPlayingSeekPointerMove(event) {
+  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+  const threshold = event.pointerType === 'touch' ? 2 : NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX;
+  const distance = Math.abs(event.clientX - nowPlayingSeekStartX);
+  if (!nowPlayingSeekMoved && distance < threshold) return;
+  nowPlayingSeekMoved = true;
+  if (nowPlayingControlBtn) {
+    nowPlayingControlBtn.classList.add('is-seeking');
+  }
+  event.preventDefault();
+  applyNowPlayingSeekFromClientX(event.clientX);
+}
+
+function onNowPlayingSeekPointerUp(event) {
+  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+
+  if (nowPlayingSeekMoved) {
+    event.preventDefault();
+    applyNowPlayingSeekFromClientX(event.clientX);
+    nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
+  } else if (
+    event.pointerType === 'touch' &&
+    !isNowPlayingToggleZone(event.clientX, event.clientY) &&
+    applyNowPlayingSeekFromClientX(event.clientX)
+  ) {
+    // Touch tap outside the center toggle zone seeks immediately.
+    nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
+  }
+
+  cleanupNowPlayingSeekInteraction();
+}
+
+function onNowPlayingSeekPointerCancel(event) {
+  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+  cleanupNowPlayingSeekInteraction();
+}
+
+function onNowPlayingControlPointerDown(event) {
+  if (!nowPlayingControlBtn) return;
+  if (!canSeekNowPlaying()) return;
+  if (!event.isPrimary) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (nowPlayingSeekActive) {
+    cleanupNowPlayingSeekInteraction();
+  }
+
+  nowPlayingSeekActive = true;
+  nowPlayingSeekMoved = false;
+  nowPlayingSeekPointerId = event.pointerId;
+  nowPlayingSeekStartX = event.clientX;
+
+  if (typeof nowPlayingControlBtn.setPointerCapture === 'function') {
+    try {
+      nowPlayingControlBtn.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // ignore pointer capture errors
+    }
+  }
+
+  window.addEventListener('pointermove', onNowPlayingSeekPointerMove, true);
+  window.addEventListener('pointerup', onNowPlayingSeekPointerUp, true);
+  window.addEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
+}
+
+function onNowPlayingControlClick(event) {
+  if (Date.now() < nowPlayingSeekSuppressClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  toggleNowPlayingPlayback();
 }
 
 async function toggleNowPlayingPlayback() {
@@ -3418,7 +3581,8 @@ function initPlaylistControls() {
 
 function initNowPlayingControls() {
   if (!nowPlayingControlBtn) return;
-  nowPlayingControlBtn.addEventListener('click', toggleNowPlayingPlayback);
+  nowPlayingControlBtn.addEventListener('pointerdown', onNowPlayingControlPointerDown);
+  nowPlayingControlBtn.addEventListener('click', onNowPlayingControlClick);
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
 }
@@ -3603,6 +3767,7 @@ async function bootstrap() {
   window.addEventListener('beforeunload', () => {
     clearLayoutStreamConnection();
     stopHostProgressLoop();
+    cleanupNowPlayingSeekInteraction();
     clearTouchCopyHold();
     if (touchCopyDragActive) {
       cleanupTouchCopyDrag({ restoreLayout: false });

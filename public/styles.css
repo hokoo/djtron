@@ -225,6 +225,18 @@ body[data-role='slave'] #hostNowPlaying {
   box-shadow: none;
 }
 
+body[data-role='slave'] #nowPlayingControl.is-seeking {
+  cursor: ew-resize;
+}
+
+body[data-role='slave'] #nowPlayingControl {
+  touch-action: none;
+}
+
+body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__progress {
+  transition: none;
+}
+
 #addPlaylist {
   justify-self: end;
   align-self: center;
