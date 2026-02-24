@@ -63,6 +63,7 @@ const SESSION_COOKIE_NAME = 'chkg_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
 const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
+const PLAYBACK_BODY_LIMIT_BYTES = 32 * 1024;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
@@ -152,6 +153,19 @@ function getDefaultLayoutState() {
     updatedAt: 0,
     layout: [[]],
     playlistNames: ['Плей-лист 1'],
+    playlistAutoplay: [false],
+  };
+}
+
+function getDefaultPlaybackState() {
+  return {
+    trackFile: null,
+    paused: false,
+    currentTime: 0,
+    duration: null,
+    playlistIndex: null,
+    playlistPosition: null,
+    updatedAt: 0,
   };
 }
 
@@ -209,6 +223,52 @@ function normalizePlaylistNames(playlistNames, layoutLength) {
   return result;
 }
 
+function normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
+  const result = [];
+
+  for (let index = 0; index < layoutLength; index += 1) {
+    const rawValue = Array.isArray(playlistAutoplay) ? playlistAutoplay[index] : false;
+    result.push(Boolean(rawValue));
+  }
+
+  return result;
+}
+
+function normalizePlaylistTrackIndex(value) {
+  const numeric = Number.parseInt(value, 10);
+  if (!Number.isInteger(numeric) || numeric < 0) return null;
+  return numeric;
+}
+
+function sanitizePlaybackState(rawPlayback) {
+  const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
+  if (!trackFile) {
+    return {
+      ...getDefaultPlaybackState(),
+      updatedAt: Date.now(),
+    };
+  }
+
+  const rawCurrentTime = Number(rawPlayback.currentTime);
+  let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
+
+  const rawDuration = Number(rawPlayback.duration);
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+  if (duration !== null && currentTime > duration) {
+    currentTime = duration;
+  }
+
+  return {
+    trackFile,
+    paused: Boolean(rawPlayback.paused),
+    currentTime,
+    duration,
+    playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
+    updatedAt: Date.now(),
+  };
+}
+
 function loadPersistedLayoutState() {
   try {
     if (!fs.existsSync(LAYOUT_STATE_PATH)) {
@@ -222,6 +282,7 @@ function loadPersistedLayoutState() {
       return getDefaultLayoutState();
     }
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
+    const sanitizedAutoplay = normalizePlaylistAutoplayFlags(parsed.playlistAutoplay, sanitizedLayout.length);
 
     const version = Number(parsed.version);
     const updatedAt = Number(parsed.updatedAt);
@@ -231,6 +292,7 @@ function loadPersistedLayoutState() {
       updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
       layout: sanitizedLayout,
       playlistNames: sanitizedNames,
+      playlistAutoplay: sanitizedAutoplay,
     };
   } catch (err) {
     console.error('Failed to load layout state cache', err);
@@ -253,12 +315,37 @@ function sanitizeClientId(value) {
   return normalized.slice(0, 128);
 }
 
+function serializePlaybackState(state) {
+  return JSON.stringify({
+    trackFile: typeof state.trackFile === 'string' ? state.trackFile : null,
+    paused: Boolean(state.paused),
+    currentTime: Number.isFinite(state.currentTime) && state.currentTime >= 0 ? state.currentTime : 0,
+    duration: Number.isFinite(state.duration) && state.duration > 0 ? state.duration : null,
+    playlistIndex: normalizePlaylistTrackIndex(state.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(state.playlistPosition),
+  });
+}
+
 function buildLayoutPayload(sourceClientId = null) {
   return {
     layout: sharedLayoutState.layout,
     playlistNames: sharedLayoutState.playlistNames,
+    playlistAutoplay: sharedLayoutState.playlistAutoplay,
     version: sharedLayoutState.version,
     updatedAt: sharedLayoutState.updatedAt,
+    sourceClientId,
+  };
+}
+
+function buildPlaybackPayload(sourceClientId = null) {
+  return {
+    trackFile: sharedPlaybackState.trackFile,
+    paused: sharedPlaybackState.paused,
+    currentTime: sharedPlaybackState.currentTime,
+    duration: sharedPlaybackState.duration,
+    playlistIndex: sharedPlaybackState.playlistIndex,
+    playlistPosition: sharedPlaybackState.playlistPosition,
+    updatedAt: sharedPlaybackState.updatedAt,
     sourceClientId,
   };
 }
@@ -280,6 +367,18 @@ function broadcastLayoutUpdate(sourceClientId = null) {
   }
 }
 
+function broadcastPlaybackUpdate(sourceClientId = null) {
+  const payload = buildPlaybackPayload(sourceClientId);
+
+  for (const res of layoutSubscribers) {
+    try {
+      sendSseEvent(res, 'playback', payload);
+    } catch (err) {
+      layoutSubscribers.delete(res);
+    }
+  }
+}
+
 function keepLayoutStreamAlive() {
   for (const res of layoutSubscribers) {
     try {
@@ -291,6 +390,7 @@ function keepLayoutStreamAlive() {
 }
 
 let sharedLayoutState = loadPersistedLayoutState();
+let sharedPlaybackState = getDefaultPlaybackState();
 setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
 
 function delay(ms) {
@@ -1025,7 +1125,12 @@ function handleApiLayoutGet(req, res) {
   sendJson(res, 200, buildLayoutPayload(null));
 }
 
+function handleApiPlaybackGet(req, res) {
+  sendJson(res, 200, buildPlaybackPayload(null));
+}
+
 async function handleApiLayoutUpdate(req, res) {
+  const auth = getAuthState(req);
   let body;
   try {
     body = await readJsonBody(req, LAYOUT_BODY_LIMIT_BYTES);
@@ -1050,16 +1155,21 @@ async function handleApiLayoutUpdate(req, res) {
     return;
   }
   const nextPlaylistNames = normalizePlaylistNames(body.playlistNames, nextLayout.length);
+  const nextPlaylistAutoplay = auth.isServer
+    ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
+    : normalizePlaylistAutoplayFlags(sharedLayoutState.playlistAutoplay, nextLayout.length);
 
   const sourceClientId = sanitizeClientId(body.clientId);
   const hasChanged =
     JSON.stringify(nextLayout) !== JSON.stringify(sharedLayoutState.layout) ||
-    JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames);
+    JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames) ||
+    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay);
 
   if (hasChanged) {
     sharedLayoutState = {
       layout: nextLayout,
       playlistNames: nextPlaylistNames,
+      playlistAutoplay: nextPlaylistAutoplay,
       version: sharedLayoutState.version + 1,
       updatedAt: Date.now(),
     };
@@ -1068,6 +1178,43 @@ async function handleApiLayoutUpdate(req, res) {
   }
 
   sendJson(res, 200, buildLayoutPayload(sourceClientId));
+}
+
+async function handleApiPlaybackUpdate(req, res) {
+  const auth = getAuthState(req);
+  if (!auth.isServer) {
+    sendJson(res, 403, { error: 'Только хост может обновлять состояние воспроизведения' });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req, PLAYBACK_BODY_LIMIT_BYTES);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const nextState = sanitizePlaybackState(body);
+  const sourceClientId = sanitizeClientId(body.clientId);
+  const hasChanged = serializePlaybackState(nextState) !== serializePlaybackState(sharedPlaybackState);
+
+  if (hasChanged) {
+    sharedPlaybackState = nextState;
+    broadcastPlaybackUpdate(sourceClientId);
+  }
+
+  sendJson(res, 200, buildPlaybackPayload(sourceClientId));
 }
 
 function handleApiLayoutStream(req, res) {
@@ -1081,6 +1228,7 @@ function handleApiLayoutStream(req, res) {
 
   layoutSubscribers.add(res);
   sendSseEvent(res, 'layout', buildLayoutPayload(null));
+  sendSseEvent(res, 'playback', buildPlaybackPayload(null));
 
   req.on('close', () => {
     layoutSubscribers.delete(res);
@@ -1335,6 +1483,22 @@ const server = http.createServer((req, res) => {
 
     if (req.method === 'POST') {
       handleApiLayoutUpdate(req, res);
+      return;
+    }
+
+    res.writeHead(405);
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  if (pathname === '/api/playback') {
+    if (req.method === 'GET') {
+      handleApiPlaybackGet(req, res);
+      return;
+    }
+
+    if (req.method === 'POST') {
+      handleApiPlaybackUpdate(req, res);
       return;
     }
 

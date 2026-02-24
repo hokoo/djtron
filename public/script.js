@@ -21,6 +21,15 @@ const authUsernameInput = document.getElementById('authUsername');
 const authPasswordInput = document.getElementById('authPassword');
 const authSubmit = document.getElementById('authSubmit');
 const authError = document.getElementById('authError');
+const nowPlayingTitleEl = document.getElementById('nowPlayingTitle');
+const nowPlayingControlBtn = document.getElementById('nowPlayingControl');
+const nowPlayingControlLabelEl = document.getElementById('nowPlayingControlLabel');
+const nowPlayingProgressEl = document.getElementById('nowPlayingProgress');
+const nowPlayingTimeEl = document.getElementById('nowPlayingTime');
+const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
+const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingControlLabel');
+const hostNowPlayingProgressEl = document.getElementById('hostNowPlayingProgress');
+const hostNowPlayingTimeEl = document.getElementById('hostNowPlayingTime');
 
 const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
@@ -34,13 +43,18 @@ const LEGACY_LAYOUT_KEY = 'player:zones';
 const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
 const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
+const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
+const HOST_PROGRESS_REFRESH_INTERVAL_MS = 250;
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
 let fadeCancel = { cancelled: false };
 let buttonsByFile = new Map();
 let cardsByFile = new Map();
-let progressByFile = new Map();
+let durationLabelsByFile = new Map();
+let knownTrackDurations = new Map();
+let durationLoadPromises = new Map();
+let activeDurationTrackKey = null;
 let progressRaf = null;
 let progressAudio = null;
 let draggingCard = null;
@@ -48,6 +62,7 @@ let dragDropHandled = false;
 let dragContext = null;
 let layout = [[]]; // array of playlists -> array of filenames
 let playlistNames = ['Плей-лист 1'];
+let playlistAutoplay = [false];
 let availableFiles = [];
 let shutdownCountdownTimer = null;
 let currentUser = null;
@@ -55,8 +70,16 @@ let currentRole = null;
 let layoutVersion = 0;
 let layoutStream = null;
 let layoutStreamReconnectTimer = null;
+let hostPlaybackState = getDefaultHostPlaybackState();
+let hostPlaybackSyncInFlight = false;
+let hostPlaybackSyncQueued = false;
+let hostPlaybackSyncQueuedForce = false;
+let lastHostPlaybackSyncAt = 0;
+let hostProgressTimer = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
+const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
+const HOST_NOW_PLAYING_IDLE_TITLE = 'Хост: ничего не играет';
 const clientId = getClientId();
 
 function clampVolume(value) {
@@ -80,6 +103,11 @@ function getOrCreateSet(map, key) {
 
 function addToMultiMap(map, key, value) {
   getOrCreateSet(map, key).add(value);
+}
+
+function getFirstFromSet(values) {
+  if (!values || !values.size) return null;
+  return values.values().next().value || null;
 }
 
 function cloneLayoutState(layoutState) {
@@ -125,6 +153,19 @@ function getClientId() {
   } catch (err) {
     return randomId();
   }
+}
+
+function getDefaultHostPlaybackState() {
+  return {
+    trackFile: null,
+    paused: false,
+    currentTime: 0,
+    duration: null,
+    playlistIndex: null,
+    playlistPosition: null,
+    updatedAt: 0,
+    sourceClientId: null,
+  };
 }
 
 const easing = (t, type) => {
@@ -210,6 +251,13 @@ function applyRoleUi(role) {
   if (serverActionsHintEl) {
     serverActionsHintEl.textContent = isHost ? HOST_SERVER_HINT : SLAVE_SERVER_HINT;
   }
+
+  if (isHost) {
+    stopHostProgressLoop();
+    requestHostPlaybackSync(true);
+  } else {
+    syncHostNowPlayingPanel();
+  }
 }
 
 function updateCurrentUser(info) {
@@ -293,59 +341,450 @@ function loadBooleanSetting(key, fallback = false) {
   return value === 'true';
 }
 
-function volumeKey(key) {
-  return `player:volume:${key}`;
+function setNowPlayingProgress(percent) {
+  if (!nowPlayingProgressEl) return;
+  const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+  nowPlayingProgressEl.style.width = `${safePercent}%`;
 }
 
-function loadVolume(file, basePath = '/audio') {
-  const key = trackKey(file, basePath);
-  const saved = localStorage.getItem(volumeKey(key));
-  let parsed = saved !== null ? parseFloat(saved) : NaN;
+function setNowPlayingTime(seconds, { useCeil = true } = {}) {
+  if (!nowPlayingTimeEl) return;
+  nowPlayingTimeEl.textContent = formatDuration(seconds, { useCeil });
+}
 
-  if (Number.isNaN(parsed) && basePath === '/audio') {
-    const legacy = localStorage.getItem(`player:volume:${file}`);
-    parsed = legacy !== null ? parseFloat(legacy) : NaN;
+function setHostNowPlayingProgress(percent) {
+  if (!hostNowPlayingProgressEl) return;
+  const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+  hostNowPlayingProgressEl.style.width = `${safePercent}%`;
+}
+
+function setHostNowPlayingTime(seconds, { useCeil = true } = {}) {
+  if (!hostNowPlayingTimeEl) return;
+  hostNowPlayingTimeEl.textContent = formatDuration(seconds, { useCeil });
+}
+
+function formatDuration(seconds, { useCeil = false } = {}) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
+  const rounded = useCeil ? Math.ceil(seconds) : Math.floor(seconds);
+  const totalSeconds = Math.max(0, rounded);
+  const minutes = Math.floor(totalSeconds / 60);
+  const restSeconds = totalSeconds % 60;
+  return `${minutes}:${String(restSeconds).padStart(2, '0')}`;
+}
+
+function normalizePlaylistTrackIndex(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function sanitizeIncomingHostPlaybackState(rawState) {
+  const base = getDefaultHostPlaybackState();
+  if (!rawState || typeof rawState !== 'object') {
+    base.updatedAt = Date.now();
+    return base;
   }
 
-  if (Number.isNaN(parsed)) return 1;
-  return clampVolume(parsed);
+  const rawTrackFile = typeof rawState.trackFile === 'string' ? rawState.trackFile.trim() : '';
+  if (!rawTrackFile) {
+    base.updatedAt = Number.isFinite(Number(rawState.updatedAt)) ? Number(rawState.updatedAt) : Date.now();
+    return base;
+  }
+
+  const rawCurrentTime = Number(rawState.currentTime);
+  let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
+
+  const rawDuration = Number(rawState.duration);
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+  if (duration !== null && currentTime > duration) {
+    currentTime = duration;
+  }
+
+  const updatedAt = Number(rawState.updatedAt);
+  const sourceClientId = typeof rawState.sourceClientId === 'string' ? rawState.sourceClientId.slice(0, 128) : null;
+
+  return {
+    trackFile: rawTrackFile,
+    paused: Boolean(rawState.paused),
+    currentTime,
+    duration,
+    playlistIndex: normalizePlaylistTrackIndex(rawState.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(rawState.playlistPosition),
+    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+    sourceClientId,
+  };
 }
 
-function saveVolume(file, value, basePath = '/audio') {
+function serializeHostPlaybackState(state) {
+  const normalized = sanitizeIncomingHostPlaybackState(state);
+  return JSON.stringify({
+    trackFile: normalized.trackFile,
+    paused: normalized.paused,
+    currentTime: normalized.currentTime,
+    duration: normalized.duration,
+    playlistIndex: normalized.playlistIndex,
+    playlistPosition: normalized.playlistPosition,
+    updatedAt: normalized.updatedAt,
+  });
+}
+
+function getKnownDurationSeconds(fileKey) {
+  const value = knownTrackDurations.get(fileKey);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+function getCurrentTrackRemainingSeconds() {
+  if (!currentTrack || !currentAudio) return null;
+  const duration = getDuration(currentAudio);
+  if (!duration) {
+    return getKnownDurationSeconds(currentTrack.key);
+  }
+
+  const currentTime = Number.isFinite(currentAudio.currentTime) ? currentAudio.currentTime : 0;
+  return Math.max(0, duration - Math.max(0, currentTime));
+}
+
+function getHostPlaybackElapsedSeconds() {
+  if (!hostPlaybackState || !hostPlaybackState.trackFile) return 0;
+
+  const baseElapsed =
+    Number.isFinite(hostPlaybackState.currentTime) && hostPlaybackState.currentTime >= 0 ? hostPlaybackState.currentTime : 0;
+
+  if (hostPlaybackState.paused) {
+    return baseElapsed;
+  }
+
+  const deltaSeconds = Math.max(0, Date.now() - hostPlaybackState.updatedAt) / 1000;
+  const elapsed = baseElapsed + deltaSeconds;
+
+  if (Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0) {
+    return Math.min(elapsed, hostPlaybackState.duration);
+  }
+
+  return elapsed;
+}
+
+function stopHostProgressLoop() {
+  if (hostProgressTimer === null) return;
+  clearInterval(hostProgressTimer);
+  hostProgressTimer = null;
+}
+
+function startHostProgressLoop() {
+  if (hostProgressTimer !== null) return;
+  hostProgressTimer = setInterval(() => {
+    syncHostNowPlayingPanel();
+  }, HOST_PROGRESS_REFRESH_INTERVAL_MS);
+}
+
+function syncHostNowPlayingPanel() {
+  if (!hostNowPlayingTitleEl || !hostNowPlayingControlLabelEl) return;
+
+  if (currentRole !== 'slave') {
+    stopHostProgressLoop();
+    return;
+  }
+
+  if (!hostPlaybackState || !hostPlaybackState.trackFile) {
+    hostNowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
+    hostNowPlayingControlLabelEl.textContent = '▶';
+    setHostNowPlayingProgress(0);
+    setHostNowPlayingTime(null);
+    stopHostProgressLoop();
+    return;
+  }
+
+  hostNowPlayingTitleEl.textContent = `Хост: ${trackDisplayName(hostPlaybackState.trackFile)}`;
+  hostNowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
+
+  const elapsed = getHostPlaybackElapsedSeconds();
+  const duration = Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : null;
+  const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
+  const remaining = duration ? Math.max(0, duration - elapsed) : null;
+
+  setHostNowPlayingProgress(progressPercent);
+  setHostNowPlayingTime(remaining, { useCeil: true });
+
+  if (!hostPlaybackState.paused && duration && remaining > 0) {
+    startHostProgressLoop();
+  } else {
+    stopHostProgressLoop();
+  }
+}
+
+function getTrackDurationTextByKey(fileKey) {
+  const isCurrent = Boolean(currentTrack && currentAudio && currentTrack.key === fileKey);
+
+  if (isCurrent) {
+    const remaining = getCurrentTrackRemainingSeconds();
+    return formatDuration(remaining, { useCeil: true });
+  }
+
+  return formatDuration(getKnownDurationSeconds(fileKey), { useCeil: false });
+}
+
+function refreshTrackDurationLabels(fileKey) {
+  if (!fileKey) return;
+  const labels = durationLabelsByFile.get(fileKey);
+  if (!labels || !labels.size) return;
+
+  const text = getTrackDurationTextByKey(fileKey);
+  for (const label of labels) {
+    label.textContent = text;
+  }
+}
+
+function cacheTrackDuration(fileKey, durationSeconds) {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
+
+  const previous = knownTrackDurations.get(fileKey);
+  if (Number.isFinite(previous) && Math.abs(previous - durationSeconds) < 0.05) return;
+
+  knownTrackDurations.set(fileKey, durationSeconds);
+  refreshTrackDurationLabels(fileKey);
+
+  if (currentTrack && currentTrack.key === fileKey) {
+    syncNowPlayingPanel();
+  }
+}
+
+function loadTrackDurationMetadata(file, basePath = '/audio') {
   const key = trackKey(file, basePath);
-  localStorage.setItem(volumeKey(key), clampVolume(value).toString());
+  const cached = getKnownDurationSeconds(key);
+  if (cached !== null) return Promise.resolve(cached);
+
+  const pending = durationLoadPromises.get(key);
+  if (pending) return pending;
+
+  const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
+  const encoded = encodeURIComponent(file);
+  const source = `${normalizedBase}/${encoded}`;
+
+  const request = new Promise((resolve) => {
+    const probe = new Audio();
+    let settled = false;
+
+    const finish = (durationValue = null) => {
+      if (settled) return;
+      settled = true;
+      probe.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      probe.removeEventListener('durationchange', handleLoadedMetadata);
+      probe.removeEventListener('error', handleError);
+      probe.removeEventListener('abort', handleError);
+      durationLoadPromises.delete(key);
+      resolve(durationValue);
+    };
+
+    const handleLoadedMetadata = () => {
+      const durationValue = getDuration(probe);
+      if (durationValue) {
+        cacheTrackDuration(key, durationValue);
+        finish(durationValue);
+        return;
+      }
+      finish(null);
+    };
+
+    const handleError = () => {
+      finish(null);
+    };
+
+    probe.preload = 'metadata';
+    probe.src = source;
+    probe.addEventListener('loadedmetadata', handleLoadedMetadata);
+    probe.addEventListener('durationchange', handleLoadedMetadata);
+    probe.addEventListener('error', handleError);
+    probe.addEventListener('abort', handleError);
+    probe.load();
+  });
+
+  durationLoadPromises.set(key, request);
+  return request;
+}
+
+function preloadTrackDurations(files, basePath = '/audio') {
+  if (!Array.isArray(files) || files.length === 0) return;
+  files.forEach((file) => {
+    if (typeof file !== 'string' || !file.trim()) return;
+    loadTrackDurationMetadata(file, basePath).catch(() => {});
+  });
+}
+
+function keepKnownDurationsForFiles(files, basePath = '/audio') {
+  const allowedKeys = new Set(
+    Array.isArray(files)
+      ? files
+          .filter((file) => typeof file === 'string' && file.trim())
+          .map((file) => trackKey(file, basePath))
+      : [],
+  );
+
+  for (const key of knownTrackDurations.keys()) {
+    if (!allowedKeys.has(key)) {
+      knownTrackDurations.delete(key);
+    }
+  }
+}
+
+function syncNowPlayingPanel() {
+  if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
+
+  const nextActiveKey = currentTrack && currentAudio ? currentTrack.key : null;
+  if (activeDurationTrackKey && activeDurationTrackKey !== nextActiveKey) {
+    refreshTrackDurationLabels(activeDurationTrackKey);
+  }
+  activeDurationTrackKey = nextActiveKey;
+
+  if (!currentTrack || !currentAudio) {
+    nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
+    nowPlayingControlLabelEl.textContent = '▶';
+    nowPlayingControlBtn.disabled = true;
+    setNowPlayingProgress(0);
+    setNowPlayingTime(null);
+    requestHostPlaybackSync(false);
+    return;
+  }
+
+  nowPlayingTitleEl.textContent = trackDisplayName(currentTrack.file);
+  nowPlayingControlBtn.disabled = false;
+  nowPlayingControlLabelEl.textContent = currentAudio.paused ? '▶' : '❚❚';
+  setNowPlayingTime(getCurrentTrackRemainingSeconds(), { useCeil: true });
+  refreshTrackDurationLabels(currentTrack.key);
+  requestHostPlaybackSync(false);
+}
+
+async function toggleNowPlayingPlayback() {
+  if (!currentTrack || !currentAudio) return;
+
+  try {
+    if (currentAudio.paused) {
+      setTrackPaused(currentTrack.key, false, currentTrack);
+      await currentAudio.play();
+      setButtonPlaying(currentTrack.key, true, currentTrack);
+      startProgressLoop(currentAudio, currentTrack.key);
+      setStatus(`Играет: ${currentTrack.file}`);
+    } else {
+      currentAudio.pause();
+      stopProgressLoop();
+      setButtonPlaying(currentTrack.key, false, currentTrack);
+      setTrackPaused(currentTrack.key, true, currentTrack);
+      setStatus(`Пауза: ${currentTrack.file}`);
+    }
+  } catch (err) {
+    console.error(err);
+    setStatus('Не удалось изменить состояние воспроизведения.');
+  } finally {
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
+  }
 }
 
 function renderEmpty() {
   zonesContainer.innerHTML = '<div class="empty-state">В папке /audio не найдено аудиофайлов (mp3, wav, ogg, m4a, flac).</div>';
 }
 
-function setButtonPlaying(fileKey, isPlaying) {
+function resolveTrackUiContext(playbackContext = null) {
+  const playlistIndex =
+    playbackContext && Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
+      ? playbackContext.playlistIndex
+      : null;
+  const playlistPosition =
+    playbackContext && Number.isInteger(playbackContext.playlistPosition) && playbackContext.playlistPosition >= 0
+      ? playbackContext.playlistPosition
+      : null;
+
+  return { playlistIndex, playlistPosition };
+}
+
+function cardMatchesTrackContext(card, playbackContext = null) {
+  if (!card || !card.dataset) return false;
+  const { playlistIndex, playlistPosition } = resolveTrackUiContext(playbackContext);
+  if (playlistIndex === null || playlistPosition === null) return false;
+
+  const cardPlaylistIndex = Number.parseInt(card.dataset.playlistIndex || '', 10);
+  const cardPlaylistPosition = Number.parseInt(card.dataset.playlistPosition || '', 10);
+  return cardPlaylistIndex === playlistIndex && cardPlaylistPosition === playlistPosition;
+}
+
+function getTrackCardByContext(fileKey, playbackContext = null) {
+  const cards = cardsByFile.get(fileKey);
+  if (!cards || !cards.size) return null;
+
+  for (const card of cards) {
+    if (cardMatchesTrackContext(card, playbackContext)) {
+      return card;
+    }
+  }
+
+  return getFirstFromSet(cards);
+}
+
+function getTrackButtonByContext(fileKey, playbackContext = null) {
+  const buttons = buttonsByFile.get(fileKey);
+  if (!buttons || !buttons.size) return null;
+
+  for (const button of buttons) {
+    const card = button.closest('.track-card');
+    if (cardMatchesTrackContext(card, playbackContext)) {
+      return button;
+    }
+  }
+
+  return getFirstFromSet(buttons);
+}
+
+function applyPlayButtonState(button, isPauseState) {
+  if (!button) return;
+  button.dataset.state = isPauseState ? 'pause' : 'play';
+  button.title = isPauseState ? 'Пауза' : 'Воспроизвести';
+  button.setAttribute('aria-label', isPauseState ? 'Пауза' : 'Воспроизвести');
+}
+
+function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
   const buttons = buttonsByFile.get(fileKey);
   const cards = cardsByFile.get(fileKey);
-  const progressEntries = progressByFile.get(fileKey);
 
   if (buttons) {
-    for (const btn of buttons) {
-      btn.textContent = isPlaying ? '■' : '▶';
-      btn.title = isPlaying ? 'Остановить' : 'Воспроизвести';
+    for (const button of buttons) {
+      applyPlayButtonState(button, false);
+    }
+
+    if (isPlaying) {
+      const targetButton = getTrackButtonByContext(fileKey, playbackContext);
+      applyPlayButtonState(targetButton, true);
     }
   }
 
   if (cards) {
     for (const card of cards) {
-      card.classList.toggle('is-playing', isPlaying);
+      card.classList.remove('is-playing');
     }
-  }
 
-  if (progressEntries) {
-    for (const { container, bar } of progressEntries) {
-      container.classList.toggle('visible', isPlaying);
-      if (!isPlaying && bar) {
-        bar.style.width = '0%';
+    if (isPlaying) {
+      const targetCard = getTrackCardByContext(fileKey, playbackContext);
+      if (targetCard) {
+        targetCard.classList.add('is-playing');
+        targetCard.classList.remove('is-paused');
       }
     }
   }
+}
+
+function setTrackPaused(fileKey, isPaused, playbackContext = null) {
+  const cards = cardsByFile.get(fileKey);
+  if (!cards) return;
+
+  for (const card of cards) {
+    card.classList.remove('is-paused');
+  }
+
+  if (!isPaused) return;
+  const targetCard = getTrackCardByContext(fileKey, playbackContext);
+  if (!targetCard) return;
+
+  targetCard.classList.add('is-paused');
+  targetCard.classList.remove('is-playing');
 }
 
 // Only trust the real duration reported by the browser.
@@ -355,32 +794,39 @@ function getDuration(audio) {
 }
 
 function updateProgress(fileKey, currentTime, duration) {
-  const entries = progressByFile.get(fileKey);
-  if (!entries || !entries.size) return;
+  if (!currentTrack || currentTrack.key !== fileKey) return;
 
   const safeTime = Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
   const percent = duration ? Math.min(100, (safeTime / duration) * 100) : 0;
-
-  for (const { bar } of entries) {
-    bar.style.width = `${percent}%`;
-  }
+  setNowPlayingProgress(percent);
+  const remaining = duration ? Math.max(0, duration - safeTime) : getCurrentTrackRemainingSeconds();
+  setNowPlayingTime(remaining, { useCeil: true });
+  refreshTrackDurationLabels(fileKey);
 }
 
 function resetProgress(fileKey) {
-  const entries = progressByFile.get(fileKey);
-  if (!entries || !entries.size) return;
-  for (const entry of entries) {
-    entry.bar.style.width = '0%';
-  }
+  if (currentTrack && fileKey && currentTrack.key !== fileKey) return;
+  setNowPlayingProgress(0);
 }
 
 function bindProgress(audio, fileKey) {
+  const syncDuration = () => {
+    const duration = getDuration(audio);
+    if (!duration) return;
+    cacheTrackDuration(fileKey, duration);
+  };
   const update = () => updateProgress(fileKey, audio.currentTime, getDuration(audio));
   audio.addEventListener('timeupdate', update);
-  audio.addEventListener('loadedmetadata', update);
+  audio.addEventListener('loadedmetadata', () => {
+    syncDuration();
+    update();
+  });
   audio.addEventListener('seeking', update);
   audio.addEventListener('seeked', update);
-  audio.addEventListener('durationchange', update);
+  audio.addEventListener('durationchange', () => {
+    syncDuration();
+    update();
+  });
 }
 
 function stopProgressLoop() {
@@ -389,12 +835,14 @@ function stopProgressLoop() {
     progressRaf = null;
   }
   progressAudio = null;
+  syncNowPlayingPanel();
 }
 
 function startProgressLoop(audio, fileKey) {
   stopProgressLoop();
   if (!audio) return;
   progressAudio = audio;
+  syncNowPlayingPanel();
 
   const tick = () => {
     if (!progressAudio || progressAudio.paused) return;
@@ -405,77 +853,52 @@ function startProgressLoop(audio, fileKey) {
   tick();
 }
 
-function buildTrackCard(file, basePath = '/audio', { draggable = true } = {}) {
+function buildTrackCard(
+  file,
+  basePath = '/audio',
+  { draggable = true, orderNumber = null, playlistIndex = null, playlistPosition = null } = {},
+) {
   const key = trackKey(file, basePath);
   const card = document.createElement('div');
   card.className = 'track-card';
   card.draggable = draggable;
   card.dataset.file = file;
   card.dataset.basePath = basePath;
+  if (Number.isInteger(playlistIndex) && playlistIndex >= 0) {
+    card.dataset.playlistIndex = String(playlistIndex);
+  }
+  if (Number.isInteger(playlistPosition) && playlistPosition >= 0) {
+    card.dataset.playlistPosition = String(playlistPosition);
+  }
   addToMultiMap(cardsByFile, key, card);
 
-  const info = document.createElement('div');
+  const order = document.createElement('span');
+  order.className = 'track-order';
+  order.textContent = Number.isInteger(orderNumber) && orderNumber > 0 ? String(orderNumber) : '•';
+
   const name = document.createElement('p');
   name.className = 'track-name';
   name.textContent = trackDisplayName(file);
-  info.appendChild(name);
 
-  const controls = document.createElement('div');
-  controls.className = 'controls';
+  const durationLabel = document.createElement('span');
+  durationLabel.className = 'track-duration';
+  durationLabel.textContent = getTrackDurationTextByKey(key);
+  addToMultiMap(durationLabelsByFile, key, durationLabel);
 
   const playButton = document.createElement('button');
   playButton.className = 'play';
-  playButton.textContent = '▶';
+  playButton.dataset.state = 'play';
   playButton.title = 'Воспроизвести';
-  playButton.addEventListener('click', () => handlePlay(file, playButton, basePath));
+  playButton.setAttribute('aria-label', 'Воспроизвести');
+  playButton.addEventListener('click', () =>
+    handlePlay(file, playButton, basePath, {
+      playlistIndex,
+      playlistPosition,
+    }),
+  );
   addToMultiMap(buttonsByFile, key, playButton);
 
-  const progress = document.createElement('div');
-  progress.className = 'play-progress';
-  const progressBar = document.createElement('div');
-  progressBar.className = 'play-progress__bar';
-  progress.append(progressBar);
-  addToMultiMap(progressByFile, key, { container: progress, bar: progressBar });
-
-  const playBlock = document.createElement('div');
-  playBlock.className = 'play-block';
-  playBlock.append(playButton, progress);
-
-  const volumeWrap = document.createElement('label');
-  volumeWrap.className = 'volume';
-  const volumeRange = document.createElement('input');
-  volumeRange.type = 'range';
-  volumeRange.min = '0';
-  volumeRange.max = '1';
-  volumeRange.step = '0.01';
-  volumeRange.value = loadVolume(file, basePath).toString();
-
-  const enableDrag = () => {
-    card.draggable = true;
-  };
-  const disableDrag = () => {
-    card.draggable = false;
-  };
-
-  ['pointerdown', 'mousedown', 'touchstart'].forEach((event) => {
-    volumeRange.addEventListener(event, disableDrag);
-  });
-  ['pointerup', 'mouseup', 'touchend', 'touchcancel', 'pointerleave'].forEach((event) => {
-    volumeRange.addEventListener(event, enableDrag);
-  });
-
-  volumeRange.addEventListener('input', () => {
-    const numeric = clampVolume(parseFloat(volumeRange.value));
-    volumeRange.value = numeric.toString();
-    saveVolume(file, numeric, basePath);
-    if (currentTrack && currentTrack.key === key && currentAudio) {
-      currentAudio.volume = numeric;
-    }
-  });
-
-  volumeWrap.append(volumeRange);
-  controls.append(playBlock, volumeWrap);
-  card.append(info, controls);
+  card.append(order, name, durationLabel, playButton);
   if (draggable) {
     attachDragHandlers(card);
   }
@@ -573,6 +996,17 @@ function normalizePlaylistNames(names, expectedLength) {
   return result;
 }
 
+function normalizePlaylistAutoplayFlags(flags, expectedLength) {
+  const result = [];
+
+  for (let index = 0; index < expectedLength; index += 1) {
+    const rawValue = Array.isArray(flags) ? flags[index] : false;
+    result.push(Boolean(rawValue));
+  }
+
+  return result;
+}
+
 function serializeLayout(playlists) {
   return JSON.stringify(ensurePlaylists(playlists));
 }
@@ -588,6 +1022,15 @@ function serializePlaylistNames(names, lengthHint = null) {
 
 function playlistNamesEqual(left, right, expectedLength) {
   return serializePlaylistNames(left, expectedLength) === serializePlaylistNames(right, expectedLength);
+}
+
+function serializePlaylistAutoplay(flags, lengthHint = null) {
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  return JSON.stringify(normalizePlaylistAutoplayFlags(flags, expectedLength));
+}
+
+function playlistAutoplayEqual(left, right, expectedLength) {
+  return serializePlaylistAutoplay(left, expectedLength) === serializePlaylistAutoplay(right, expectedLength);
 }
 
 function normalizeLayoutForFiles(rawLayout, files) {
@@ -642,22 +1085,92 @@ function syncLayoutFromDom() {
   });
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+}
+
+function getTrackButton(file, playlistIndex = null, playlistPosition = null, basePath = '/audio') {
+  const key = trackKey(file, basePath);
+  const candidates = buttonsByFile.get(key);
+  if (!candidates || !candidates.size) return null;
+
+  if (Number.isInteger(playlistIndex) && playlistIndex >= 0 && Number.isInteger(playlistPosition) && playlistPosition >= 0) {
+    for (const button of candidates) {
+      const card = button.closest('.track-card');
+      if (!card) continue;
+      const cardPlaylistIndex = Number.parseInt(card.dataset.playlistIndex || '', 10);
+      const cardPlaylistPosition = Number.parseInt(card.dataset.playlistPosition || '', 10);
+      if (cardPlaylistIndex === playlistIndex && cardPlaylistPosition === playlistPosition) {
+        return button;
+      }
+    }
+  }
+
+  return getFirstFromSet(candidates);
+}
+
+function resolveAutoplayNextTrack(finishedTrack) {
+  if (!finishedTrack || typeof finishedTrack.file !== 'string') return null;
+
+  const preferredPlaylistIndex = Number.isInteger(finishedTrack.playlistIndex) ? finishedTrack.playlistIndex : -1;
+  if (preferredPlaylistIndex < 0 || preferredPlaylistIndex >= layout.length) return null;
+
+  if (!playlistAutoplay[preferredPlaylistIndex]) return null;
+  const playlist = Array.isArray(layout[preferredPlaylistIndex]) ? layout[preferredPlaylistIndex] : [];
+  if (!playlist.length) return null;
+
+  let currentIndex = Number.isInteger(finishedTrack.playlistPosition) ? finishedTrack.playlistPosition : -1;
+  if (currentIndex < 0 || currentIndex >= playlist.length || playlist[currentIndex] !== finishedTrack.file) {
+    currentIndex = playlist.indexOf(finishedTrack.file);
+  }
+
+  if (currentIndex < 0) return null;
+  const nextIndex = currentIndex + 1;
+  if (nextIndex >= playlist.length) return null;
+
+  const nextFile = playlist[nextIndex];
+  if (typeof nextFile !== 'string' || !nextFile) return null;
+
+  return {
+    file: nextFile,
+    basePath: '/audio',
+    playlistIndex: preferredPlaylistIndex,
+    playlistPosition: nextIndex,
+  };
+}
+
+async function tryAutoplayNextTrack(finishedTrack) {
+  const nextTrack = resolveAutoplayNextTrack(finishedTrack);
+  if (!nextTrack) return false;
+
+  const button = getTrackButton(nextTrack.file, nextTrack.playlistIndex, nextTrack.playlistPosition, nextTrack.basePath);
+  if (!button) return false;
+
+  await handlePlay(nextTrack.file, button, nextTrack.basePath, {
+    playlistIndex: nextTrack.playlistIndex,
+    playlistPosition: nextTrack.playlistPosition,
+    fromAutoplay: true,
+  });
+  return true;
 }
 
 function resetTrackReferences() {
   buttonsByFile = new Map();
   cardsByFile = new Map();
-  progressByFile = new Map();
+  durationLabelsByFile = new Map();
 }
 
-function applyIncomingLayoutState(nextLayout, nextPlaylistNames, version = null, render = true) {
+function applyIncomingLayoutState(nextLayout, nextPlaylistNames, nextPlaylistAutoplay, version = null, render = true) {
   const normalizedLayout = normalizeLayoutForFiles(nextLayout, availableFiles);
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
+  const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextPlaylistAutoplay, normalizedLayout.length);
   const changed =
-    !layoutsEqual(layout, normalizedLayout) || !playlistNamesEqual(playlistNames, normalizedNames, normalizedLayout.length);
+    !layoutsEqual(layout, normalizedLayout) ||
+    !playlistNamesEqual(playlistNames, normalizedNames, normalizedLayout.length) ||
+    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, normalizedLayout.length);
 
   layout = normalizedLayout;
   playlistNames = normalizedNames;
+  playlistAutoplay = normalizedAutoplay;
 
   const numericVersion = Number(version);
   if (Number.isFinite(numericVersion)) {
@@ -669,6 +1182,105 @@ function applyIncomingLayoutState(nextLayout, nextPlaylistNames, version = null,
   }
 
   return changed;
+}
+
+function applyIncomingHostPlaybackState(nextState, sync = true) {
+  const normalizedState = sanitizeIncomingHostPlaybackState(nextState);
+  const changed = serializeHostPlaybackState(hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
+  hostPlaybackState = normalizedState;
+
+  if (sync || changed) {
+    syncHostNowPlayingPanel();
+  }
+
+  return changed;
+}
+
+function buildLocalPlaybackSnapshot() {
+  if (!currentTrack || !currentAudio) {
+    return {
+      trackFile: null,
+      paused: false,
+      currentTime: 0,
+      duration: null,
+      playlistIndex: null,
+      playlistPosition: null,
+    };
+  }
+
+  const rawCurrentTime = Number(currentAudio.currentTime);
+  const currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
+  const resolvedDuration = getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
+
+  return {
+    trackFile: currentTrack.file,
+    paused: Boolean(currentAudio.paused),
+    currentTime,
+    duration: Number.isFinite(resolvedDuration) && resolvedDuration > 0 ? resolvedDuration : null,
+    playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
+  };
+}
+
+async function fetchSharedPlaybackState() {
+  const response = await fetch('/api/playback');
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось получить состояние воспроизведения хоста');
+  }
+
+  return sanitizeIncomingHostPlaybackState(data);
+}
+
+async function pushSharedPlaybackState(snapshot) {
+  const response = await fetch('/api/playback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ ...snapshot, clientId }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось синхронизировать состояние воспроизведения');
+  }
+
+  applyIncomingHostPlaybackState(data, true);
+}
+
+function requestHostPlaybackSync(force = false) {
+  if (currentRole !== 'host') return;
+
+  const now = Date.now();
+  if (!force && now - lastHostPlaybackSyncAt < HOST_PLAYBACK_SYNC_INTERVAL_MS) {
+    return;
+  }
+
+  if (hostPlaybackSyncInFlight) {
+    hostPlaybackSyncQueued = true;
+    hostPlaybackSyncQueuedForce = hostPlaybackSyncQueuedForce || force;
+    return;
+  }
+
+  hostPlaybackSyncInFlight = true;
+  lastHostPlaybackSyncAt = now;
+  const snapshot = buildLocalPlaybackSnapshot();
+
+  pushSharedPlaybackState(snapshot)
+    .catch((err) => {
+      console.error('Не удалось синхронизировать playback хоста', err);
+    })
+    .finally(() => {
+      hostPlaybackSyncInFlight = false;
+
+      if (!hostPlaybackSyncQueued) return;
+      const queuedForce = hostPlaybackSyncQueuedForce;
+      hostPlaybackSyncQueued = false;
+      hostPlaybackSyncQueuedForce = false;
+      requestHostPlaybackSync(queuedForce);
+    });
 }
 
 async function fetchSharedLayoutState() {
@@ -683,6 +1295,7 @@ async function fetchSharedLayoutState() {
   return {
     layout: Array.isArray(data.layout) ? data.layout : [[]],
     playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
+    playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
     version: Number.isFinite(Number(data.version)) ? Number(data.version) : 0,
   };
 }
@@ -691,7 +1304,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
   const response = await fetch('/api/layout', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ layout, playlistNames, clientId, version: layoutVersion }),
+    body: JSON.stringify({ layout, playlistNames, playlistAutoplay, clientId, version: layoutVersion }),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -700,7 +1313,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
     throw new Error(message || 'Не удалось синхронизировать плей-листы');
   }
 
-  applyIncomingLayoutState(data.layout, data.playlistNames, data.version, renderOnApply);
+  applyIncomingLayoutState(data.layout, data.playlistNames, data.playlistAutoplay, data.version, renderOnApply);
 }
 
 function clearLayoutStreamConnection() {
@@ -738,7 +1351,18 @@ function connectLayoutStream() {
     }
 
     if (!payload || !Array.isArray(payload.layout)) return;
-    applyIncomingLayoutState(payload.layout, payload.playlistNames, payload.version, true);
+    applyIncomingLayoutState(payload.layout, payload.playlistNames, payload.playlistAutoplay, payload.version, true);
+  });
+
+  stream.addEventListener('playback', (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+
+    applyIncomingHostPlaybackState(payload, true);
   });
 
   stream.onerror = () => {
@@ -749,27 +1373,38 @@ function connectLayoutStream() {
   };
 }
 
+async function initializePlaybackState() {
+  const serverPlayback = await fetchSharedPlaybackState();
+  applyIncomingHostPlaybackState(serverPlayback, true);
+}
+
 async function initializeLayoutState() {
   const serverState = await fetchSharedLayoutState();
   const incomingLayout = ensurePlaylists(serverState.layout);
   const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
+  const incomingAutoplay = normalizePlaylistAutoplayFlags(serverState.playlistAutoplay, incomingLayout.length);
 
   let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
+  let nextAutoplay = normalizePlaylistAutoplayFlags(incomingAutoplay, nextLayout.length);
   let shouldPush =
-    !layoutsEqual(incomingLayout, nextLayout) || !playlistNamesEqual(incomingNames, nextNames, nextLayout.length);
+    !layoutsEqual(incomingLayout, nextLayout) ||
+    !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
+    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length);
 
   if (currentRole === 'host' && isServerLayoutEmpty(incomingLayout)) {
     const legacyLayout = readLegacyLocalLayout(availableFiles);
     if (legacyLayout && !layoutsEqual(legacyLayout, nextLayout)) {
       nextLayout = legacyLayout;
       nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
+      nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
       shouldPush = true;
     }
   }
 
   layout = nextLayout;
   playlistNames = nextNames;
+  playlistAutoplay = nextAutoplay;
   layoutVersion = serverState.version;
 
   if (shouldPush) {
@@ -788,6 +1423,7 @@ async function addPlaylist() {
   layout = ensurePlaylists(layout);
   layout.push([]);
   playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags([...playlistAutoplay, false], layout.length);
   renderZones();
 
   try {
@@ -823,6 +1459,39 @@ async function renamePlaylist(playlistIndex, rawName) {
     playlistNames = previousNames;
     renderZones();
     setStatus('Не удалось синхронизировать название плей-листа.');
+  }
+}
+
+async function togglePlaylistAutoplay(playlistIndex) {
+  if (currentRole !== 'host') {
+    setStatus('Автовоспроизведение может менять только хост.');
+    return;
+  }
+
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+
+  const previousAutoplay = playlistAutoplay.slice();
+  const nextAutoplay = playlistAutoplay.slice();
+  nextAutoplay[playlistIndex] = !nextAutoplay[playlistIndex];
+  const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
+
+  if (playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, layout.length)) return;
+
+  playlistAutoplay = normalizedAutoplay;
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(
+      `Автовоспроизведение для плей-листа ${playlistIndex + 1}: ${
+        playlistAutoplay[playlistIndex] ? 'включено' : 'выключено'
+      }.`,
+    );
+  } catch (err) {
+    console.error(err);
+    playlistAutoplay = previousAutoplay;
+    renderZones();
+    setStatus('Не удалось синхронизировать автопроигрывание плей-листа.');
   }
 }
 
@@ -895,15 +1564,19 @@ async function deletePlaylist(playlistIndex) {
 
   const previousLayout = ensurePlaylists(layout).map((playlist) => playlist.slice());
   const previousNames = playlistNames.slice();
+  const previousAutoplay = playlistAutoplay.slice();
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
   nextLayout.splice(playlistIndex, 1);
 
   const nextNames = previousNames.slice();
   nextNames.splice(playlistIndex, 1);
+  const nextAutoplay = previousAutoplay.slice();
+  nextAutoplay.splice(playlistIndex, 1);
 
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(nextNames, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
   renderZones();
 
   try {
@@ -913,6 +1586,7 @@ async function deletePlaylist(playlistIndex) {
     console.error(err);
     layout = previousLayout;
     playlistNames = previousNames;
+    playlistAutoplay = previousAutoplay;
     renderZones();
     setStatus('Не удалось синхронизировать удаление плей-листа.');
   }
@@ -922,6 +1596,7 @@ function renderZones() {
   zonesContainer.innerHTML = '';
   resetTrackReferences();
   layout = ensurePlaylists(layout);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
 
   layout.forEach((playlistFiles, playlistIndex) => {
     const zone = document.createElement('div');
@@ -968,6 +1643,27 @@ function renderZones() {
     const headerMeta = document.createElement('div');
     headerMeta.className = 'playlist-header-meta';
 
+    const autoplayButton = document.createElement('button');
+    autoplayButton.type = 'button';
+    autoplayButton.className = 'playlist-autoplay-toggle';
+    autoplayButton.textContent = 'A';
+    autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
+    const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
+    const canManageAutoplay = currentRole === 'host';
+    autoplayButton.dataset.state = isAutoplayEnabled ? 'on' : 'off';
+    autoplayButton.setAttribute('aria-pressed', isAutoplayEnabled ? 'true' : 'false');
+    autoplayButton.title = canManageAutoplay
+      ? `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'}`
+      : `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'} (только хост)`;
+    autoplayButton.classList.toggle('is-on', isAutoplayEnabled);
+    autoplayButton.disabled = !canManageAutoplay;
+    autoplayButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!canManageAutoplay) return;
+      togglePlaylistAutoplay(playlistIndex);
+    });
+
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'playlist-delete-btn';
@@ -985,14 +1681,21 @@ function renderZones() {
       deletePlaylist(playlistIndex);
     });
 
-    headerMeta.append(count, deleteButton);
+    headerMeta.append(autoplayButton, count, deleteButton);
     header.append(titleInput, headerMeta);
 
     const body = document.createElement('div');
     body.className = 'zone-body';
 
-    playlistFiles.forEach((file) => {
-      body.appendChild(buildTrackCard(file, '/audio', { draggable: true }));
+    playlistFiles.forEach((file, rowIndex) => {
+      body.appendChild(
+        buildTrackCard(file, '/audio', {
+          draggable: true,
+          orderNumber: rowIndex + 1,
+          playlistIndex,
+          playlistPosition: rowIndex,
+        }),
+      );
     });
 
     body.addEventListener('dragover', (e) => applyDragPreview(body, e));
@@ -1000,11 +1703,18 @@ function renderZones() {
     zone.append(header, body);
     zonesContainer.appendChild(zone);
   });
+
+  syncCurrentTrackState();
 }
 
 function syncCurrentTrackState() {
-  if (!currentTrack) return;
-  setButtonPlaying(currentTrack.key, !!(currentAudio && !currentAudio.paused));
+  if (currentTrack) {
+    const isPlaying = Boolean(currentAudio && !currentAudio.paused);
+    setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
+    setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
+  }
+  syncNowPlayingPanel();
+  syncHostNowPlayingPanel();
 }
 
 async function handleDrop(event, targetZoneIndex) {
@@ -1050,6 +1760,7 @@ async function handleDrop(event, targetZoneIndex) {
 
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
   renderZones();
   try {
     await pushSharedLayout();
@@ -1058,6 +1769,7 @@ async function handleDrop(event, targetZoneIndex) {
     console.error(err);
     layout = previousLayout;
     playlistNames = normalizePlaylistNames(playlistNames, layout.length);
+    playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
     renderZones();
     setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
   }
@@ -1088,6 +1800,8 @@ async function loadTracks() {
   }
 
   availableFiles = audioResult.files;
+  keepKnownDurationsForFiles(availableFiles);
+  preloadTrackDurations(availableFiles);
 
   if (!availableFiles.length) {
     renderEmpty();
@@ -1102,7 +1816,15 @@ async function loadTracks() {
     console.error(err);
     layout = normalizeLayoutForFiles([availableFiles.slice()], availableFiles);
     playlistNames = normalizePlaylistNames([], layout.length);
+    playlistAutoplay = normalizePlaylistAutoplayFlags([], layout.length);
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
+  }
+
+  try {
+    await initializePlaybackState();
+  } catch (err) {
+    console.error(err);
+    hostPlaybackState = getDefaultHostPlaybackState();
   }
 
   renderZones();
@@ -1130,12 +1852,16 @@ function fadeOutAndStop(audio, durationSeconds, curve, track) {
     if (duration === 0) {
       audio.pause();
       audio.currentTime = 0;
-      setButtonPlaying(track.key, false);
+      setButtonPlaying(track.key, false, track);
+      setTrackPaused(track.key, false, track);
       stopProgressLoop();
+      resetProgress(track.key);
       if (currentTrack && currentTrack.key === track.key) {
         currentAudio = null;
         currentTrack = null;
       }
+      syncNowPlayingPanel();
+      requestHostPlaybackSync(true);
       return safeResolve();
     }
     resetFadeState();
@@ -1153,12 +1879,16 @@ function fadeOutAndStop(audio, durationSeconds, curve, track) {
       } else {
         audio.pause();
         audio.currentTime = 0;
-        setButtonPlaying(track.key, false);
+        setButtonPlaying(track.key, false, track);
+        setTrackPaused(track.key, false, track);
         stopProgressLoop();
+        resetProgress(track.key);
         if (currentTrack && currentTrack.key === track.key) {
           currentAudio = null;
           currentTrack = null;
         }
+        syncNowPlayingPanel();
+        requestHostPlaybackSync(true);
         safeResolve();
       }
     }
@@ -1176,25 +1906,45 @@ function createAudio(track) {
   audio.load();
 
   audio.addEventListener('ended', () => {
-    if (currentTrack && currentTrack.key === key) {
-      setStatus(`Воспроизведение завершено: ${file}`);
+    const wasCurrentTrack = Boolean(currentTrack && currentTrack.key === key);
+
+    if (wasCurrentTrack) {
       currentAudio = null;
       currentTrack = null;
     }
-    setButtonPlaying(key, false);
+    setButtonPlaying(key, false, track);
+    setTrackPaused(key, false, track);
     stopProgressLoop();
     resetProgress(key);
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
+
+    if (!wasCurrentTrack) return;
+
+    tryAutoplayNextTrack(track)
+      .then((started) => {
+        if (!started) {
+          setStatus(`Воспроизведение завершено: ${file}`);
+        }
+      })
+      .catch((err) => {
+        console.error('Autoplay failed', err);
+        setStatus(`Воспроизведение завершено: ${file}`);
+      });
   });
 
   audio.addEventListener('error', () => {
     setStatus(`Ошибка воспроизведения: ${file}`);
-    setButtonPlaying(key, false);
+    setButtonPlaying(key, false, track);
+    setTrackPaused(key, false, track);
     stopProgressLoop();
     resetProgress(key);
     if (currentTrack && currentTrack.key === key) {
       currentAudio = null;
       currentTrack = null;
     }
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
   });
 
   bindProgress(audio, key);
@@ -1224,32 +1974,76 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
         oldAudio.pause();
         oldAudio.currentTime = 0;
         oldAudio.volume = initialOldVolume;
-        if (oldTrack) setButtonPlaying(oldTrack.key, false);
+        if (oldTrack) {
+          setButtonPlaying(oldTrack.key, false, oldTrack);
+          setTrackPaused(oldTrack.key, false, oldTrack);
+        }
       }
       currentAudio = newAudio;
       currentTrack = newTrack;
-      setButtonPlaying(newTrack.key, true);
+      setButtonPlaying(newTrack.key, true, newTrack);
+      setTrackPaused(newTrack.key, false, newTrack);
       startProgressLoop(newAudio, newTrack.key);
       setStatus(`Играет: ${newTrack.file}`);
+      syncNowPlayingPanel();
+      requestHostPlaybackSync(true);
     }
   }
 
   requestAnimationFrame(step);
 }
 
-async function handlePlay(file, button, basePath = '/audio') {
+async function handlePlay(file, button, basePath = '/audio', playbackContext = {}) {
   const overlaySeconds = Math.max(0, parseFloat(overlayTimeInput.value) || 0);
   const curve = overlayCurveSelect.value;
-  const stopFadeSeconds = Math.max(0, parseFloat(stopFadeInput.value) || 0);
-  const targetVolume = clampVolume(loadVolume(file, basePath));
-  const track = { file, basePath, key: trackKey(file, basePath) };
+  const targetVolume = 1;
+  const resolvedPlaylistIndex =
+    Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
+      ? playbackContext.playlistIndex
+      : null;
+  const resolvedPlaylistPosition =
+    Number.isInteger(playbackContext.playlistPosition) && playbackContext.playlistPosition >= 0
+      ? playbackContext.playlistPosition
+      : null;
+  const track = {
+    file,
+    basePath,
+    key: trackKey(file, basePath),
+    playlistIndex: resolvedPlaylistIndex,
+    playlistPosition: resolvedPlaylistPosition,
+  };
 
   button.disabled = true;
 
   if (currentTrack && currentTrack.key === track.key && currentAudio && !currentAudio.paused) {
-    await fadeOutAndStop(currentAudio, stopFadeSeconds, curve, track);
-    setStatus(`Остановлено: ${file}`);
+    currentAudio.pause();
+    stopProgressLoop();
+    setButtonPlaying(track.key, false, track);
+    setTrackPaused(track.key, true, track);
+    setStatus(`Пауза: ${file}`);
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
     button.disabled = false;
+    return;
+  }
+
+  if (currentTrack && currentTrack.key === track.key && currentAudio && currentAudio.paused) {
+    try {
+      setTrackPaused(track.key, false, track);
+      await currentAudio.play();
+      setButtonPlaying(track.key, true, track);
+      startProgressLoop(currentAudio, track.key);
+      setStatus(`Играет: ${file}`);
+    } catch (err) {
+      console.error(err);
+      setStatus('Не удалось продолжить воспроизведение.');
+      setButtonPlaying(track.key, false, track);
+      setTrackPaused(track.key, true, track);
+    } finally {
+      syncNowPlayingPanel();
+      requestHostPlaybackSync(true);
+      button.disabled = false;
+    }
     return;
   }
 
@@ -1262,29 +2056,39 @@ async function handlePlay(file, button, basePath = '/audio') {
 
     if (currentAudio && !currentAudio.paused && overlaySeconds > 0) {
       const oldTrack = currentTrack;
-      setButtonPlaying(track.key, true);
+      setButtonPlaying(track.key, true, track);
+      setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
       applyOverlay(currentAudio, audio, targetVolume, overlaySeconds, curve, track, oldTrack);
     } else {
       if (currentAudio) {
         currentAudio.pause();
         currentAudio.currentTime = 0;
-        if (currentTrack) setButtonPlaying(currentTrack.key, false);
+        if (currentTrack) {
+          setButtonPlaying(currentTrack.key, false, currentTrack);
+          setTrackPaused(currentTrack.key, false, currentTrack);
+        }
       }
       resetFadeState();
       audio.volume = targetVolume;
       currentAudio = audio;
       currentTrack = track;
-      setButtonPlaying(track.key, true);
+      setButtonPlaying(track.key, true, track);
+      setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
       setStatus(`Играет: ${file}`);
+      syncNowPlayingPanel();
+      requestHostPlaybackSync(true);
     }
   } catch (err) {
     console.error(err);
     setStatus('Не удалось начать воспроизведение.');
-    setButtonPlaying(track.key, false);
+    setButtonPlaying(track.key, false, track);
+    setTrackPaused(track.key, false, track);
     stopProgressLoop();
     resetProgress(track.key);
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
   } finally {
     button.disabled = false;
   }
@@ -1369,6 +2173,13 @@ function initServerControls() {
 function initPlaylistControls() {
   if (!addPlaylistBtn) return;
   addPlaylistBtn.addEventListener('click', addPlaylist);
+}
+
+function initNowPlayingControls() {
+  if (!nowPlayingControlBtn) return;
+  nowPlayingControlBtn.addEventListener('click', toggleNowPlayingPlayback);
+  syncNowPlayingPanel();
+  syncHostNowPlayingPanel();
 }
 
 function initUpdater() {
@@ -1542,8 +2353,12 @@ async function bootstrap() {
   initSidebarToggle();
   initServerControls();
   initPlaylistControls();
+  initNowPlayingControls();
   initUpdater();
-  window.addEventListener('beforeunload', clearLayoutStreamConnection);
+  window.addEventListener('beforeunload', () => {
+    clearLayoutStreamConnection();
+    stopHostProgressLoop();
+  });
   loadTracks();
   loadVersion();
   document.addEventListener('dragover', handleGlobalDragOver);
