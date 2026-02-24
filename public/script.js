@@ -26,10 +26,13 @@ const nowPlayingControlBtn = document.getElementById('nowPlayingControl');
 const nowPlayingControlLabelEl = document.getElementById('nowPlayingControlLabel');
 const nowPlayingProgressEl = document.getElementById('nowPlayingProgress');
 const nowPlayingTimeEl = document.getElementById('nowPlayingTime');
+const nowPlayingReelEl = document.getElementById('nowPlayingReel');
 const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
+const hostNowPlayingControlEl = document.getElementById('hostNowPlayingControl');
 const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingControlLabel');
 const hostNowPlayingProgressEl = document.getElementById('hostNowPlayingProgress');
 const hostNowPlayingTimeEl = document.getElementById('hostNowPlayingTime');
+const hostNowPlayingReelEl = document.getElementById('hostNowPlayingReel');
 
 const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
@@ -37,6 +40,7 @@ const SETTINGS_KEYS = {
   stopFade: 'player:stopFade',
   sidebarOpen: 'player:sidebarOpen',
   allowPrerelease: 'player:allowPrerelease',
+  trackTitleModesByTrack: 'player:trackTitleModesByTrack',
 };
 const LAYOUT_STORAGE_KEY = 'player:playlists';
 const LEGACY_LAYOUT_KEY = 'player:zones';
@@ -53,7 +57,12 @@ const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
 const NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX = 6;
 const NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS = 320;
 const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
+const NOW_PLAYING_REEL_BASE_SPIN_SECONDS = 1.8;
+const NOW_PLAYING_REEL_FAST_SPIN_SECONDS = 0.24;
+const NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC = 1600;
 const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
+const TRACK_TITLE_MODE_FILE = 'file';
+const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
 const PLAYLIST_TYPE_FOLDER = 'folder';
 
@@ -63,8 +72,12 @@ let fadeCancel = { cancelled: false };
 let buttonsByFile = new Map();
 let cardsByFile = new Map();
 let durationLabelsByFile = new Map();
+let trackNameLabelsByFile = new Map();
 let knownTrackDurations = new Map();
 let durationLoadPromises = new Map();
+let trackAttributesByFile = new Map();
+let trackAttributeLoadPromisesByFile = new Map();
+let trackTitleModesByTrack = new Map();
 let activeDurationTrackKey = null;
 let progressRaf = null;
 let progressAudio = null;
@@ -115,6 +128,9 @@ let nowPlayingSeekMoved = false;
 let nowPlayingSeekPointerId = null;
 let nowPlayingSeekStartX = 0;
 let nowPlayingSeekSuppressClickUntil = 0;
+let nowPlayingSeekLastX = 0;
+let nowPlayingSeekLastAt = 0;
+let nowPlayingSeekSmoothedSpeed = 0;
 let zonesPanActive = false;
 let zonesPanMoved = false;
 let zonesPanPointerId = null;
@@ -954,10 +970,275 @@ function startTouchCopyHold(card, event) {
   }, TOUCH_COPY_HOLD_MS);
 }
 
-function trackDisplayName(file) {
+function normalizeTrackTitleMode(value) {
+  return value === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_ATTRIBUTES : TRACK_TITLE_MODE_FILE;
+}
+
+function parseTrackTitleModesByTrack(rawValue) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) return new Map();
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return new Map();
+    }
+
+    const result = new Map();
+    for (const [key, mode] of Object.entries(parsed)) {
+      if (normalizeTrackTitleMode(mode) !== TRACK_TITLE_MODE_ATTRIBUTES) continue;
+      if (typeof key !== 'string' || !key.trim()) continue;
+      result.set(key, TRACK_TITLE_MODE_ATTRIBUTES);
+    }
+    return result;
+  } catch (err) {
+    return new Map();
+  }
+}
+
+function saveTrackTitleModesByTrackSetting() {
+  const serialized = {};
+  for (const [fileKey, mode] of trackTitleModesByTrack.entries()) {
+    if (normalizeTrackTitleMode(mode) !== TRACK_TITLE_MODE_ATTRIBUTES) continue;
+    serialized[fileKey] = TRACK_TITLE_MODE_ATTRIBUTES;
+  }
+  saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
+}
+
+function loadTrackTitleModesByTrackSetting() {
+  trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
+}
+
+function getTrackTitleModeByKey(fileKey) {
+  if (typeof fileKey !== 'string' || !fileKey) return TRACK_TITLE_MODE_FILE;
+  return normalizeTrackTitleMode(trackTitleModesByTrack.get(fileKey));
+}
+
+function getTrackTitleModeForTrack(file, basePath = '/audio') {
+  return getTrackTitleModeByKey(trackKey(file, basePath));
+}
+
+function keepTrackTitleModesForFiles(files, basePath = '/audio') {
+  const allowedKeys = new Set(
+    Array.isArray(files)
+      ? files
+          .filter((file) => typeof file === 'string' && file.trim())
+          .map((file) => trackKey(file, basePath))
+      : [],
+  );
+
+  let changed = false;
+  for (const key of trackTitleModesByTrack.keys()) {
+    if (allowedKeys.has(key)) continue;
+    trackTitleModesByTrack.delete(key);
+    changed = true;
+  }
+
+  if (changed) {
+    saveTrackTitleModesByTrackSetting();
+  }
+}
+
+function sanitizeTrackAttributeText(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\u0000+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function trackFileDisplayName(file) {
   const normalized = typeof file === 'string' ? file.replace(/\\/g, '/') : '';
   const basename = normalized.split('/').filter(Boolean).pop() || normalized;
   return stripExtension(basename);
+}
+
+function buildTrackAttributesDisplayName(attributes, file) {
+  const safeTitle = sanitizeTrackAttributeText(attributes && attributes.title);
+  const safeArtist = sanitizeTrackAttributeText(attributes && attributes.artist);
+  const fallback = trackFileDisplayName(file);
+  if (safeTitle && safeArtist) {
+    return `${safeArtist} - ${safeTitle}`;
+  }
+  return safeTitle || safeArtist || fallback;
+}
+
+function normalizeTrackAttributesPayload(payload, file) {
+  const title = sanitizeTrackAttributeText(payload && payload.title);
+  const artist = sanitizeTrackAttributeText(payload && payload.artist);
+  const displayName = sanitizeTrackAttributeText(payload && payload.displayName) || buildTrackAttributesDisplayName({ title, artist }, file);
+  return { title, artist, displayName };
+}
+
+function refreshTrackNameLabelsByKey(fileKey) {
+  if (!fileKey) return;
+  const labels = trackNameLabelsByFile.get(fileKey);
+  if (!labels || !labels.size) return;
+
+  for (const label of labels) {
+    if (!(label instanceof HTMLElement)) continue;
+    const file = typeof label.dataset.file === 'string' ? label.dataset.file : '';
+    const basePath = typeof label.dataset.basePath === 'string' ? label.dataset.basePath : '/audio';
+    label.textContent = getTrackDisplayNameForMode(file, basePath, { triggerLoad: true });
+  }
+}
+
+function preloadTrackAttributesForConfiguredTracks(files, basePath = '/audio') {
+  if (!Array.isArray(files) || !files.length) return;
+
+  files.forEach((file) => {
+    if (typeof file !== 'string' || !file.trim()) return;
+    if (getTrackTitleModeForTrack(file, basePath) !== TRACK_TITLE_MODE_ATTRIBUTES) return;
+    loadTrackAttributes(file, basePath).catch(() => {});
+  });
+}
+
+function keepKnownTrackAttributesForFiles(files, basePath = '/audio') {
+  const allowedKeys = new Set(
+    Array.isArray(files)
+      ? files
+          .filter((file) => typeof file === 'string' && file.trim())
+          .map((file) => trackKey(file, basePath))
+      : [],
+  );
+
+  for (const key of trackAttributesByFile.keys()) {
+    if (!allowedKeys.has(key)) {
+      trackAttributesByFile.delete(key);
+    }
+  }
+
+  for (const key of trackAttributeLoadPromisesByFile.keys()) {
+    if (!allowedKeys.has(key)) {
+      trackAttributeLoadPromisesByFile.delete(key);
+    }
+  }
+}
+
+async function loadTrackAttributes(file, basePath = '/audio') {
+  const key = trackKey(file, basePath);
+  const cached = trackAttributesByFile.get(key);
+  if (cached) return cached;
+
+  const pending = trackAttributeLoadPromisesByFile.get(key);
+  if (pending) return pending;
+
+  const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
+  const fallback = normalizeTrackAttributesPayload(null, file);
+
+  const request = (async () => {
+    if (normalizedBase !== '/audio') {
+      trackAttributesByFile.set(key, fallback);
+      return fallback;
+    }
+
+    try {
+      const response = await fetch(`/api/audio/attributes?file=${encodeURIComponent(file)}`);
+      if (!response.ok) {
+        trackAttributesByFile.set(key, fallback);
+        return fallback;
+      }
+      const payload = await response.json().catch(() => null);
+      const normalizedAttributes = normalizeTrackAttributesPayload(payload, file);
+      trackAttributesByFile.set(key, normalizedAttributes);
+      return normalizedAttributes;
+    } catch (err) {
+      console.error('Не удалось загрузить атрибуты трека', err);
+      trackAttributesByFile.set(key, fallback);
+      return fallback;
+    }
+  })();
+
+  trackAttributeLoadPromisesByFile.set(key, request);
+
+  try {
+    const attributes = await request;
+    if (getTrackTitleModeByKey(key) === TRACK_TITLE_MODE_ATTRIBUTES) {
+      refreshTrackNameLabelsByKey(key);
+      if (currentTrack && currentTrack.key === key) {
+        syncNowPlayingPanel();
+      }
+      if (currentRole === 'slave' && hostPlaybackState && hostPlaybackState.trackFile) {
+        const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+        if (hostTrackKey === key) {
+          syncHostNowPlayingPanel();
+        }
+      }
+    }
+    return attributes;
+  } finally {
+    trackAttributeLoadPromisesByFile.delete(key);
+  }
+}
+
+function getTrackDisplayNameForMode(file, basePath = '/audio', { triggerLoad = true } = {}) {
+  const fallback = trackFileDisplayName(file);
+  const key = trackKey(file, basePath);
+  if (getTrackTitleModeByKey(key) !== TRACK_TITLE_MODE_ATTRIBUTES) {
+    return fallback;
+  }
+
+  const attributes = trackAttributesByFile.get(key);
+  if (attributes && attributes.displayName) {
+    return attributes.displayName;
+  }
+
+  if (triggerLoad) {
+    loadTrackAttributes(file, basePath).catch(() => {});
+  }
+
+  return fallback;
+}
+
+function setTrackTitleModeForTrack(file, basePath = '/audio', mode, { persist = true, announce = false } = {}) {
+  const fileKey = trackKey(file, basePath);
+  const normalizedMode = normalizeTrackTitleMode(mode);
+  const previousMode = getTrackTitleModeByKey(fileKey);
+  const changed = previousMode !== normalizedMode;
+
+  if (normalizedMode === TRACK_TITLE_MODE_ATTRIBUTES) {
+    trackTitleModesByTrack.set(fileKey, TRACK_TITLE_MODE_ATTRIBUTES);
+  } else {
+    trackTitleModesByTrack.delete(fileKey);
+  }
+
+  if (persist) {
+    saveTrackTitleModesByTrackSetting();
+  }
+
+  if (changed) {
+    refreshTrackNameLabelsByKey(fileKey);
+    if (currentTrack && currentTrack.key === fileKey) {
+      syncNowPlayingPanel();
+    }
+    if (currentRole === 'slave' && hostPlaybackState && hostPlaybackState.trackFile) {
+      const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+      if (hostTrackKey === fileKey) {
+        syncHostNowPlayingPanel();
+      }
+    }
+  }
+
+  if (normalizedMode === TRACK_TITLE_MODE_ATTRIBUTES) {
+    loadTrackAttributes(file, basePath).catch(() => {});
+  }
+
+  if (announce) {
+    const label = trackFileDisplayName(file);
+    setStatus(
+      normalizedMode === TRACK_TITLE_MODE_ATTRIBUTES
+        ? `Режим названия "${label}": атрибуты.`
+        : `Режим названия "${label}": имя файла.`,
+    );
+  }
+
+  return changed;
+}
+
+function toggleTrackTitleModeForTrack(file, basePath = '/audio') {
+  const currentMode = getTrackTitleModeForTrack(file, basePath);
+  const nextMode = currentMode === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_FILE : TRACK_TITLE_MODE_ATTRIBUTES;
+  setTrackTitleModeForTrack(file, basePath, nextMode, { persist: true, announce: true });
+}
+
+function trackDisplayName(file, basePath = '/audio') {
+  return getTrackDisplayNameForMode(file, basePath, { triggerLoad: true });
 }
 
 function stripExtension(filename) {
@@ -1173,9 +1454,26 @@ function setNowPlayingProgress(percent) {
   nowPlayingProgressEl.style.width = `${safePercent}%`;
 }
 
+function setNowPlayingReelActive(active, paused = false) {
+  const isActive = Boolean(active);
+  const isPaused = Boolean(paused);
+  if (nowPlayingControlBtn) {
+    nowPlayingControlBtn.classList.toggle('has-active-track', isActive);
+    nowPlayingControlBtn.classList.toggle('is-paused', isActive && isPaused);
+  }
+  if (nowPlayingReelEl) {
+    nowPlayingReelEl.hidden = !isActive;
+  }
+}
+
+function formatNowPlayingTime(seconds, { useCeil = true } = {}) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  return formatDuration(seconds, { useCeil });
+}
+
 function setNowPlayingTime(seconds, { useCeil = true } = {}) {
   if (!nowPlayingTimeEl) return;
-  nowPlayingTimeEl.textContent = formatDuration(seconds, { useCeil });
+  nowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
 }
 
 function setHostNowPlayingProgress(percent) {
@@ -1184,9 +1482,21 @@ function setHostNowPlayingProgress(percent) {
   hostNowPlayingProgressEl.style.width = `${safePercent}%`;
 }
 
+function setHostNowPlayingReelActive(active, paused = false) {
+  const isActive = Boolean(active);
+  const isPaused = Boolean(paused);
+  if (hostNowPlayingControlEl) {
+    hostNowPlayingControlEl.classList.toggle('has-active-track', isActive);
+    hostNowPlayingControlEl.classList.toggle('is-paused', isActive && isPaused);
+  }
+  if (hostNowPlayingReelEl) {
+    hostNowPlayingReelEl.hidden = !isActive;
+  }
+}
+
 function setHostNowPlayingTime(seconds, { useCeil = true } = {}) {
   if (!hostNowPlayingTimeEl) return;
-  hostNowPlayingTimeEl.textContent = formatDuration(seconds, { useCeil });
+  hostNowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
 }
 
 function formatDuration(seconds, { useCeil = false } = {}) {
@@ -1358,6 +1668,7 @@ function syncHostNowPlayingPanel() {
 
   if (currentRole !== 'slave') {
     stopHostProgressLoop();
+    setHostNowPlayingReelActive(false);
     syncHostTrackHighlight();
     return;
   }
@@ -1365,6 +1676,7 @@ function syncHostNowPlayingPanel() {
   if (!hostPlaybackState || !hostPlaybackState.trackFile) {
     hostNowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
     hostNowPlayingControlLabelEl.textContent = '▶';
+    setHostNowPlayingReelActive(false);
     setHostNowPlayingProgress(0);
     setHostNowPlayingTime(null);
     stopHostProgressLoop();
@@ -1374,6 +1686,7 @@ function syncHostNowPlayingPanel() {
 
   hostNowPlayingTitleEl.textContent = `Хост: ${trackDisplayName(hostPlaybackState.trackFile)}`;
   hostNowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
+  setHostNowPlayingReelActive(true, hostPlaybackState.paused);
 
   const elapsed = getHostPlaybackElapsedSeconds();
   const duration = Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : null;
@@ -1521,6 +1834,7 @@ function syncNowPlayingPanel() {
     nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
     nowPlayingControlLabelEl.textContent = '▶';
     nowPlayingControlBtn.disabled = true;
+    setNowPlayingReelActive(false);
     setNowPlayingProgress(0);
     setNowPlayingTime(null);
     requestHostPlaybackSync(false);
@@ -1530,6 +1844,7 @@ function syncNowPlayingPanel() {
   nowPlayingTitleEl.textContent = trackDisplayName(currentTrack.file);
   nowPlayingControlBtn.disabled = false;
   nowPlayingControlLabelEl.textContent = currentAudio.paused ? '▶' : '❚❚';
+  setNowPlayingReelActive(true, currentAudio.paused);
   setNowPlayingTime(getCurrentTrackRemainingSeconds(), { useCeil: true });
   refreshTrackDurationLabels(currentTrack.key);
   requestHostPlaybackSync(false);
@@ -1561,6 +1876,41 @@ function isNowPlayingToggleZone(clientX, clientY) {
   if (clientY < rect.top || clientY > rect.bottom) return false;
   const centerX = rect.left + rect.width / 2;
   return Math.abs(clientX - centerX) <= NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX;
+}
+
+function setNowPlayingReelScrubSpeed(speedPxPerSecond) {
+  if (!nowPlayingControlBtn) return;
+  const safeSpeed = Number.isFinite(speedPxPerSecond) ? Math.max(0, speedPxPerSecond) : 0;
+  const ratio = Math.min(1, safeSpeed / NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC);
+  const durationSeconds =
+    NOW_PLAYING_REEL_BASE_SPIN_SECONDS -
+    ratio * (NOW_PLAYING_REEL_BASE_SPIN_SECONDS - NOW_PLAYING_REEL_FAST_SPIN_SECONDS);
+  nowPlayingControlBtn.style.setProperty('--reel-spin-inline-duration', `${durationSeconds.toFixed(3)}s`);
+}
+
+function resetNowPlayingReelScrubSpeed() {
+  if (!nowPlayingControlBtn) return;
+  nowPlayingControlBtn.style.removeProperty('--reel-spin-inline-duration');
+}
+
+function updateNowPlayingReelScrubSpeed(clientX, timestampMs) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(timestampMs)) return;
+  if (!Number.isFinite(nowPlayingSeekLastAt) || nowPlayingSeekLastAt <= 0) {
+    nowPlayingSeekLastX = clientX;
+    nowPlayingSeekLastAt = timestampMs;
+    return;
+  }
+
+  const deltaMs = timestampMs - nowPlayingSeekLastAt;
+  const deltaPx = Math.abs(clientX - nowPlayingSeekLastX);
+  nowPlayingSeekLastX = clientX;
+  nowPlayingSeekLastAt = timestampMs;
+
+  if (!Number.isFinite(deltaMs) || deltaMs <= 0) return;
+  const instantSpeed = (deltaPx * 1000) / deltaMs;
+  nowPlayingSeekSmoothedSpeed =
+    nowPlayingSeekSmoothedSpeed > 0 ? nowPlayingSeekSmoothedSpeed * 0.65 + instantSpeed * 0.35 : instantSpeed;
+  setNowPlayingReelScrubSpeed(nowPlayingSeekSmoothedSpeed);
 }
 
 function applyNowPlayingSeekFromClientX(clientX) {
@@ -1604,11 +1954,15 @@ function cleanupNowPlayingSeekInteraction() {
       }
     }
   }
+  resetNowPlayingReelScrubSpeed();
 
   nowPlayingSeekActive = false;
   nowPlayingSeekMoved = false;
   nowPlayingSeekPointerId = null;
   nowPlayingSeekStartX = 0;
+  nowPlayingSeekLastX = 0;
+  nowPlayingSeekLastAt = 0;
+  nowPlayingSeekSmoothedSpeed = 0;
   window.removeEventListener('pointermove', onNowPlayingSeekPointerMove, true);
   window.removeEventListener('pointerup', onNowPlayingSeekPointerUp, true);
   window.removeEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
@@ -1624,6 +1978,10 @@ function onNowPlayingSeekPointerMove(event) {
     nowPlayingControlBtn.classList.add('is-seeking');
   }
   event.preventDefault();
+  updateNowPlayingReelScrubSpeed(
+    event.clientX,
+    Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now(),
+  );
   applyNowPlayingSeekFromClientX(event.clientX);
 }
 
@@ -1664,6 +2022,10 @@ function onNowPlayingControlPointerDown(event) {
   nowPlayingSeekMoved = false;
   nowPlayingSeekPointerId = event.pointerId;
   nowPlayingSeekStartX = event.clientX;
+  nowPlayingSeekLastX = event.clientX;
+  nowPlayingSeekLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  nowPlayingSeekSmoothedSpeed = 0;
+  setNowPlayingReelScrubSpeed(0);
 
   if (typeof nowPlayingControlBtn.setPointerCapture === 'function') {
     try {
@@ -2055,10 +2417,33 @@ function buildTrackCard(
   const order = document.createElement('span');
   order.className = 'track-order';
   order.textContent = Number.isInteger(orderNumber) && orderNumber > 0 ? String(orderNumber) : '•';
+  order.setAttribute('role', 'button');
+  order.tabIndex = 0;
+  order.title = 'Переключить режим отображения названия трека';
+  order.addEventListener('pointerdown', (event) => {
+    event.stopPropagation();
+  });
+  order.addEventListener('dragstart', (event) => {
+    event.preventDefault();
+  });
+  order.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleTrackTitleModeForTrack(file, basePath);
+  });
+  order.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleTrackTitleModeForTrack(file, basePath);
+  });
 
   const name = document.createElement('p');
   name.className = 'track-name';
-  name.textContent = trackDisplayName(file);
+  name.dataset.file = file;
+  name.dataset.basePath = basePath;
+  name.textContent = trackDisplayName(file, basePath);
+  addToMultiMap(trackNameLabelsByFile, key, name);
 
   const durationLabel = document.createElement('span');
   durationLabel.className = 'track-duration';
@@ -2091,7 +2476,7 @@ function attachDragHandlers(card) {
     if (event.isPrimary === false) return;
 
     const target = event.target instanceof Element ? event.target : null;
-    if (target && target.closest('button, input, textarea, select, a')) return;
+    if (target && target.closest('button, input, textarea, select, a, .track-order')) return;
 
     if (isTrackCardDragBlocked(card)) {
       setStatus('Активный трек нельзя перемещать или копировать.');
@@ -2510,6 +2895,7 @@ function resetTrackReferences() {
   buttonsByFile = new Map();
   cardsByFile = new Map();
   durationLabelsByFile = new Map();
+  trackNameLabelsByFile = new Map();
   hostHighlightedDescriptor = '';
 }
 
@@ -3313,7 +3699,10 @@ async function loadTracks() {
   availableFiles = audioResult.files;
   availableFolders = normalizeAudioFolderTemplates(audioResult.folders, availableFiles);
   keepKnownDurationsForFiles(availableFiles);
+  keepKnownTrackAttributesForFiles(availableFiles, '/audio');
+  keepTrackTitleModesForFiles(availableFiles, '/audio');
   preloadTrackDurations(availableFiles);
+  preloadTrackAttributesForConfiguredTracks(availableFiles, '/audio');
 
   if (!availableFiles.length) {
     renderEmpty();
@@ -3609,6 +3998,8 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
 }
 
 function initSettings() {
+  loadTrackTitleModesByTrackSetting();
+
   overlayTimeInput.value = loadSetting(SETTINGS_KEYS.overlayTime, '0.3');
   overlayCurveSelect.value = loadSetting(SETTINGS_KEYS.overlayCurve, 'linear');
   stopFadeInput.value = loadSetting(SETTINGS_KEYS.stopFade, '0.4');
