@@ -362,9 +362,43 @@ function isCopyDragModifier(event) {
   return Boolean(event && (event.ctrlKey || event.metaKey));
 }
 
-function setDropEffectFromEvent(event) {
+function getZoneIndexFromElement(element) {
+  if (!(element instanceof Element)) return null;
+  const zone = element.closest('.zone');
+  if (!zone) return null;
+  const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+  if (!Number.isInteger(zoneIndex) || zoneIndex < 0) return null;
+  return zoneIndex;
+}
+
+function resolveRequestedCopyMode(event) {
+  if (touchCopyDragActive) {
+    return touchDragMode === 'copy';
+  }
+  return isCopyDragModifier(event);
+}
+
+function resolveEffectiveDragMode(event, targetZoneIndex = null) {
+  const requestedCopy = resolveRequestedCopyMode(event);
+  if (!dragContext || dragContext.sourcePlaylistType !== PLAYLIST_TYPE_FOLDER) {
+    return requestedCopy ? 'copy' : 'move';
+  }
+
+  const sourceZoneIndex = Number.isInteger(dragContext.sourceZoneIndex) ? dragContext.sourceZoneIndex : -1;
+  const hasTargetZone = Number.isInteger(targetZoneIndex) && targetZoneIndex >= 0;
+  const isSameZone = hasTargetZone && sourceZoneIndex >= 0 && sourceZoneIndex === targetZoneIndex;
+
+  if (isSameZone) {
+    return requestedCopy ? 'copy' : 'move';
+  }
+
+  return 'copy';
+}
+
+function setDropEffectFromEvent(event, targetZoneIndex = null) {
   if (!event || !event.dataTransfer) return;
-  event.dataTransfer.dropEffect = isActiveCopyDrag(event) ? 'copy' : 'move';
+  const mode = resolveEffectiveDragMode(event, targetZoneIndex);
+  event.dataTransfer.dropEffect = mode === 'copy' ? 'copy' : 'move';
 }
 
 function normalizeDragMode(mode) {
@@ -398,14 +432,8 @@ function clearDragModeBadge() {
   clearDragModeBadgeFromElement(desktopDragGhost);
 }
 
-function isActiveCopyDrag(event) {
-  if (dragContext && dragContext.sourcePlaylistType === PLAYLIST_TYPE_FOLDER) {
-    return true;
-  }
-  if (touchCopyDragActive) {
-    return touchDragMode === 'copy';
-  }
-  return isCopyDragModifier(event);
+function isActiveCopyDrag(event, targetZoneIndex = null) {
+  return resolveEffectiveDragMode(event, targetZoneIndex) === 'copy';
 }
 
 function clearDragPreviewCard() {
@@ -552,7 +580,10 @@ function handleGlobalDragOver(event) {
     return;
   }
   if (target && zonesContainer.contains(target)) {
-    applyDragModeBadge(isActiveCopyDrag(event) ? 'copy' : 'move');
+    const targetZoneIndex = getZoneIndexFromElement(target);
+    const mode = resolveEffectiveDragMode(event, targetZoneIndex);
+    applyDragModeBadge(mode);
+    event.dataTransfer.dropEffect = mode === 'copy' ? 'copy' : 'move';
     return;
   }
   applyDragModeBadge('cancel');
@@ -694,7 +725,7 @@ function updateTouchCopyDragPreview(clientX, clientY) {
     }
     applyDragModeBadge('delete');
     if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-cancel');
+      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel');
       touchCopyDragGhost.classList.add('is-delete');
     }
     return;
@@ -708,16 +739,18 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   if (!zone) {
     applyDragModeBadge('cancel');
     if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-delete');
+      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-delete');
       touchCopyDragGhost.classList.add('is-cancel');
     }
     return;
   }
 
-  applyDragModeBadge(touchDragMode === 'copy' ? 'copy' : 'move');
+  const targetZoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+  const dropMode = resolveEffectiveDragMode(null, Number.isInteger(targetZoneIndex) ? targetZoneIndex : null);
+  applyDragModeBadge(dropMode);
   if (touchCopyDragGhost) {
-    touchCopyDragGhost.classList.remove('is-delete');
-    touchCopyDragGhost.classList.remove('is-cancel');
+    touchCopyDragGhost.classList.remove('is-delete', 'is-cancel', 'is-copy', 'is-move');
+    touchCopyDragGhost.classList.add(dropMode === 'copy' ? 'is-copy' : 'is-move');
   }
 
   zone.classList.add('drag-over');
@@ -815,7 +848,7 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   const sourceBody = card.parentElement;
   const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
   const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
-  const resolvedMode = sourcePlaylistType === PLAYLIST_TYPE_FOLDER ? 'copy' : mode === 'copy' ? 'copy' : 'move';
+  const resolvedMode = mode === 'copy' ? 'copy' : 'move';
 
   dragContext = {
     file: card.dataset.file || '',
@@ -1716,25 +1749,7 @@ function buildTrackCard(
   );
   addToMultiMap(buttonsByFile, key, playButton);
 
-  const removeButton = document.createElement('button');
-  removeButton.type = 'button';
-  removeButton.className = 'track-remove-btn';
-  removeButton.textContent = '✕';
-  removeButton.title = canDelete
-    ? 'Удалить трек из плей-листа'
-    : 'Удаление недоступно: трек существует в единственном экземпляре';
-  removeButton.setAttribute('aria-label', 'Удалить трек');
-  removeButton.disabled = !canDelete;
-  removeButton.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    removeTrackFromPlaylist(playlistIndex, playlistPosition).catch((err) => {
-      console.error(err);
-      setStatus('Не удалось удалить трек.');
-    });
-  });
-
-  card.append(order, name, durationLabel, playButton, removeButton);
+  card.append(order, name, durationLabel, playButton);
   if (draggable) {
     attachDragHandlers(card);
   }
@@ -1773,7 +1788,7 @@ function attachDragHandlers(card) {
       snapshotLayout: cloneLayoutState(layout),
     };
 
-    e.dataTransfer.effectAllowed = sourcePlaylistType === PLAYLIST_TYPE_FOLDER ? 'copy' : 'copyMove';
+    e.dataTransfer.effectAllowed = 'copyMove';
     e.dataTransfer.setData('text/plain', card.dataset.file);
     setDropEffectFromEvent(e);
     createDesktopDragGhost(card, e.clientX, e.clientY);
@@ -1823,11 +1838,16 @@ function getDragInsertBefore(container, event, { includeDraggingCard = false } =
 function applyDragPreview(zoneBody, event) {
   if (!draggingCard || !zoneBody) return;
   event.preventDefault();
-  setDropEffectFromEvent(event);
-  updateDesktopDragGhostPosition(event.clientX, event.clientY);
-  applyDragModeBadge(isActiveCopyDrag(event) ? 'copy' : 'move');
+  const zone = zoneBody.closest('.zone');
+  const targetZoneIndex = zone ? Number.parseInt(zone.dataset.zoneIndex || '', 10) : NaN;
+  const normalizedTargetZoneIndex = Number.isInteger(targetZoneIndex) && targetZoneIndex >= 0 ? targetZoneIndex : null;
+  const mode = resolveEffectiveDragMode(event, normalizedTargetZoneIndex);
 
-  if (isActiveCopyDrag(event)) {
+  setDropEffectFromEvent(event, normalizedTargetZoneIndex);
+  updateDesktopDragGhostPosition(event.clientX, event.clientY);
+  applyDragModeBadge(mode);
+
+  if (mode === 'copy') {
     const previewCard = ensureDragPreviewCard();
     if (!previewCard) return;
     const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: true });
@@ -2023,58 +2043,6 @@ function resolveTrackIndexByContext(layoutState, context) {
     trackIndex,
     file: expectedFile,
   };
-}
-
-async function removeTrackFromPlaylist(playlistIndex, trackIndex, { source = 'button' } = {}) {
-  const previousLayout = cloneLayoutState(layout);
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-
-  const sourceContext = {
-    sourceZoneIndex: playlistIndex,
-    sourceIndex: trackIndex,
-    file:
-      Number.isInteger(playlistIndex) &&
-      playlistIndex >= 0 &&
-      playlistIndex < previousLayout.length &&
-      Number.isInteger(trackIndex) &&
-      trackIndex >= 0 &&
-      trackIndex < previousLayout[playlistIndex].length
-        ? previousLayout[playlistIndex][trackIndex]
-        : '',
-  };
-  const resolution = resolveTrackIndexByContext(previousLayout, sourceContext);
-  const eligibility = getTrackDeleteEligibility(previousLayout, resolution.playlistIndex, resolution.trackIndex);
-
-  if (!eligibility.canDelete) {
-    setStatus(`Удаление недоступно: ${eligibility.reason}`);
-    return false;
-  }
-
-  const nextLayout = cloneLayoutState(previousLayout);
-  nextLayout[resolution.playlistIndex].splice(resolution.trackIndex, 1);
-
-  layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(previousNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
-  renderZones();
-
-  try {
-    await pushSharedLayout();
-    setStatus(source === 'drag' ? 'Трек удален через корзину и синхронизирован.' : 'Трек удален и синхронизирован.');
-    return true;
-  } catch (err) {
-    console.error(err);
-    layout = previousLayout;
-    playlistNames = previousNames;
-    playlistMeta = previousMeta;
-    playlistAutoplay = previousAutoplay;
-    renderZones();
-    setStatus('Не удалось синхронизировать удаление трека.');
-    return false;
-  }
 }
 
 async function handleDragDeleteFromContext() {
@@ -2750,7 +2718,7 @@ function renderZones() {
 
     zone.addEventListener('dragover', (e) => {
       e.preventDefault();
-      setDropEffectFromEvent(e);
+      setDropEffectFromEvent(e, playlistIndex);
       zone.classList.add('drag-over');
     });
     zone.addEventListener('dragleave', () => {
@@ -2786,7 +2754,8 @@ function renderZones() {
     if (metaEntry.type === PLAYLIST_TYPE_FOLDER) {
       const folderIcon = document.createElement('span');
       folderIcon.className = 'playlist-folder-icon';
-      folderIcon.textContent = '📁';
+      folderIcon.innerHTML =
+        '<svg viewBox="0 0 24 18" aria-hidden="true" focusable="false"><path d="M1.5 16.5V3.5h7l2 2h12v11z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M1.5 5.5h21" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
       const originalFolderName = sanitizeFolderOriginalName(metaEntry.folderOriginalName, metaEntry.folderKey);
       folderIcon.title = originalFolderName || metaEntry.folderKey || 'Папка';
       folderIcon.setAttribute('aria-label', 'Плей-лист папки');
@@ -2907,7 +2876,7 @@ async function handleDrop(event, targetZoneIndex) {
   const previousNames = playlistNames.slice();
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
-  const isCopyDrop = isActiveCopyDrag(event);
+  const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
 
   let nextLayout;
   if (isCopyDrop) {
