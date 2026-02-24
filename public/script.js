@@ -2,11 +2,13 @@ const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
 const refreshPlaylistsBtn = document.getElementById('refreshPlaylists');
+const touchFullscreenToggleBtn = document.getElementById('touchFullscreenToggle');
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
+const serverPanelEl = document.getElementById('serverPanel');
 const stopServerBtn = document.getElementById('stopServer');
 const serverActionsHintEl = document.querySelector('.server-actions__hint');
 const appVersionEl = document.getElementById('appVersion');
@@ -169,7 +171,6 @@ let zonesTouchPanVelocityX = 0;
 const zonesWheelTargets = new Map();
 let zonesWheelSmoothRaf = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
-const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
 const HOST_NOW_PLAYING_IDLE_TITLE = 'Хост: ничего не играет';
 const clientId = getClientId();
@@ -1316,6 +1317,91 @@ function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
 }
 
+function isTouchFullscreenPreferredDevice() {
+  const hasTouchPoints = (() => {
+    if (typeof navigator !== 'object' || !navigator) return false;
+    const maxTouchPoints = Number.isFinite(navigator.maxTouchPoints) ? navigator.maxTouchPoints : 0;
+    const legacyTouchPoints = Number.isFinite(navigator.msMaxTouchPoints) ? navigator.msMaxTouchPoints : 0;
+    return maxTouchPoints > 0 || legacyTouchPoints > 0;
+  })();
+  if (!hasTouchPoints) return false;
+  if (typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(pointer: coarse)').matches;
+}
+
+function hasFullscreenSupport() {
+  const root = document.documentElement;
+  return Boolean(root && (root.requestFullscreen || root.webkitRequestFullscreen));
+}
+
+function getFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function isFullscreenActive() {
+  return Boolean(getFullscreenElement());
+}
+
+function updateTouchFullscreenToggleState() {
+  if (!touchFullscreenToggleBtn) return;
+  const isActive = isFullscreenActive();
+  touchFullscreenToggleBtn.textContent = isActive ? '⤡' : '⛶';
+  touchFullscreenToggleBtn.title = isActive ? 'Выйти из полноэкранного режима' : 'Полноэкранный режим';
+  touchFullscreenToggleBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+}
+
+async function enterFullscreenMode() {
+  const root = document.documentElement;
+  if (!root) return;
+  if (root.requestFullscreen) {
+    await root.requestFullscreen();
+    return;
+  }
+  if (root.webkitRequestFullscreen) {
+    await root.webkitRequestFullscreen();
+    return;
+  }
+  throw new Error('Fullscreen API не поддерживается');
+}
+
+async function exitFullscreenMode() {
+  if (document.exitFullscreen) {
+    await document.exitFullscreen();
+    return;
+  }
+  if (document.webkitExitFullscreen) {
+    await document.webkitExitFullscreen();
+  }
+}
+
+async function toggleTouchFullscreenMode() {
+  try {
+    if (isFullscreenActive()) {
+      await exitFullscreenMode();
+    } else {
+      await enterFullscreenMode();
+    }
+  } catch (err) {
+    console.error('Не удалось переключить полноэкранный режим', err);
+    setStatus('Не удалось включить полноэкранный режим.');
+  } finally {
+    updateTouchFullscreenToggleState();
+  }
+}
+
+function initTouchFullscreenToggle() {
+  if (!touchFullscreenToggleBtn) return;
+
+  const shouldShow = hasFullscreenSupport() && isTouchFullscreenPreferredDevice();
+  touchFullscreenToggleBtn.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  touchFullscreenToggleBtn.addEventListener('click', toggleTouchFullscreenMode);
+  document.addEventListener('fullscreenchange', updateTouchFullscreenToggleState);
+  document.addEventListener('webkitfullscreenchange', updateTouchFullscreenToggleState);
+  updateTouchFullscreenToggleState();
+}
+
 function setAuthOverlayVisible(visible) {
   if (!authOverlay) return;
   authOverlay.hidden = !visible;
@@ -1374,13 +1460,17 @@ function applyRoleUi(role) {
   document.body.dataset.role = resolvedRole;
 
   const isHost = resolvedRole === 'host';
+  if (serverPanelEl) {
+    serverPanelEl.hidden = !isHost;
+  }
+
   if (stopServerBtn) {
     stopServerBtn.hidden = !isHost;
     stopServerBtn.disabled = !isHost;
   }
 
   if (serverActionsHintEl) {
-    serverActionsHintEl.textContent = isHost ? HOST_SERVER_HINT : SLAVE_SERVER_HINT;
+    serverActionsHintEl.textContent = HOST_SERVER_HINT;
   }
 
   if (isHost) {
@@ -4744,11 +4834,17 @@ async function bootstrap() {
   initSidebarToggle();
   initServerControls();
   initPlaylistControls();
+  initTouchFullscreenToggle();
   initNowPlayingControls();
   initZonesPanControls();
   initUpdater();
   startAudioCatalogAutoRefresh();
   window.addEventListener('beforeunload', () => {
+    if (touchFullscreenToggleBtn) {
+      touchFullscreenToggleBtn.removeEventListener('click', toggleTouchFullscreenMode);
+    }
+    document.removeEventListener('fullscreenchange', updateTouchFullscreenToggleState);
+    document.removeEventListener('webkitfullscreenchange', updateTouchFullscreenToggleState);
     stopAudioCatalogAutoRefresh();
     clearLayoutStreamConnection();
     stopHostProgressLoop();

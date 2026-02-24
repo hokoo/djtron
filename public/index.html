@@ -10,63 +10,77 @@
 <div class="layout">
 	<aside class="sidebar" id="sidebar">
 		<button id="sidebarToggle" class="secondary ghost sidebar-toggle" aria-label="Toggle panel">☰</button>
-		<header class="sidebar__header">
-			<h1>djTRON</h1>
-			<p>Плеер для дискотек и музыкальных мероприятий. Загрузите аудио в папку <strong>/audio</strong>.</p>
-		</header>
-		<section class="panel sidebar-panel">
-			<div class="settings">
-				<label>
-					Перекрытия треков (сек)
-					<input type="number" id="overlayTime" min="0" step="0.1"/>
-				</label>
-				<label>
-					Затухание при остановке (сек)
-					<input type="number" id="stopFadeTime" min="0" step="0.1"/>
-				</label>
-				<label>
-					Функция изменения громкости
-					<select id="overlayCurve">
-						<option value="linear">Linear</option>
-						<option value="ease-in">Ease-in</option>
-						<option value="ease-out">Ease-out</option>
-						<option value="ease-in-out">Ease-in-out</option>
-					</select>
-				</label>
-			</div>
-		</section>
-
-		<section class="panel sidebar-panel">
-			<div class="server-actions">
-				<div>
-					<p class="server-actions__title">Управление сервером</p>
-					<p class="server-actions__hint">Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится
-						и страница перестанет отвечать.</p>
+		<div class="sidebar-scroll">
+			<header class="sidebar__header">
+				<h1>djTRON</h1>
+				<p>Плеер для дискотек и музыкальных мероприятий. Загрузите аудио в папку <strong>/audio</strong>.</p>
+			</header>
+			<section class="panel sidebar-panel">
+				<div class="settings">
+					<label>
+						Перекрытия треков (сек)
+						<input type="number" id="overlayTime" min="0" step="0.1"/>
+					</label>
+					<label>
+						Затухание при остановке (сек)
+						<input type="number" id="stopFadeTime" min="0" step="0.1"/>
+					</label>
+					<label>
+						Функция изменения громкости
+						<select id="overlayCurve">
+							<option value="linear">Linear</option>
+							<option value="ease-in">Ease-in</option>
+							<option value="ease-out">Ease-out</option>
+							<option value="ease-in-out">Ease-in-out</option>
+						</select>
+					</label>
 				</div>
-				<button id="stopServer" class="secondary danger">Остановить сервер</button>
-			</div>
-		</section>
+			</section>
 
-                <section class="panel sidebar-panel sidebar-repo">
-                        <p class="sidebar-repo__title">Репозиторий проекта
-                                <a class="sidebar-repo__link" href="https://github.com/hokoo/djtron" target="_blank"
-                                   rel="noopener noreferrer">на GitHub</a>
-                        </p>
-                        <p id="appVersion" class="sidebar-repo__version" aria-live="polite"></p>
-                        <label class="update-settings">
-                                <input type="checkbox" id="allowPrerelease" />
-                                <span>Устанавливать пре-релизные версии</span>
-                        </label>
-                        <div id="updateInfo" class="update-info" hidden>
-                                <p id="updateMessage" class="update-info__message" aria-live="polite"></p>
-                                <div class="update-info__actions">
-                                        <button id="updateButton" class="secondary">Обновить</button>
-                                        <a id="releaseLink" class="sidebar-repo__link" href="#" target="_blank" rel="noopener noreferrer">Релиз</a>
-                                </div>
-                                <p id="updateStatus" class="update-info__status" aria-live="polite"></p>
-                        </div>
-                </section>
-        </aside>
+			<section class="panel sidebar-panel" id="serverPanel">
+				<div class="server-actions">
+					<div>
+						<p class="server-actions__title">Управление сервером</p>
+						<p class="server-actions__hint">Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится
+							и страница перестанет отвечать.</p>
+					</div>
+					<button id="stopServer" class="secondary danger">Остановить сервер</button>
+				</div>
+			</section>
+
+			<div class="sidebar-quick-actions">
+				<button
+					id="refreshPlaylists"
+					class="secondary ghost"
+					type="button"
+					title="Обновить список треков и папок из /audio, включая авто-плей-листы"
+					aria-label="Обновить список треков и папок из /audio, включая авто-плей-листы"
+				>Обновить</button>
+				<button id="addPlaylist" class="secondary ghost" type="button">+ Плей-лист</button>
+				<button id="touchFullscreenToggle" class="secondary ghost fullscreen-toggle" type="button" hidden aria-label="Полноэкранный режим">⛶</button>
+			</div>
+
+			<section class="panel sidebar-panel sidebar-repo">
+				<p class="sidebar-repo__title">Репозиторий проекта
+					<a class="sidebar-repo__link" href="https://github.com/hokoo/djtron" target="_blank"
+					   rel="noopener noreferrer">на GitHub</a>
+				</p>
+				<p id="appVersion" class="sidebar-repo__version" aria-live="polite"></p>
+				<label class="update-settings">
+					<input type="checkbox" id="allowPrerelease" />
+					<span>Устанавливать пре-релизные версии</span>
+				</label>
+				<div id="updateInfo" class="update-info" hidden>
+					<p id="updateMessage" class="update-info__message" aria-live="polite"></p>
+					<div class="update-info__actions">
+						<button id="updateButton" class="secondary">Обновить</button>
+						<a id="releaseLink" class="sidebar-repo__link" href="#" target="_blank" rel="noopener noreferrer">Релиз</a>
+					</div>
+					<p id="updateStatus" class="update-info__status" aria-live="polite"></p>
+				</div>
+			</section>
+		</div>
+	</aside>
 
         <main class="content">
                 <div class="content-header">
@@ -89,10 +103,6 @@
                                                 <span id="nowPlayingTime" class="now-playing-control__time"></span>
                                         </button>
                                 </div>
-                        </div>
-                        <div class="playlist-controls">
-                                <button id="refreshPlaylists" class="secondary ghost" type="button">Обновить</button>
-                                <button id="addPlaylist" class="secondary ghost" type="button">+ Плей-лист</button>
                         </div>
                 </div>
                 <section class="zones-panel">
