@@ -45,17 +45,21 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background: var(--background);
   color: var(--text);
+  height: 100vh;
+  overflow: hidden;
 }
 
 .layout {
   display: flex;
   width: 100%;
+  height: 100vh;
   min-height: 100vh;
 }
 
 .sidebar {
   width: 320px;
   min-width: 320px;
+  height: 100vh;
   background: var(--panel);
   border-right: 1px solid var(--border);
   padding: 16px 16px 32px;
@@ -65,6 +69,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .sidebar.collapsed {
@@ -98,6 +104,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .content-header {
@@ -319,6 +328,9 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   border: none;
   background: transparent;
   box-shadow: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .settings {
@@ -363,7 +375,7 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   width: 100%;
   max-width: none;
   position: relative;
-  touch-action: none;
+  touch-action: pan-y;
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease,
     transform 0.12s ease;
 }
@@ -592,6 +604,8 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   touch-action: pan-y;
   -ms-overflow-style: none;
   scrollbar-width: none;
+  height: 100%;
+  min-height: 0;
 }
 
 .zones::-webkit-scrollbar {
@@ -609,13 +623,14 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   border-radius: 10px;
   padding: 10px;
   background: transparent;
-  min-height: 220px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 272px;
   max-width: 500px;
   flex: 1 1 300px;
+  height: 100%;
 }
 
 .playlist-header {
@@ -760,7 +775,18 @@ body[data-role='slave'] .playlist-folder-icon {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-height: 120px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.zone-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .track-order {

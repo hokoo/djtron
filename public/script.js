@@ -61,6 +61,10 @@ const NOW_PLAYING_REEL_BASE_SPIN_SECONDS = 1.8;
 const NOW_PLAYING_REEL_FAST_SPIN_SECONDS = 0.24;
 const NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC = 1600;
 const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
+const ZONES_PAN_TOUCH_GAIN = 2.4;
+const ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS = 0.16;
+const ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS = 0.02;
+const ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME = 0.92;
 const TRACK_TITLE_MODE_FILE = 'file';
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
@@ -137,6 +141,21 @@ let zonesPanPointerId = null;
 let zonesPanStartX = 0;
 let zonesPanStartY = 0;
 let zonesPanStartScrollLeft = 0;
+let zonesPanPreferHorizontal = false;
+let zonesPanPointerType = '';
+let zonesPanMoveGain = 1;
+let zonesPanLastX = 0;
+let zonesPanLastAt = 0;
+let zonesPanVelocityX = 0;
+let zonesPanMomentumRaf = null;
+let zonesTouchPanActive = false;
+let zonesTouchPanMoved = false;
+let zonesTouchPanStartMidX = 0;
+let zonesTouchPanStartMidY = 0;
+let zonesTouchPanStartScrollLeft = 0;
+let zonesTouchPanLastMidX = 0;
+let zonesTouchPanLastAt = 0;
+let zonesTouchPanVelocityX = 0;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -939,13 +958,6 @@ function startTouchCopyHold(card, event) {
 
   lastTouchPointerDownAt = Date.now();
   clearTouchCopyHold();
-  if (typeof card.setPointerCapture === 'function') {
-    try {
-      card.setPointerCapture(event.pointerId);
-    } catch (err) {
-      // ignore pointer capture errors when pointer cannot be captured
-    }
-  }
   touchHoldPointerId = event.pointerId;
   touchHoldStartX = event.clientX;
   touchHoldStartY = event.clientY;
@@ -2054,6 +2066,233 @@ function canPanZonesContainer() {
   return zonesContainer.scrollWidth - zonesContainer.clientWidth > 1;
 }
 
+function stopZonesPanMomentum() {
+  if (zonesPanMomentumRaf === null) return;
+  cancelAnimationFrame(zonesPanMomentumRaf);
+  zonesPanMomentumRaf = null;
+}
+
+function startZonesPanMomentum(initialVelocityPxPerMs) {
+  if (!zonesContainer) return;
+  stopZonesPanMomentum();
+
+  let velocity = Number.isFinite(initialVelocityPxPerMs) ? initialVelocityPxPerMs : 0;
+  if (Math.abs(velocity) < ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) return;
+
+  let previousTimestamp = performance.now();
+
+  const step = (timestamp) => {
+    if (!zonesContainer) {
+      zonesPanMomentumRaf = null;
+      return;
+    }
+
+    const deltaMs = Math.max(1, timestamp - previousTimestamp);
+    previousTimestamp = timestamp;
+
+    const maxScrollLeft = Math.max(0, zonesContainer.scrollWidth - zonesContainer.clientWidth);
+    if (maxScrollLeft <= 0) {
+      zonesPanMomentumRaf = null;
+      return;
+    }
+
+    const previousScrollLeft = zonesContainer.scrollLeft;
+    const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, previousScrollLeft + velocity * deltaMs));
+    zonesContainer.scrollLeft = nextScrollLeft;
+
+    const hitBoundary = Math.abs(nextScrollLeft - previousScrollLeft) < 0.01;
+    if (hitBoundary) {
+      zonesPanMomentumRaf = null;
+      return;
+    }
+
+    const decay = Math.pow(ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, deltaMs / 16);
+    velocity *= decay;
+
+    if (Math.abs(velocity) < ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS) {
+      zonesPanMomentumRaf = null;
+      return;
+    }
+
+    zonesPanMomentumRaf = requestAnimationFrame(step);
+  };
+
+  zonesPanMomentumRaf = requestAnimationFrame(step);
+}
+
+function getZoneBodies() {
+  if (!zonesContainer) return [];
+  return Array.from(zonesContainer.querySelectorAll('.zone-body'));
+}
+
+function normalizeWheelDeltaPixels(event) {
+  if (!event) return { deltaX: 0, deltaY: 0 };
+  let factor = 1;
+  if (event.deltaMode === 1) {
+    factor = 16;
+  } else if (event.deltaMode === 2) {
+    factor = window.innerHeight || 800;
+  }
+  return {
+    deltaX: Number.isFinite(event.deltaX) ? event.deltaX * factor : 0,
+    deltaY: Number.isFinite(event.deltaY) ? event.deltaY * factor : 0,
+  };
+}
+
+function applySharedZonesVerticalScroll(deltaY) {
+  if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) return false;
+
+  let changed = false;
+  const bodies = getZoneBodies();
+  for (const body of bodies) {
+    if (!(body instanceof HTMLElement)) continue;
+
+    const maxScrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
+    if (maxScrollTop <= 0) continue;
+
+    const previous = body.scrollTop;
+    const next = Math.max(0, Math.min(maxScrollTop, previous + deltaY));
+    if (Math.abs(next - previous) < 0.01) continue;
+    body.scrollTop = next;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function onZonesWheel(event) {
+  if (!zonesContainer) return;
+  if (!event) return;
+  if (event.ctrlKey) return;
+  if (draggingCard || touchCopyDragActive) return;
+
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || !zonesContainer.contains(target)) return;
+
+  const { deltaX, deltaY } = normalizeWheelDeltaPixels(event);
+  if (Math.abs(deltaY) < Math.abs(deltaX)) {
+    return;
+  }
+
+  if (applySharedZonesVerticalScroll(deltaY)) {
+    event.preventDefault();
+  }
+}
+
+function getTouchMidpoint(touches) {
+  if (!touches || touches.length < 2) return null;
+  const first = touches[0];
+  const second = touches[1];
+  if (!first || !second) return null;
+  return {
+    x: (first.clientX + second.clientX) / 2,
+    y: (first.clientY + second.clientY) / 2,
+  };
+}
+
+function cleanupZonesTouchPanInteraction() {
+  if (zonesContainer) {
+    zonesContainer.classList.remove('is-pan-scrolling');
+  }
+
+  zonesTouchPanActive = false;
+  zonesTouchPanMoved = false;
+  zonesTouchPanStartMidX = 0;
+  zonesTouchPanStartMidY = 0;
+  zonesTouchPanStartScrollLeft = 0;
+  zonesTouchPanLastMidX = 0;
+  zonesTouchPanLastAt = 0;
+  zonesTouchPanVelocityX = 0;
+}
+
+function onZonesTouchStart(event) {
+  if (!zonesContainer) return;
+  if (!event || !event.touches) return;
+  if (!canPanZonesContainer()) return;
+  if (draggingCard || touchCopyDragActive) return;
+  if (event.touches.length !== 2) return;
+
+  const target = event.target instanceof Element ? event.target : null;
+  if (!isZonesPanFreeAreaTarget(target)) return;
+
+  const midpoint = getTouchMidpoint(event.touches);
+  if (!midpoint) return;
+
+  stopZonesPanMomentum();
+  cleanupZonesTouchPanInteraction();
+
+  zonesTouchPanActive = true;
+  zonesTouchPanMoved = false;
+  zonesTouchPanStartMidX = midpoint.x;
+  zonesTouchPanStartMidY = midpoint.y;
+  zonesTouchPanStartScrollLeft = zonesContainer.scrollLeft;
+  zonesTouchPanLastMidX = midpoint.x;
+  zonesTouchPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  zonesTouchPanVelocityX = 0;
+  event.preventDefault();
+}
+
+function onZonesTouchMove(event) {
+  if (!zonesTouchPanActive || !event || !event.touches) return;
+  if (!zonesContainer) return;
+
+  if (event.touches.length < 2) {
+    const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_PAN_TOUCH_GAIN : 0;
+    cleanupZonesTouchPanInteraction();
+    if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
+      startZonesPanMomentum(momentumVelocity);
+    }
+    return;
+  }
+
+  const midpoint = getTouchMidpoint(event.touches);
+  if (!midpoint) return;
+
+  const nowTimestamp = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  const sampleDeltaMs = nowTimestamp - zonesTouchPanLastAt;
+  if (Number.isFinite(sampleDeltaMs) && sampleDeltaMs > 0) {
+    const sampleVelocityX = (midpoint.x - zonesTouchPanLastMidX) / sampleDeltaMs;
+    zonesTouchPanVelocityX = zonesTouchPanVelocityX * 0.7 + sampleVelocityX * 0.3;
+  }
+  zonesTouchPanLastMidX = midpoint.x;
+  zonesTouchPanLastAt = nowTimestamp;
+
+  const deltaX = midpoint.x - zonesTouchPanStartMidX;
+  const deltaY = midpoint.y - zonesTouchPanStartMidY;
+
+  if (!zonesTouchPanMoved) {
+    const dragThreshold = 2;
+    if (Math.abs(deltaX) < dragThreshold && Math.abs(deltaY) < dragThreshold) return;
+    const verticalDominanceRatio = 2.6;
+    if (Math.abs(deltaY) > Math.abs(deltaX) * verticalDominanceRatio) {
+      cleanupZonesTouchPanInteraction();
+      return;
+    }
+  }
+
+  zonesTouchPanMoved = true;
+  zonesContainer.classList.add('is-pan-scrolling');
+  event.preventDefault();
+  zonesContainer.scrollLeft = zonesTouchPanStartScrollLeft - deltaX * ZONES_PAN_TOUCH_GAIN;
+}
+
+function onZonesTouchEnd(event) {
+  if (!zonesTouchPanActive) return;
+  const hasEnoughTouches = Boolean(event && event.touches && event.touches.length >= 2);
+  if (hasEnoughTouches) return;
+
+  const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_PAN_TOUCH_GAIN : 0;
+  cleanupZonesTouchPanInteraction();
+  if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
+    startZonesPanMomentum(momentumVelocity);
+  }
+}
+
+function onZonesTouchCancel() {
+  if (!zonesTouchPanActive) return;
+  cleanupZonesTouchPanInteraction();
+}
+
 function isZonesPanFreeAreaTarget(target) {
   if (!(target instanceof Element)) return false;
   if (!zonesContainer || !zonesContainer.contains(target)) return false;
@@ -2082,6 +2321,12 @@ function cleanupZonesPanInteraction() {
   zonesPanStartX = 0;
   zonesPanStartY = 0;
   zonesPanStartScrollLeft = 0;
+  zonesPanPreferHorizontal = false;
+  zonesPanPointerType = '';
+  zonesPanMoveGain = 1;
+  zonesPanLastX = 0;
+  zonesPanLastAt = 0;
+  zonesPanVelocityX = 0;
   window.removeEventListener('pointermove', onZonesPanPointerMove, true);
   window.removeEventListener('pointerup', onZonesPanPointerUp, true);
   window.removeEventListener('pointercancel', onZonesPanPointerCancel, true);
@@ -2093,11 +2338,22 @@ function onZonesPanPointerMove(event) {
 
   const deltaX = event.clientX - zonesPanStartX;
   const deltaY = event.clientY - zonesPanStartY;
+  const nowTimestamp = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  const sampleDeltaMs = nowTimestamp - zonesPanLastAt;
+  if (Number.isFinite(sampleDeltaMs) && sampleDeltaMs > 0) {
+    const sampleVelocityX = (event.clientX - zonesPanLastX) / sampleDeltaMs;
+    zonesPanVelocityX = zonesPanVelocityX * 0.7 + sampleVelocityX * 0.3;
+  }
+  zonesPanLastX = event.clientX;
+  zonesPanLastAt = nowTimestamp;
+
   if (!zonesPanMoved) {
-    if (Math.abs(deltaX) < ZONES_PAN_DRAG_THRESHOLD_PX && Math.abs(deltaY) < ZONES_PAN_DRAG_THRESHOLD_PX) {
+    const dragThreshold = zonesPanPreferHorizontal ? Math.max(2, Math.floor(ZONES_PAN_DRAG_THRESHOLD_PX / 2)) : ZONES_PAN_DRAG_THRESHOLD_PX;
+    if (Math.abs(deltaX) < dragThreshold && Math.abs(deltaY) < dragThreshold) {
       return;
     }
-    if (Math.abs(deltaY) > Math.abs(deltaX)) {
+    const verticalDominanceRatio = zonesPanPreferHorizontal ? 2.6 : 1;
+    if (Math.abs(deltaY) > Math.abs(deltaX) * verticalDominanceRatio) {
       // Vertical gesture: keep native vertical scroll behavior.
       cleanupZonesPanInteraction();
       return;
@@ -2107,12 +2363,17 @@ function onZonesPanPointerMove(event) {
   zonesPanMoved = true;
   zonesContainer.classList.add('is-pan-scrolling');
   event.preventDefault();
-  zonesContainer.scrollLeft = zonesPanStartScrollLeft - deltaX;
+  zonesContainer.scrollLeft = zonesPanStartScrollLeft - deltaX * zonesPanMoveGain;
 }
 
 function onZonesPanPointerUp(event) {
   if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  const shouldUseMomentum = zonesPanMoved && zonesPanPointerType === 'touch';
+  const momentumVelocity = shouldUseMomentum ? -zonesPanVelocityX * zonesPanMoveGain : 0;
   cleanupZonesPanInteraction();
+  if (shouldUseMomentum) {
+    startZonesPanMomentum(momentumVelocity);
+  }
 }
 
 function onZonesPanPointerCancel(event) {
@@ -2123,10 +2384,13 @@ function onZonesPanPointerCancel(event) {
 function onZonesPanPointerDown(event) {
   if (!zonesContainer) return;
   if (!event.isPrimary) return;
+  if (event.pointerType === 'touch') return;
   if (event.button !== undefined && event.button !== 0) return;
   if (!canPanZonesContainer()) return;
   if (draggingCard || touchCopyDragActive) return;
   if (!isZonesPanFreeAreaTarget(event.target instanceof Element ? event.target : null)) return;
+
+  stopZonesPanMomentum();
 
   if (zonesPanActive) {
     cleanupZonesPanInteraction();
@@ -2138,6 +2402,20 @@ function onZonesPanPointerDown(event) {
   zonesPanStartX = event.clientX;
   zonesPanStartY = event.clientY;
   zonesPanStartScrollLeft = zonesContainer.scrollLeft;
+  const targetElement = event.target instanceof Element ? event.target : null;
+  zonesPanPreferHorizontal = Boolean(
+    targetElement &&
+      targetElement.closest('.zone-body') &&
+      !targetElement.closest('.track-card, .playlist-header, button, input, textarea, select, a, label'),
+  );
+  zonesPanPointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
+  zonesPanMoveGain =
+    zonesPanPointerType === 'touch' && zonesPanPreferHorizontal
+      ? ZONES_PAN_TOUCH_GAIN
+      : 1;
+  zonesPanLastX = event.clientX;
+  zonesPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  zonesPanVelocityX = 0;
 
   if (typeof zonesContainer.setPointerCapture === 'function') {
     try {
@@ -2483,7 +2761,6 @@ function attachDragHandlers(card) {
       return;
     }
 
-    event.preventDefault();
     startTouchCopyHold(card, event);
   });
 
@@ -4091,6 +4368,11 @@ function initNowPlayingControls() {
 function initZonesPanControls() {
   if (!zonesContainer) return;
   zonesContainer.addEventListener('pointerdown', onZonesPanPointerDown);
+  zonesContainer.addEventListener('wheel', onZonesWheel, { passive: false });
+  zonesContainer.addEventListener('touchstart', onZonesTouchStart, { passive: false });
+  zonesContainer.addEventListener('touchmove', onZonesTouchMove, { passive: false });
+  zonesContainer.addEventListener('touchend', onZonesTouchEnd, { passive: false });
+  zonesContainer.addEventListener('touchcancel', onZonesTouchCancel, { passive: false });
 }
 
 function initUpdater() {
@@ -4275,7 +4557,9 @@ async function bootstrap() {
     clearLayoutStreamConnection();
     stopHostProgressLoop();
     cleanupNowPlayingSeekInteraction();
+    stopZonesPanMomentum();
     cleanupZonesPanInteraction();
+    cleanupZonesTouchPanInteraction();
     clearTouchCopyHold();
     if (touchCopyDragActive) {
       cleanupTouchCopyDrag({ restoreLayout: false });
