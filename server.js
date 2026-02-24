@@ -51,6 +51,7 @@ const githubToken = process.env.GITHUB_TOKEN || null;
 const UPDATE_CACHE_WINDOW_MS = githubToken ? 0 : ONE_HOUR_MS;
 const UPDATE_STATE_PATH = path.join(__dirname, 'update-state.json');
 const LAYOUT_STATE_PATH = path.join(__dirname, 'layout-state.json');
+const SESSIONS_STATE_PATH = path.join(__dirname, 'sessions-state.json');
 
 const execFileAsync = promisify(execFile);
 const pipelineAsync = promisify(pipeline);
@@ -64,6 +65,7 @@ const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
 const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 
 let shuttingDown = false;
 let updateInProgress = false;
@@ -398,12 +400,80 @@ function createSessionToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function sanitizeSessionRecord(token, rawSession, now) {
+  if (!SESSION_TOKEN_PATTERN.test(token)) return null;
+  if (!rawSession || typeof rawSession !== 'object') return null;
+
+  const username = typeof rawSession.username === 'string' ? rawSession.username : '';
+  const expiresAt = Number(rawSession.expiresAt);
+
+  if (!USERNAME_PATTERN.test(username)) return null;
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
+
+  return { username, expiresAt };
+}
+
+function persistSessions() {
+  try {
+    const now = Date.now();
+    const serialized = {};
+
+    for (const [token, rawSession] of authSessions.entries()) {
+      const session = sanitizeSessionRecord(token, rawSession, now);
+      if (!session) {
+        authSessions.delete(token);
+        continue;
+      }
+
+      serialized[token] = session;
+    }
+
+    fs.writeFileSync(SESSIONS_STATE_PATH, JSON.stringify(serialized, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist auth sessions cache', err);
+  }
+}
+
+function loadPersistedSessions() {
+  try {
+    if (!fs.existsSync(SESSIONS_STATE_PATH)) return;
+
+    const raw = fs.readFileSync(SESSIONS_STATE_PATH, 'utf8');
+    if (!raw.trim()) return;
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Invalid auth sessions cache format');
+    }
+
+    const now = Date.now();
+    let hasInvalidEntries = false;
+
+    for (const [token, rawSession] of Object.entries(parsed)) {
+      const session = sanitizeSessionRecord(token, rawSession, now);
+      if (!session) {
+        hasInvalidEntries = true;
+        continue;
+      }
+
+      authSessions.set(token, session);
+    }
+
+    if (hasInvalidEntries) {
+      persistSessions();
+    }
+  } catch (err) {
+    console.error('Failed to load auth sessions cache', err);
+  }
+}
+
 function createSession(username) {
   const token = createSessionToken();
   authSessions.set(token, {
     username,
     expiresAt: Date.now() + SESSION_TTL_MS,
   });
+  persistSessions();
   return token;
 }
 
@@ -413,6 +483,7 @@ function getSessionByToken(token) {
   if (!session) return null;
   if (session.expiresAt <= Date.now()) {
     authSessions.delete(token);
+    persistSessions();
     return null;
   }
   return session;
@@ -420,18 +491,28 @@ function getSessionByToken(token) {
 
 function destroySession(token) {
   if (!token) return;
-  authSessions.delete(token);
+  if (authSessions.delete(token)) {
+    persistSessions();
+  }
 }
 
 function cleanupExpiredSessions() {
   const now = Date.now();
+  let changed = false;
+
   for (const [token, session] of authSessions.entries()) {
     if (!session || session.expiresAt <= now) {
       authSessions.delete(token);
+      changed = true;
     }
+  }
+
+  if (changed) {
+    persistSessions();
   }
 }
 
+loadPersistedSessions();
 setInterval(cleanupExpiredSessions, 5 * 60 * 1000).unref();
 
 function setSessionCookie(res, token) {
