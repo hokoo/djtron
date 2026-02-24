@@ -57,18 +57,6 @@ let layoutStream = null;
 let layoutStreamReconnectTimer = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
-const HOTKEY_ROWS = [
-  ['1', '2', '3', '4', '5'],
-  ['Q', 'W', 'E', 'R', 'T'],
-  ['A', 'S', 'D', 'F', 'G'],
-  ['Z', 'X', 'C', 'V', 'B'],
-];
-const HOTKEY_CODES = [
-  ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'],
-  ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT'],
-  ['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG'],
-  ['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB'],
-];
 const clientId = getClientId();
 
 function clampVolume(value) {
@@ -94,12 +82,6 @@ function addToMultiMap(map, key, value) {
   getOrCreateSet(map, key).add(value);
 }
 
-function getFirstFromMultiMap(map, key) {
-  const values = map.get(key);
-  if (!values || !values.size) return null;
-  return values.values().next().value || null;
-}
-
 function cloneLayoutState(layoutState) {
   return ensurePlaylists(layoutState).map((playlist) => playlist.slice());
 }
@@ -120,9 +102,8 @@ function handleGlobalDragOver(event) {
   event.dataTransfer.dropEffect = 'none';
 }
 
-function trackDisplayName(file, hotkeyLabel) {
-  const name = stripExtension(file);
-  return hotkeyLabel ? `${hotkeyLabel}: ${name}` : name;
+function trackDisplayName(file) {
+  return stripExtension(file);
 }
 
 function stripExtension(filename) {
@@ -424,7 +405,7 @@ function startProgressLoop(audio, fileKey) {
   tick();
 }
 
-function buildTrackCard(file, basePath = '/audio', { draggable = true, hotkeyLabel = null } = {}) {
+function buildTrackCard(file, basePath = '/audio', { draggable = true } = {}) {
   const key = trackKey(file, basePath);
   const card = document.createElement('div');
   card.className = 'track-card';
@@ -436,7 +417,7 @@ function buildTrackCard(file, basePath = '/audio', { draggable = true, hotkeyLab
   const info = document.createElement('div');
   const name = document.createElement('p');
   name.className = 'track-name';
-  name.textContent = trackDisplayName(file, hotkeyLabel);
+  name.textContent = trackDisplayName(file);
   info.appendChild(name);
 
   const controls = document.createElement('div');
@@ -1010,9 +991,8 @@ function renderZones() {
     const body = document.createElement('div');
     body.className = 'zone-body';
 
-    playlistFiles.forEach((file, rowIndex) => {
-      const hotkeyLabel = HOTKEY_ROWS[rowIndex]?.[playlistIndex] ?? null;
-      body.appendChild(buildTrackCard(file, '/audio', { draggable: true, hotkeyLabel }));
+    playlistFiles.forEach((file) => {
+      body.appendChild(buildTrackCard(file, '/audio', { draggable: true }));
     });
 
     body.addEventListener('dragover', (e) => applyDragPreview(body, e));
@@ -1554,46 +1534,6 @@ async function applyUpdate() {
   }
 }
 
-function isEditableTarget(target) {
-  if (!target) return false;
-  if (target.isContentEditable) return true;
-  const tag = target.tagName ? target.tagName.toLowerCase() : '';
-  return tag === 'input' || tag === 'textarea' || tag === 'select';
-}
-
-function handleHotkey(event) {
-  if (event.repeat) return;
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
-  if (isEditableTarget(event.target)) return;
-
-  const { code } = event;
-  if (code === 'Space') {
-    if (currentAudio && currentTrack) {
-      event.preventDefault();
-      const stopFadeSeconds = Math.max(0, parseFloat(stopFadeInput.value) || 0);
-      const curve = overlayCurveSelect.value;
-      fadeOutAndStop(currentAudio, stopFadeSeconds, curve, currentTrack).then(() => {
-        setStatus(`Остановлено: ${currentTrack ? currentTrack.file : ''}`.trim());
-      });
-    }
-    return;
-  }
-  const rowIndex = HOTKEY_CODES.findIndex((row) => row.includes(code));
-  if (rowIndex === -1) return;
-
-  const playlistIndex = HOTKEY_CODES[rowIndex].indexOf(code);
-  const playlistFiles = layout[playlistIndex];
-  if (!playlistFiles || playlistFiles.length <= rowIndex) return;
-  const file = playlistFiles[rowIndex];
-  if (!file) return;
-
-  const fileKey = trackKey(file, '/audio');
-  const button = getFirstFromMultiMap(buttonsByFile, fileKey);
-  if (!button) return;
-  event.preventDefault();
-  handlePlay(file, button, '/audio');
-}
-
 async function bootstrap() {
   const authorized = await ensureAuthorizedUser();
   if (!authorized) return;
@@ -1606,7 +1546,6 @@ async function bootstrap() {
   window.addEventListener('beforeunload', clearLayoutStreamConnection);
   loadTracks();
   loadVersion();
-  document.addEventListener('keydown', handleHotkey);
   document.addEventListener('dragover', handleGlobalDragOver);
 }
 
