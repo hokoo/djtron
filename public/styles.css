@@ -17,7 +17,14 @@
   --track-slider-gb: #130707;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 
 body[data-role='slave'] {
   --primary: #15803d;
@@ -291,8 +298,46 @@ body[data-role='slave'] #hostNowPlaying {
   cursor: grab;
   width: 100%;
   max-width: none;
+  position: relative;
+  touch-action: none;
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease,
     transform 0.12s ease;
+}
+
+.track-card.has-drag-mode::after {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.track-card.has-drag-mode[data-drag-mode='copy']::after {
+  content: 'COPY';
+}
+
+.track-card.has-drag-mode[data-drag-mode='move']::after {
+  content: 'MOVE';
+  border-color: var(--border);
+}
+
+.track-card.has-drag-mode[data-drag-mode='cancel']::after {
+  content: 'CANCEL';
+  border-color: #b91c1c;
+  background: rgba(127, 29, 29, 0.72);
+}
+
+.track-card.touch-hold-copy {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 0 10px var(--shadow-accent);
 }
 
 .track-card.dragging {
@@ -302,6 +347,78 @@ body[data-role='slave'] #hostNowPlaying {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 0 12px var(--shadow-accent);
   opacity: 0.92;
   transform: scale(0.995);
+}
+
+.track-card.drag-copy-preview {
+  pointer-events: none;
+  border-style: dashed;
+  opacity: 0.82;
+}
+
+.desktop-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1600;
+  pointer-events: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.34);
+  box-shadow: 0 0 14px var(--shadow-accent);
+  transform: translate(-9999px, -9999px);
+}
+
+.desktop-drag-ghost.has-drag-mode[data-drag-mode='cancel'] {
+  border-color: #b91c1c;
+  box-shadow: 0 0 14px rgba(185, 28, 28, 0.65);
+}
+
+.touch-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1500;
+  width: min(340px, calc(100vw - 24px));
+  pointer-events: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.34);
+  box-shadow: 0 0 14px var(--shadow-accent);
+}
+
+.touch-drag-ghost::after {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 6px;
+}
+
+.touch-drag-ghost.is-copy::after {
+  content: 'COPY';
+}
+
+.touch-drag-ghost.is-move::after {
+  content: 'MOVE';
+  border-color: var(--border);
+}
+
+.touch-drag-ghost.is-cancel {
+  border-color: #7f1d1d;
+  box-shadow: 0 0 14px rgba(185, 28, 28, 0.65);
+}
+
+.touch-drag-ghost.is-cancel::after {
+  content: 'CANCEL';
+  border-color: #b91c1c;
+  background: rgba(127, 29, 29, 0.72);
 }
 
 .zones-actions {

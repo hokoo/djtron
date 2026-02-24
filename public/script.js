@@ -45,6 +45,10 @@ const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const HOST_PROGRESS_REFRESH_INTERVAL_MS = 250;
+const TOUCH_COPY_HOLD_MS = 360;
+const TOUCH_DRAG_START_MOVE_PX = 12;
+const TOUCH_DRAG_COMMIT_PX = 6;
+const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -77,6 +81,24 @@ let hostPlaybackSyncQueuedForce = false;
 let lastHostPlaybackSyncAt = 0;
 let hostProgressTimer = null;
 let hostHighlightedDescriptor = '';
+let touchHoldTimer = null;
+let touchHoldPointerId = null;
+let touchHoldStartX = 0;
+let touchHoldStartY = 0;
+let touchHoldCard = null;
+let touchCopyDragActive = false;
+let touchCopyDragPointerId = null;
+let touchCopyDragGhost = null;
+let touchCopyDragStartX = 0;
+let touchCopyDragStartY = 0;
+let touchCopyDragMoved = false;
+let touchDragMode = null;
+let lastTouchPointerDownAt = 0;
+let dragPreviewCard = null;
+let desktopDragGhost = null;
+let desktopDragGhostOffsetX = 16;
+let desktopDragGhostOffsetY = 16;
+let emptyDragImage = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -124,11 +146,428 @@ function setDropEffectFromEvent(event) {
   event.dataTransfer.dropEffect = isCopyDragModifier(event) ? 'copy' : 'move';
 }
 
+function normalizeDragMode(mode) {
+  if (mode === 'copy' || mode === 'cancel') return mode;
+  return 'move';
+}
+
+function applyDragModeBadgeToElement(element, mode) {
+  if (!(element instanceof HTMLElement)) return;
+  const normalizedMode = normalizeDragMode(mode);
+  element.dataset.dragMode = normalizedMode;
+  element.classList.add('has-drag-mode');
+}
+
+function clearDragModeBadgeFromElement(element) {
+  if (!(element instanceof HTMLElement)) return;
+  element.classList.remove('has-drag-mode');
+  delete element.dataset.dragMode;
+}
+
+function applyDragModeBadge(mode) {
+  const normalizedMode = normalizeDragMode(mode);
+  applyDragModeBadgeToElement(draggingCard, normalizedMode);
+  applyDragModeBadgeToElement(dragPreviewCard, normalizedMode);
+  applyDragModeBadgeToElement(desktopDragGhost, normalizedMode);
+}
+
+function clearDragModeBadge() {
+  clearDragModeBadgeFromElement(draggingCard);
+  clearDragModeBadgeFromElement(dragPreviewCard);
+  clearDragModeBadgeFromElement(desktopDragGhost);
+}
+
+function isActiveCopyDrag(event) {
+  if (touchCopyDragActive) {
+    return touchDragMode === 'copy';
+  }
+  return isCopyDragModifier(event);
+}
+
+function clearDragPreviewCard() {
+  if (!dragPreviewCard) return;
+  dragPreviewCard.remove();
+  dragPreviewCard = null;
+}
+
+function ensureDragPreviewCard() {
+  if (dragPreviewCard) return dragPreviewCard;
+  if (!draggingCard) return null;
+
+  const preview = draggingCard.cloneNode(true);
+  preview.classList.add('drag-copy-preview');
+  preview.classList.remove('dragging');
+  preview.removeAttribute('draggable');
+  const playButton = preview.querySelector('button.play');
+  if (playButton) playButton.disabled = true;
+  dragPreviewCard = preview;
+  if (draggingCard.classList.contains('has-drag-mode')) {
+    applyDragModeBadgeToElement(dragPreviewCard, draggingCard.dataset.dragMode || 'move');
+  }
+  return dragPreviewCard;
+}
+
+function getEmptyDragImage() {
+  if (emptyDragImage) return emptyDragImage;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  emptyDragImage = canvas;
+  return emptyDragImage;
+}
+
+function clearDesktopDragGhost() {
+  if (!desktopDragGhost) return;
+  desktopDragGhost.remove();
+  desktopDragGhost = null;
+}
+
+function updateDesktopDragGhostPosition(clientX, clientY) {
+  if (!desktopDragGhost) return;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+  desktopDragGhost.style.transform = `translate(${clientX - desktopDragGhostOffsetX}px, ${clientY - desktopDragGhostOffsetY}px)`;
+}
+
+function createDesktopDragGhost(card, clientX, clientY) {
+  clearDesktopDragGhost();
+  if (!card || !card.isConnected) return;
+
+  const rect = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add('desktop-drag-ghost');
+  ghost.classList.remove('dragging');
+  ghost.removeAttribute('draggable');
+
+  const playButton = ghost.querySelector('button.play');
+  if (playButton) playButton.disabled = true;
+
+  ghost.style.width = `${rect.width}px`;
+  desktopDragGhost = ghost;
+  document.body.appendChild(ghost);
+
+  if (draggingCard && draggingCard.classList.contains('has-drag-mode')) {
+    applyDragModeBadgeToElement(desktopDragGhost, draggingCard.dataset.dragMode || 'move');
+  }
+
+  if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+    desktopDragGhostOffsetX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    desktopDragGhostOffsetY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    updateDesktopDragGhostPosition(clientX, clientY);
+  } else {
+    desktopDragGhostOffsetX = rect.width / 2;
+    desktopDragGhostOffsetY = rect.height / 2;
+  }
+}
+
 function handleGlobalDragOver(event) {
   if (!draggingCard || !event.dataTransfer) return;
+  updateDesktopDragGhostPosition(event.clientX, event.clientY);
   const target = event.target instanceof Element ? event.target : null;
-  if (target && zonesContainer.contains(target)) return;
+  if (target && zonesContainer.contains(target)) {
+    applyDragModeBadge(isActiveCopyDrag(event) ? 'copy' : 'move');
+    return;
+  }
+  applyDragModeBadge('cancel');
   event.dataTransfer.dropEffect = 'none';
+}
+
+function isTouchPointerEvent(event) {
+  if (!event) return false;
+  return event.pointerType === 'touch' || event.pointerType === 'pen';
+}
+
+function isLikelyTouchNativeDragEvent(event) {
+  if (!event) return false;
+  if (event.sourceCapabilities && event.sourceCapabilities.firesTouchEvents) {
+    return true;
+  }
+  return Date.now() - lastTouchPointerDownAt < TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS;
+}
+
+function removeTouchHoldListeners() {
+  window.removeEventListener('pointermove', onTouchHoldPointerMove, true);
+  window.removeEventListener('pointerup', onTouchHoldPointerEnd, true);
+  window.removeEventListener('pointercancel', onTouchHoldPointerEnd, true);
+}
+
+function clearTouchCopyHold() {
+  const holdCard = touchHoldCard;
+  if (holdCard) {
+    holdCard.classList.remove('touch-hold-copy');
+  }
+  if (holdCard && touchHoldPointerId !== null && typeof holdCard.releasePointerCapture === 'function') {
+    try {
+      if (holdCard.hasPointerCapture && holdCard.hasPointerCapture(touchHoldPointerId)) {
+        holdCard.releasePointerCapture(touchHoldPointerId);
+      }
+    } catch (err) {
+      // ignore pointer capture release errors from browsers that do not fully support it
+    }
+  }
+
+  if (touchHoldTimer !== null) {
+    clearTimeout(touchHoldTimer);
+    touchHoldTimer = null;
+  }
+  touchHoldPointerId = null;
+  touchHoldCard = null;
+  removeTouchHoldListeners();
+}
+
+function onTouchHoldPointerMove(event) {
+  if (touchHoldPointerId === null || event.pointerId !== touchHoldPointerId) return;
+  const deltaX = event.clientX - touchHoldStartX;
+  const deltaY = event.clientY - touchHoldStartY;
+  const distance = Math.hypot(deltaX, deltaY);
+  if (distance > TOUCH_DRAG_START_MOVE_PX) {
+    const heldCard = touchHoldCard;
+    const pointerId = touchHoldPointerId;
+    clearTouchCopyHold();
+    if (!heldCard || pointerId === null) return;
+    startTouchCopyDrag(heldCard, pointerId, event.clientX, event.clientY, {
+      mode: 'move',
+      moved: true,
+    });
+    updateTouchCopyDragPreview(event.clientX, event.clientY);
+  }
+}
+
+function onTouchHoldPointerEnd(event) {
+  if (touchHoldPointerId === null || event.pointerId !== touchHoldPointerId) return;
+  clearTouchCopyHold();
+}
+
+function updateTouchCopyGhostPosition(clientX, clientY) {
+  if (!touchCopyDragGhost) return;
+  const offsetX = 16;
+  const offsetY = 16;
+  touchCopyDragGhost.style.transform = `translate(${clientX + offsetX}px, ${clientY + offsetY}px)`;
+}
+
+function removeTouchCopyDragListeners() {
+  window.removeEventListener('pointermove', onTouchCopyDragPointerMove, true);
+  window.removeEventListener('pointerup', onTouchCopyDragPointerUp, true);
+  window.removeEventListener('pointercancel', onTouchCopyDragPointerCancel, true);
+}
+
+function clearZoneDragOverState() {
+  document.querySelectorAll('.zone.drag-over').forEach((zone) => zone.classList.remove('drag-over'));
+}
+
+function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
+  if (touchCopyDragGhost) {
+    touchCopyDragGhost.remove();
+    touchCopyDragGhost = null;
+  }
+  clearDesktopDragGhost();
+  clearDragModeBadge();
+  clearDragPreviewCard();
+
+  removeTouchCopyDragListeners();
+  clearZoneDragOverState();
+
+  if (draggingCard) {
+    draggingCard.classList.remove('dragging');
+  }
+
+  const shouldRestoreLayout = restoreLayout && !dragDropHandled;
+
+  draggingCard = null;
+  dragContext = null;
+  dragDropHandled = false;
+  touchCopyDragActive = false;
+  touchCopyDragPointerId = null;
+  touchCopyDragMoved = false;
+  touchDragMode = null;
+
+  if (shouldRestoreLayout) {
+    renderZones();
+  }
+}
+
+function getZoneFromPoint(clientX, clientY) {
+  const target = document.elementFromPoint(clientX, clientY);
+  if (!(target instanceof Element)) return null;
+  const zoneBody = target.closest('.zone-body');
+  if (zoneBody) {
+    return zoneBody.closest('.zone');
+  }
+  return target.closest('.zone');
+}
+
+function updateTouchCopyDragPreview(clientX, clientY) {
+  updateTouchCopyGhostPosition(clientX, clientY);
+  clearZoneDragOverState();
+
+  const zone = getZoneFromPoint(clientX, clientY);
+  if (!zone) {
+    applyDragModeBadge('cancel');
+    if (touchCopyDragGhost) {
+      touchCopyDragGhost.classList.add('is-cancel');
+    }
+    return;
+  }
+
+  applyDragModeBadge(touchDragMode === 'copy' ? 'copy' : 'move');
+  if (touchCopyDragGhost) {
+    touchCopyDragGhost.classList.remove('is-cancel');
+  }
+
+  zone.classList.add('drag-over');
+  const zoneBody = zone.querySelector('.zone-body');
+  if (!zoneBody) return;
+
+  applyDragPreview(zoneBody, {
+    clientY,
+    preventDefault() {},
+    dataTransfer: null,
+  });
+}
+
+async function finishTouchCopyDrag(clientX, clientY) {
+  if (!touchCopyDragActive) return;
+  const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+
+  if (!touchCopyDragMoved) {
+    cleanupTouchCopyDrag({ restoreLayout: true });
+    setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
+    return;
+  }
+
+  const zone = getZoneFromPoint(clientX, clientY);
+  const targetZoneIndex = zone ? Number.parseInt(zone.dataset.zoneIndex || '', 10) : NaN;
+
+  if (Number.isInteger(targetZoneIndex) && targetZoneIndex >= 0 && zone) {
+    const fakeDropEvent = {
+      preventDefault() {},
+      currentTarget: zone,
+      ctrlKey: dropMode === 'copy',
+      metaKey: false,
+      dataTransfer: null,
+    };
+
+    try {
+      await handleDrop(fakeDropEvent, targetZoneIndex);
+    } finally {
+      cleanupTouchCopyDrag({ restoreLayout: false });
+    }
+    return;
+  }
+
+  cleanupTouchCopyDrag({ restoreLayout: true });
+  setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
+}
+
+function onTouchCopyDragPointerMove(event) {
+  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
+  event.preventDefault();
+  const deltaX = event.clientX - touchCopyDragStartX;
+  const deltaY = event.clientY - touchCopyDragStartY;
+  if (!touchCopyDragMoved && Math.hypot(deltaX, deltaY) > TOUCH_DRAG_COMMIT_PX) {
+    touchCopyDragMoved = true;
+  }
+  updateTouchCopyDragPreview(event.clientX, event.clientY);
+}
+
+function onTouchCopyDragPointerUp(event) {
+  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
+  event.preventDefault();
+  finishTouchCopyDrag(event.clientX, event.clientY).catch((err) => {
+    console.error(err);
+    const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+    cleanupTouchCopyDrag({ restoreLayout: true });
+    setStatus(
+      dropMode === 'copy'
+        ? 'Не удалось завершить копирование на тач-устройстве.'
+        : 'Не удалось завершить перемещение на тач-устройстве.',
+    );
+  });
+}
+
+function onTouchCopyDragPointerCancel(event) {
+  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
+  const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+  cleanupTouchCopyDrag({ restoreLayout: true });
+  setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
+}
+
+function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', moved = false } = {}) {
+  if (!card || !card.isConnected) return;
+
+  const sourceZone = card.closest('.zone');
+  const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
+  const sourceBody = card.parentElement;
+  const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+
+  dragContext = {
+    file: card.dataset.file || '',
+    sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
+    sourceIndex,
+    snapshotLayout: cloneLayoutState(layout),
+  };
+
+  draggingCard = card;
+  dragDropHandled = false;
+  touchCopyDragActive = true;
+  touchCopyDragPointerId = pointerId;
+  touchCopyDragStartX = clientX;
+  touchCopyDragStartY = clientY;
+  touchCopyDragMoved = Boolean(moved);
+  touchDragMode = mode === 'copy' ? 'copy' : 'move';
+  card.classList.add('dragging');
+
+  const ghost = card.cloneNode(true);
+  ghost.classList.add('touch-drag-ghost');
+  ghost.classList.add(touchDragMode === 'copy' ? 'is-copy' : 'is-move');
+  ghost.classList.remove('dragging');
+  touchCopyDragGhost = ghost;
+  document.body.appendChild(ghost);
+  updateTouchCopyGhostPosition(clientX, clientY);
+  applyDragModeBadge(touchDragMode);
+
+  window.addEventListener('pointermove', onTouchCopyDragPointerMove, true);
+  window.addEventListener('pointerup', onTouchCopyDragPointerUp, true);
+  window.addEventListener('pointercancel', onTouchCopyDragPointerCancel, true);
+  setStatus(
+    touchDragMode === 'copy'
+      ? 'Режим копирования: перетащите трек в нужный плей-лист.'
+      : 'Режим перемещения: перетащите трек в нужный плей-лист.',
+  );
+}
+
+function startTouchCopyHold(card, event) {
+  if (touchCopyDragActive) return;
+
+  lastTouchPointerDownAt = Date.now();
+  clearTouchCopyHold();
+  if (typeof card.setPointerCapture === 'function') {
+    try {
+      card.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // ignore pointer capture errors when pointer cannot be captured
+    }
+  }
+  touchHoldPointerId = event.pointerId;
+  touchHoldStartX = event.clientX;
+  touchHoldStartY = event.clientY;
+  touchHoldCard = card;
+  card.classList.add('touch-hold-copy');
+
+  window.addEventListener('pointermove', onTouchHoldPointerMove, true);
+  window.addEventListener('pointerup', onTouchHoldPointerEnd, true);
+  window.addEventListener('pointercancel', onTouchHoldPointerEnd, true);
+
+  touchHoldTimer = setTimeout(() => {
+    const heldCard = touchHoldCard;
+    const pointerId = touchHoldPointerId;
+    const startX = touchHoldStartX;
+    const startY = touchHoldStartY;
+
+    clearTouchCopyHold();
+
+    if (!heldCard || pointerId === null) return;
+    startTouchCopyDrag(heldCard, pointerId, startX, startY, { mode: 'copy' });
+  }, TOUCH_COPY_HOLD_MS);
 }
 
 function trackDisplayName(file) {
@@ -959,7 +1398,23 @@ function buildTrackCard(
 }
 
 function attachDragHandlers(card) {
+  card.addEventListener('pointerdown', (event) => {
+    if (!isTouchPointerEvent(event)) return;
+    if (event.isPrimary === false) return;
+
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, input, textarea, select, a')) return;
+
+    event.preventDefault();
+    startTouchCopyHold(card, event);
+  });
+
   card.addEventListener('dragstart', (e) => {
+    if (isLikelyTouchNativeDragEvent(e)) {
+      e.preventDefault();
+      return;
+    }
+
     const sourceZone = card.closest('.zone');
     const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
     const sourceBody = card.parentElement;
@@ -975,12 +1430,18 @@ function attachDragHandlers(card) {
     e.dataTransfer.effectAllowed = 'copyMove';
     e.dataTransfer.setData('text/plain', card.dataset.file);
     setDropEffectFromEvent(e);
+    createDesktopDragGhost(card, e.clientX, e.clientY);
+    e.dataTransfer.setDragImage(getEmptyDragImage(), 0, 0);
+    applyDragModeBadge(isCopyDragModifier(e) ? 'copy' : 'move');
     card.classList.add('dragging');
     draggingCard = card;
     dragDropHandled = false;
   });
 
   card.addEventListener('dragend', () => {
+    clearDesktopDragGhost();
+    clearDragModeBadge();
+    clearDragPreviewCard();
     card.classList.remove('dragging');
     if (!dragDropHandled) {
       renderZones();
@@ -992,8 +1453,11 @@ function attachDragHandlers(card) {
   });
 }
 
-function getDragInsertBefore(container, event) {
-  const draggableCards = Array.from(container.querySelectorAll('.track-card:not(.dragging)'));
+function getDragInsertBefore(container, event, { includeDraggingCard = false } = {}) {
+  const selector = includeDraggingCard
+    ? '.track-card:not(.drag-copy-preview)'
+    : '.track-card:not(.dragging):not(.drag-copy-preview)';
+  const draggableCards = Array.from(container.querySelectorAll(selector));
   const cursorY = event.clientY;
   return draggableCards.reduce(
     (closest, child) => {
@@ -1012,7 +1476,23 @@ function applyDragPreview(zoneBody, event) {
   if (!draggingCard || !zoneBody) return;
   event.preventDefault();
   setDropEffectFromEvent(event);
-  const beforeElement = getDragInsertBefore(zoneBody, event);
+  updateDesktopDragGhostPosition(event.clientX, event.clientY);
+  applyDragModeBadge(isActiveCopyDrag(event) ? 'copy' : 'move');
+
+  if (isActiveCopyDrag(event)) {
+    const previewCard = ensureDragPreviewCard();
+    if (!previewCard) return;
+    const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: true });
+    if (beforeElement) {
+      zoneBody.insertBefore(previewCard, beforeElement);
+    } else {
+      zoneBody.appendChild(previewCard);
+    }
+    return;
+  }
+
+  clearDragPreviewCard();
+  const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: false });
   if (beforeElement) {
     zoneBody.insertBefore(draggingCard, beforeElement);
   } else {
@@ -1207,6 +1687,13 @@ async function tryAutoplayNextTrack(finishedTrack) {
 }
 
 function resetTrackReferences() {
+  clearDesktopDragGhost();
+  clearDragModeBadge();
+  clearDragPreviewCard();
+  clearTouchCopyHold();
+  if (touchCopyDragActive) {
+    cleanupTouchCopyDrag({ restoreLayout: false });
+  }
   buttonsByFile = new Map();
   cardsByFile = new Map();
   durationLabelsByFile = new Map();
@@ -1795,33 +2282,56 @@ function syncCurrentTrackState() {
 
 async function handleDrop(event, targetZoneIndex) {
   event.preventDefault();
-  if (!draggingCard || !dragContext) return;
-  if (!Number.isInteger(targetZoneIndex) || targetZoneIndex < 0) return;
+  if (!draggingCard || !dragContext) {
+    clearDragModeBadge();
+    clearDragPreviewCard();
+    return;
+  }
+  if (!Number.isInteger(targetZoneIndex) || targetZoneIndex < 0) {
+    clearDragModeBadge();
+    clearDragPreviewCard();
+    return;
+  }
 
   const targetZone = event.currentTarget;
-  if (!targetZone) return;
+  if (!targetZone) {
+    clearDragModeBadge();
+    clearDragPreviewCard();
+    return;
+  }
   targetZone.classList.remove('drag-over');
   dragDropHandled = true;
 
   const previousLayout = cloneLayoutState(layout);
-  const isCopyDrop = isCopyDragModifier(event);
+  const isCopyDrop = isActiveCopyDrag(event);
 
   let nextLayout;
   if (isCopyDrop) {
-    if (!dragContext.file) return;
+    if (!dragContext.file) {
+      clearDragModeBadge();
+      clearDragPreviewCard();
+      return;
+    }
     nextLayout = cloneLayoutState(dragContext.snapshotLayout);
-    if (!Array.isArray(nextLayout[targetZoneIndex])) return;
+    if (!Array.isArray(nextLayout[targetZoneIndex])) {
+      clearDragModeBadge();
+      clearDragPreviewCard();
+      return;
+    }
 
     const targetBody = targetZone.querySelector('.zone-body');
     const cards = targetBody ? Array.from(targetBody.querySelectorAll('.track-card')) : [];
-    const droppedIndexWithoutSource = cards.indexOf(draggingCard);
+    const dropReferenceCard = dragPreviewCard || draggingCard;
+    const droppedIndexWithoutSource = cards.indexOf(dropReferenceCard);
     const fallbackIndex = nextLayout[targetZoneIndex].length;
     let insertIndex = droppedIndexWithoutSource === -1 ? fallbackIndex : droppedIndexWithoutSource;
+    const sourceCardPresentInTarget = cards.includes(draggingCard);
 
     if (
       dragContext.sourceZoneIndex === targetZoneIndex &&
       Number.isInteger(dragContext.sourceIndex) &&
       dragContext.sourceIndex >= 0 &&
+      !sourceCardPresentInTarget &&
       insertIndex >= dragContext.sourceIndex
     ) {
       insertIndex += 1;
@@ -1830,10 +2340,13 @@ async function handleDrop(event, targetZoneIndex) {
     insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
     nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
   } else {
+    clearDragPreviewCard();
     syncLayoutFromDom();
     nextLayout = cloneLayoutState(layout);
   }
 
+  clearDragModeBadge();
+  clearDragPreviewCard();
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
@@ -2422,6 +2935,10 @@ async function applyUpdate() {
 }
 
 async function bootstrap() {
+  document.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+  });
+
   const authorized = await ensureAuthorizedUser();
   if (!authorized) return;
 
@@ -2434,6 +2951,10 @@ async function bootstrap() {
   window.addEventListener('beforeunload', () => {
     clearLayoutStreamConnection();
     stopHostProgressLoop();
+    clearTouchCopyHold();
+    if (touchCopyDragActive) {
+      cleanupTouchCopyDrag({ restoreLayout: false });
+    }
   });
   loadTracks();
   loadVersion();
