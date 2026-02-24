@@ -53,6 +53,7 @@ const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
 const NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX = 6;
 const NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS = 320;
 const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
+const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
 const PLAYLIST_TYPE_MANUAL = 'manual';
 const PLAYLIST_TYPE_FOLDER = 'folder';
 
@@ -114,6 +115,12 @@ let nowPlayingSeekMoved = false;
 let nowPlayingSeekPointerId = null;
 let nowPlayingSeekStartX = 0;
 let nowPlayingSeekSuppressClickUntil = 0;
+let zonesPanActive = false;
+let zonesPanMoved = false;
+let zonesPanPointerId = null;
+let zonesPanStartX = 0;
+let zonesPanStartY = 0;
+let zonesPanStartScrollLeft = 0;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -1678,6 +1685,109 @@ function onNowPlayingControlClick(event) {
     return;
   }
   toggleNowPlayingPlayback();
+}
+
+function canPanZonesContainer() {
+  if (!zonesContainer) return false;
+  return zonesContainer.scrollWidth - zonesContainer.clientWidth > 1;
+}
+
+function isZonesPanFreeAreaTarget(target) {
+  if (!(target instanceof Element)) return false;
+  if (!zonesContainer || !zonesContainer.contains(target)) return false;
+  if (target.closest('.track-card')) return false;
+  if (target.closest('button, input, textarea, select, a, label')) return false;
+  return true;
+}
+
+function cleanupZonesPanInteraction() {
+  if (zonesContainer) {
+    zonesContainer.classList.remove('is-pan-scrolling');
+    if (zonesPanPointerId !== null && typeof zonesContainer.releasePointerCapture === 'function') {
+      try {
+        if (zonesContainer.hasPointerCapture && zonesContainer.hasPointerCapture(zonesPanPointerId)) {
+          zonesContainer.releasePointerCapture(zonesPanPointerId);
+        }
+      } catch (err) {
+        // ignore pointer capture release errors
+      }
+    }
+  }
+
+  zonesPanActive = false;
+  zonesPanMoved = false;
+  zonesPanPointerId = null;
+  zonesPanStartX = 0;
+  zonesPanStartY = 0;
+  zonesPanStartScrollLeft = 0;
+  window.removeEventListener('pointermove', onZonesPanPointerMove, true);
+  window.removeEventListener('pointerup', onZonesPanPointerUp, true);
+  window.removeEventListener('pointercancel', onZonesPanPointerCancel, true);
+}
+
+function onZonesPanPointerMove(event) {
+  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  if (!zonesContainer) return;
+
+  const deltaX = event.clientX - zonesPanStartX;
+  const deltaY = event.clientY - zonesPanStartY;
+  if (!zonesPanMoved) {
+    if (Math.abs(deltaX) < ZONES_PAN_DRAG_THRESHOLD_PX && Math.abs(deltaY) < ZONES_PAN_DRAG_THRESHOLD_PX) {
+      return;
+    }
+    if (Math.abs(deltaY) > Math.abs(deltaX)) {
+      // Vertical gesture: keep native vertical scroll behavior.
+      cleanupZonesPanInteraction();
+      return;
+    }
+  }
+
+  zonesPanMoved = true;
+  zonesContainer.classList.add('is-pan-scrolling');
+  event.preventDefault();
+  zonesContainer.scrollLeft = zonesPanStartScrollLeft - deltaX;
+}
+
+function onZonesPanPointerUp(event) {
+  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  cleanupZonesPanInteraction();
+}
+
+function onZonesPanPointerCancel(event) {
+  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  cleanupZonesPanInteraction();
+}
+
+function onZonesPanPointerDown(event) {
+  if (!zonesContainer) return;
+  if (!event.isPrimary) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (!canPanZonesContainer()) return;
+  if (draggingCard || touchCopyDragActive) return;
+  if (!isZonesPanFreeAreaTarget(event.target instanceof Element ? event.target : null)) return;
+
+  if (zonesPanActive) {
+    cleanupZonesPanInteraction();
+  }
+
+  zonesPanActive = true;
+  zonesPanMoved = false;
+  zonesPanPointerId = event.pointerId;
+  zonesPanStartX = event.clientX;
+  zonesPanStartY = event.clientY;
+  zonesPanStartScrollLeft = zonesContainer.scrollLeft;
+
+  if (typeof zonesContainer.setPointerCapture === 'function') {
+    try {
+      zonesContainer.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // ignore pointer capture errors
+    }
+  }
+
+  window.addEventListener('pointermove', onZonesPanPointerMove, true);
+  window.addEventListener('pointerup', onZonesPanPointerUp, true);
+  window.addEventListener('pointercancel', onZonesPanPointerCancel, true);
 }
 
 async function toggleNowPlayingPlayback() {
@@ -3587,6 +3697,11 @@ function initNowPlayingControls() {
   syncHostNowPlayingPanel();
 }
 
+function initZonesPanControls() {
+  if (!zonesContainer) return;
+  zonesContainer.addEventListener('pointerdown', onZonesPanPointerDown);
+}
+
 function initUpdater() {
   if (allowPrereleaseInput) {
     allowPrereleaseInput.checked = loadBooleanSetting(SETTINGS_KEYS.allowPrerelease, false);
@@ -3763,11 +3878,13 @@ async function bootstrap() {
   initServerControls();
   initPlaylistControls();
   initNowPlayingControls();
+  initZonesPanControls();
   initUpdater();
   window.addEventListener('beforeunload', () => {
     clearLayoutStreamConnection();
     stopHostProgressLoop();
     cleanupNowPlayingSeekInteraction();
+    cleanupZonesPanInteraction();
     clearTouchCopyHold();
     if (touchCopyDragActive) {
       cleanupTouchCopyDrag({ restoreLayout: false });

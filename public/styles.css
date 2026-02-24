@@ -533,8 +533,23 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
   align-items: stretch;
   padding-bottom: 6px;
+  cursor: grab;
+  touch-action: pan-y;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.zones::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.zones.is-pan-scrolling {
+  cursor: grabbing;
 }
 
 .zone {
