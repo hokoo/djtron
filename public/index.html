@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8"/>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+	<title>djTRON — плеер для дискотек и музыкальных мероприятий</title>
+	<link rel="stylesheet" href="/styles.css"/>
+</head>
+<body>
+<div class="layout">
+	<aside class="sidebar" id="sidebar">
+		<button id="sidebarToggle" class="secondary ghost sidebar-toggle" aria-label="Toggle panel">☰</button>
+		<header class="sidebar__header">
+			<h1>djTRON</h1>
+			<p>Плеер для дискотек и музыкальных мероприятий. Загрузите аудио в папку <strong>/audio</strong>.</p>
+		</header>
+		<section class="panel sidebar-panel">
+			<div class="settings">
+				<label>
+					Перекрытия треков (сек)
+					<input type="number" id="overlayTime" min="0" step="0.1"/>
+				</label>
+				<label>
+					Затухание при остановке (сек)
+					<input type="number" id="stopFadeTime" min="0" step="0.1"/>
+				</label>
+				<label>
+					Функция изменения громкости
+					<select id="overlayCurve">
+						<option value="linear">Linear</option>
+						<option value="ease-in">Ease-in</option>
+						<option value="ease-out">Ease-out</option>
+						<option value="ease-in-out">Ease-in-out</option>
+					</select>
+				</label>
+			</div>
+		</section>
+
+		<section class="panel sidebar-panel">
+			<div class="server-actions">
+				<div>
+					<p class="server-actions__title">Управление сервером</p>
+					<p class="server-actions__hint">Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится
+						и страница перестанет отвечать.</p>
+				</div>
+				<button id="stopServer" class="secondary danger">Остановить сервер</button>
+			</div>
+		</section>
+
+                <section class="panel sidebar-panel sidebar-repo">
+                        <p class="sidebar-repo__title">Репозиторий проекта
+                                <a class="sidebar-repo__link" href="https://github.com/hokoo/dj" target="_blank"
+                                   rel="noopener noreferrer">на GitHub</a>
+                        </p>
+                        <p id="appVersion" class="sidebar-repo__version" aria-live="polite"></p>
+                        <label class="update-settings">
+                                <input type="checkbox" id="allowPrerelease" />
+                                <span>Устанавливать пре-релизные версии</span>
+                        </label>
+                        <div id="updateInfo" class="update-info" hidden>
+                                <p id="updateMessage" class="update-info__message" aria-live="polite"></p>
+                                <div class="update-info__actions">
+                                        <button id="updateButton" class="secondary">Обновить</button>
+                                        <a id="releaseLink" class="sidebar-repo__link" href="#" target="_blank" rel="noopener noreferrer">Релиз</a>
+                                </div>
+                                <p id="updateStatus" class="update-info__status" aria-live="polite"></p>
+                        </div>
+                </section>
+        </aside>
+
+        <main class="content">
+                <div class="content-header"></div>
+                <section class="assets-panel">
+                        <p id="assetsStatus" class="status assets-status" aria-live="polite"></p>
+                        <div id="assetsTracks" class="assets-tracks"></div>
+                </section>
+                <section class="panel zones-panel">
+                        <div id="zones" class="zones"></div>
+                </section>
+        </main>
+</div>
+
+<div id="authOverlay" class="auth-overlay" hidden>
+	<form id="authForm" class="auth-card" autocomplete="off">
+		<h2 class="auth-card__title">Вход</h2>
+		<p class="auth-card__hint">Для удаленного клиента нужен логин и пароль.</p>
+		<label>
+			Логин
+			<input type="text" id="authUsername" name="username" autocomplete="username" required/>
+		</label>
+		<label>
+			Пароль
+			<input type="password" id="authPassword" name="password" autocomplete="current-password" required/>
+		</label>
+		<button type="submit" id="authSubmit" class="secondary">Войти</button>
+		<p id="authError" class="auth-card__error" aria-live="polite"></p>
+	</form>
+</div>
+
+<script src="/script.js" type="module"></script>
+</body>
+</html>

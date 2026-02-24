@@ -1,0 +1,12 @@
+# Ignore audio folder
+audio/
+update-state.json
+
+# Ignore IDE specific files
+.vscode/
+.idea/
+.DS_Store
+
+# Keep local credentials out of git
+users/*
+!users/README.md
