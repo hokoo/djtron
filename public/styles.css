@@ -19,6 +19,19 @@
 
 * { box-sizing: border-box; }
 
+body[data-role='slave'] {
+  --primary: #15803d;
+  --background: #030704;
+  --panel: #08110c;
+  --border: #10311e;
+  --hint: #7e9887;
+  --shadow-accent: rgba(21, 128, 61, 0.4);
+  --shadow-accent-strong: rgba(22, 163, 74, 0.65);
+  --border-strong: #16a34a;
+  --track-title: #9eb7a7;
+  --track-slider-gb: #0a1a10;
+}
+
 body {
   margin: 0;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;

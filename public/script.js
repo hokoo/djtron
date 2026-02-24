@@ -8,6 +8,7 @@ const stopFadeInput = document.getElementById('stopFadeTime');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const stopServerBtn = document.getElementById('stopServer');
+const serverActionsHintEl = document.querySelector('.server-actions__hint');
 const appVersionEl = document.getElementById('appVersion');
 const updateInfoEl = document.getElementById('updateInfo');
 const updateMessageEl = document.getElementById('updateMessage');
@@ -47,6 +48,9 @@ let availableFiles = [];
 let assetFiles = [];
 let shutdownCountdownTimer = null;
 let currentUser = null;
+let currentRole = null;
+const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
+const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const HOTKEY_ROWS = [
   ['1', '2', '3', '4', '5'],
   ['Q', 'W', 'E', 'R', 'T'],
@@ -124,6 +128,7 @@ async function fetchSessionInfo() {
   return {
     authenticated: Boolean(data && data.authenticated),
     isServer: Boolean(data && data.isServer),
+    role: data && typeof data.role === 'string' ? data.role : null,
     username: data && typeof data.username === 'string' ? data.username : null,
   };
 }
@@ -144,13 +149,38 @@ async function login(username, password) {
   return {
     authenticated: Boolean(data && data.authenticated),
     isServer: Boolean(data && data.isServer),
+    role: data && typeof data.role === 'string' ? data.role : null,
     username: data && typeof data.username === 'string' ? data.username : null,
   };
+}
+
+function normalizeRole(info) {
+  if (info && info.role === 'host') return 'host';
+  if (info && info.role === 'slave') return 'slave';
+  if (info && info.isServer) return 'host';
+  return 'slave';
+}
+
+function applyRoleUi(role) {
+  const resolvedRole = role === 'host' ? 'host' : 'slave';
+  currentRole = resolvedRole;
+  document.body.dataset.role = resolvedRole;
+
+  const isHost = resolvedRole === 'host';
+  if (stopServerBtn) {
+    stopServerBtn.hidden = !isHost;
+    stopServerBtn.disabled = !isHost;
+  }
+
+  if (serverActionsHintEl) {
+    serverActionsHintEl.textContent = isHost ? HOST_SERVER_HINT : SLAVE_SERVER_HINT;
+  }
 }
 
 function updateCurrentUser(info) {
   const username = info && typeof info.username === 'string' ? info.username : null;
   currentUser = username;
+  applyRoleUi(normalizeRole(info));
 }
 
 async function ensureAuthorizedUser() {
@@ -162,6 +192,8 @@ async function ensureAuthorizedUser() {
     setStatus('Не удалось проверить авторизацию.');
     return false;
   }
+
+  applyRoleUi(normalizeRole(session));
 
   if (session.authenticated) {
     updateCurrentUser(session);
@@ -856,13 +888,20 @@ function initSidebarToggle() {
 
 async function stopServer() {
   if (!stopServerBtn) return;
+  if (currentRole !== 'host') {
+    setStatus('Остановку сервера может выполнить только хост (live).');
+    return;
+  }
+
   stopServerBtn.disabled = true;
   setStatus('Останавливаем сервер...');
 
   try {
     const res = await fetch('/api/shutdown', { method: 'POST' });
     if (!res.ok) {
-      throw new Error('Request failed');
+      const data = await res.json().catch(() => ({}));
+      const message = data && (data.error || data.message);
+      throw new Error(message || 'Request failed');
     }
     setStatus('Сервер останавливается. Окно будет закрыто.');
     setTimeout(() => {
@@ -875,7 +914,7 @@ async function stopServer() {
     }, 300);
   } catch (err) {
     console.error(err);
-    setStatus('Не удалось остановить сервер. Попробуйте ещё раз.');
+    setStatus(err.message || 'Не удалось остановить сервер. Попробуйте ещё раз.');
     stopServerBtn.disabled = false;
   }
 }

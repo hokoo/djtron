@@ -378,6 +378,7 @@ function getAuthState(req) {
     return {
       authenticated: true,
       isServer: true,
+      role: 'host',
       username: 'server',
     };
   }
@@ -390,6 +391,7 @@ function getAuthState(req) {
     return {
       authenticated: false,
       isServer: false,
+      role: null,
       username: null,
       token: null,
     };
@@ -398,6 +400,7 @@ function getAuthState(req) {
   return {
     authenticated: true,
     isServer: false,
+    role: 'slave',
     username: session.username,
     token,
   };
@@ -797,13 +800,14 @@ function handleAuthSession(req, res) {
   sendJson(res, 200, {
     authenticated: auth.authenticated,
     isServer: auth.isServer,
+    role: auth.role,
     username: auth.username,
   });
 }
 
 async function handleAuthLogin(req, res) {
   if (isServerRequest(req)) {
-    sendJson(res, 200, { authenticated: true, isServer: true, username: 'server' });
+    sendJson(res, 200, { authenticated: true, isServer: true, role: 'host', username: 'server' });
     return;
   }
 
@@ -844,7 +848,7 @@ async function handleAuthLogin(req, res) {
 
     const token = createSession(username);
     setSessionCookie(res, token);
-    sendJson(res, 200, { authenticated: true, isServer: false, username });
+    sendJson(res, 200, { authenticated: true, isServer: false, role: 'slave', username });
   } catch (err) {
     console.error('Auth login failed', err);
     sendJson(res, 500, { error: 'Ошибка авторизации' });
@@ -1027,6 +1031,13 @@ const server = http.createServer((req, res) => {
       res.end('Method Not Allowed');
       return;
     }
+
+    const auth = getAuthState(req);
+    if (!auth.isServer) {
+      sendJson(res, 403, { error: 'Только хост может останавливать сервер' });
+      return;
+    }
+
     handleShutdown(req, res);
     return;
   }
