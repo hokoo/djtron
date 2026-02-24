@@ -76,6 +76,7 @@ let hostPlaybackSyncQueued = false;
 let hostPlaybackSyncQueuedForce = false;
 let lastHostPlaybackSyncAt = 0;
 let hostProgressTimer = null;
+let hostHighlightedDescriptor = '';
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -478,11 +479,61 @@ function startHostProgressLoop() {
   }, HOST_PROGRESS_REFRESH_INTERVAL_MS);
 }
 
+function clearHostTrackHighlight() {
+  for (const cards of cardsByFile.values()) {
+    if (!cards || !cards.size) continue;
+    for (const card of cards) {
+      card.classList.remove('is-host-playing', 'is-host-paused');
+    }
+  }
+}
+
+function buildHostTrackHighlightDescriptor() {
+  if (currentRole !== 'slave') return 'none';
+  if (!hostPlaybackState || !hostPlaybackState.trackFile) return 'none';
+
+  const playlistIndex = normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition);
+  return [
+    trackKey(hostPlaybackState.trackFile, '/audio'),
+    playlistIndex === null ? '' : String(playlistIndex),
+    playlistPosition === null ? '' : String(playlistPosition),
+    hostPlaybackState.paused ? 'paused' : 'playing',
+  ].join('|');
+}
+
+function syncHostTrackHighlight(force = false) {
+  const descriptor = buildHostTrackHighlightDescriptor();
+  if (!force && descriptor === hostHighlightedDescriptor) return;
+  hostHighlightedDescriptor = descriptor;
+
+  clearHostTrackHighlight();
+  if (descriptor === 'none') return;
+
+  const playbackContext = {
+    playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+  };
+  const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+  const targetCard = getTrackCardByContext(hostTrackKey, playbackContext);
+  if (!targetCard) return;
+
+  if (hostPlaybackState.paused) {
+    targetCard.classList.add('is-host-paused');
+    targetCard.classList.remove('is-host-playing');
+    return;
+  }
+
+  targetCard.classList.add('is-host-playing');
+  targetCard.classList.remove('is-host-paused');
+}
+
 function syncHostNowPlayingPanel() {
   if (!hostNowPlayingTitleEl || !hostNowPlayingControlLabelEl) return;
 
   if (currentRole !== 'slave') {
     stopHostProgressLoop();
+    syncHostTrackHighlight();
     return;
   }
 
@@ -492,6 +543,7 @@ function syncHostNowPlayingPanel() {
     setHostNowPlayingProgress(0);
     setHostNowPlayingTime(null);
     stopHostProgressLoop();
+    syncHostTrackHighlight();
     return;
   }
 
@@ -505,6 +557,7 @@ function syncHostNowPlayingPanel() {
 
   setHostNowPlayingProgress(progressPercent);
   setHostNowPlayingTime(remaining, { useCeil: true });
+  syncHostTrackHighlight();
 
   if (!hostPlaybackState.paused && duration && remaining > 0) {
     startHostProgressLoop();
@@ -1157,6 +1210,7 @@ function resetTrackReferences() {
   buttonsByFile = new Map();
   cardsByFile = new Map();
   durationLabelsByFile = new Map();
+  hostHighlightedDescriptor = '';
 }
 
 function applyIncomingLayoutState(nextLayout, nextPlaylistNames, nextPlaylistAutoplay, version = null, render = true) {
