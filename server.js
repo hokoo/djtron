@@ -153,6 +153,7 @@ function getDefaultLayoutState() {
     updatedAt: 0,
     layout: [[]],
     playlistNames: ['Плей-лист 1'],
+    playlistMeta: [{ type: 'manual' }],
     playlistAutoplay: [false],
   };
 }
@@ -234,6 +235,68 @@ function normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
   return result;
 }
 
+function sanitizeFolderKey(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/');
+  if (!normalized) return null;
+  return normalized.slice(0, 512);
+}
+
+function sanitizeFolderOriginalName(value, fallback) {
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/\s+/g, ' ');
+    if (normalized) {
+      return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+    }
+  }
+
+  if (typeof fallback === 'string') {
+    const normalizedFallback = fallback.trim().replace(/\s+/g, ' ');
+    if (normalizedFallback) {
+      return normalizedFallback.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+    }
+  }
+
+  return '';
+}
+
+function sanitizePlaylistMetaEntry(value) {
+  if (!value || typeof value !== 'object') {
+    return { type: 'manual' };
+  }
+
+  if (value.type !== 'folder') {
+    return { type: 'manual' };
+  }
+
+  const folderKey = sanitizeFolderKey(value.folderKey);
+  if (!folderKey) {
+    return { type: 'manual' };
+  }
+
+  const fallbackName = path.basename(folderKey) || folderKey;
+  return {
+    type: 'folder',
+    folderKey,
+    folderOriginalName: sanitizeFolderOriginalName(value.folderOriginalName, fallbackName),
+  };
+}
+
+function normalizePlaylistMeta(playlistMeta, layoutLength) {
+  const result = [];
+
+  for (let index = 0; index < layoutLength; index += 1) {
+    const rawValue = Array.isArray(playlistMeta) ? playlistMeta[index] : null;
+    result.push(sanitizePlaylistMetaEntry(rawValue));
+  }
+
+  return result;
+}
+
 function normalizePlaylistTrackIndex(value) {
   const numeric = Number.parseInt(value, 10);
   if (!Number.isInteger(numeric) || numeric < 0) return null;
@@ -296,6 +359,7 @@ function loadPersistedLayoutState() {
       return getDefaultLayoutState();
     }
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
+    const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
     const sanitizedAutoplay = normalizePlaylistAutoplayFlags(parsed.playlistAutoplay, sanitizedLayout.length);
 
     const version = Number(parsed.version);
@@ -306,6 +370,7 @@ function loadPersistedLayoutState() {
       updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
       layout: sanitizedLayout,
       playlistNames: sanitizedNames,
+      playlistMeta: sanitizedMeta,
       playlistAutoplay: sanitizedAutoplay,
     };
   } catch (err) {
@@ -344,6 +409,7 @@ function buildLayoutPayload(sourceClientId = null) {
   return {
     layout: sharedLayoutState.layout,
     playlistNames: sharedLayoutState.playlistNames,
+    playlistMeta: sharedLayoutState.playlistMeta,
     playlistAutoplay: sharedLayoutState.playlistAutoplay,
     version: sharedLayoutState.version,
     updatedAt: sharedLayoutState.updatedAt,
@@ -1107,28 +1173,79 @@ function serveAudioWithRange(req, res, filePath, contentType) {
   });
 }
 
-function readAudioDirectory(directory, res) {
-  fs.readdir(directory, { withFileTypes: true }, (err, entries) => {
-    if (err) {
-      if (err.code === 'ENOENT') {
-        sendJson(res, 200, { files: [] });
-      } else {
-        sendJson(res, 500, { error: 'Failed to read audio directory' });
-      }
-      return;
-    }
-
-    const audioFiles = entries
-      .filter((e) => e.isFile())
-      .map((e) => e.name)
-      .filter((name) => isAudioFile(name));
-
-    sendJson(res, 200, { files: audioFiles });
-  });
+function normalizeAudioRelativePath(relativePath) {
+  return relativePath
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/');
 }
 
-function handleApiAudio(req, res) {
-  readAudioDirectory(AUDIO_DIR, res);
+async function collectAudioCatalog() {
+  const files = [];
+  const folders = [];
+
+  const walk = async (absoluteDir, relativeDir = '') => {
+    let entries;
+    try {
+      entries = await fs.promises.readdir(absoluteDir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      throw err;
+    }
+
+    const sortedEntries = entries.slice().sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+    const folderFiles = [];
+    const childFolders = [];
+
+    for (const entry of sortedEntries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const childRelative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const normalizedChildRelative = normalizeAudioRelativePath(childRelative);
+
+      if (entry.isDirectory()) {
+        childFolders.push({ absolute: path.join(absoluteDir, entry.name), relative: normalizedChildRelative });
+        continue;
+      }
+
+      if (!entry.isFile() || !isAudioFile(entry.name)) continue;
+      files.push(normalizedChildRelative);
+      if (relativeDir) {
+        folderFiles.push(normalizedChildRelative);
+      }
+    }
+
+    if (relativeDir && folderFiles.length) {
+      const normalizedKey = normalizeAudioRelativePath(relativeDir);
+      const folderName = path.basename(normalizedKey) || normalizedKey;
+      folders.push({
+        key: normalizedKey,
+        name: folderName,
+        files: folderFiles,
+      });
+    }
+
+    for (const childFolder of childFolders) {
+      await walk(childFolder.absolute, childFolder.relative);
+    }
+  };
+
+  await walk(AUDIO_DIR_RESOLVED, '');
+
+  return {
+    files,
+    folders: folders.sort((left, right) => left.key.localeCompare(right.key, 'ru')),
+  };
+}
+
+async function handleApiAudio(req, res) {
+  try {
+    const catalog = await collectAudioCatalog();
+    sendJson(res, 200, catalog);
+  } catch (err) {
+    console.error('Failed to read audio directory', err);
+    sendJson(res, 500, { error: 'Failed to read audio directory' });
+  }
 }
 
 function handleApiVersion(req, res) {
@@ -1175,6 +1292,10 @@ async function handleApiLayoutUpdate(req, res) {
   }
 
   const nextPlaylistNames = normalizePlaylistNames(body.playlistNames, nextLayout.length);
+  const nextPlaylistMeta = normalizePlaylistMeta(
+    Array.isArray(body.playlistMeta) ? body.playlistMeta : sharedLayoutState.playlistMeta,
+    nextLayout.length,
+  );
   const nextPlaylistAutoplay = auth.isServer
     ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
     : normalizePlaylistAutoplayFlags(sharedLayoutState.playlistAutoplay, nextLayout.length);
@@ -1183,12 +1304,14 @@ async function handleApiLayoutUpdate(req, res) {
   const hasChanged =
     JSON.stringify(nextLayout) !== JSON.stringify(sharedLayoutState.layout) ||
     JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames) ||
+    JSON.stringify(nextPlaylistMeta) !== JSON.stringify(sharedLayoutState.playlistMeta) ||
     JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay);
 
   if (hasChanged) {
     sharedLayoutState = {
       layout: nextLayout,
       playlistNames: nextPlaylistNames,
+      playlistMeta: nextPlaylistMeta,
       playlistAutoplay: nextPlaylistAutoplay,
       version: sharedLayoutState.version + 1,
       updatedAt: Date.now(),

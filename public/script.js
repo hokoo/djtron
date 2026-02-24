@@ -49,6 +49,8 @@ const TOUCH_COPY_HOLD_MS = 360;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
+const PLAYLIST_TYPE_MANUAL = 'manual';
+const PLAYLIST_TYPE_FOLDER = 'folder';
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -66,8 +68,10 @@ let dragDropHandled = false;
 let dragContext = null;
 let layout = [[]]; // array of playlists -> array of filenames
 let playlistNames = ['Плей-лист 1'];
+let playlistMeta = [{ type: PLAYLIST_TYPE_MANUAL }];
 let playlistAutoplay = [false];
 let availableFiles = [];
+let availableFolders = [];
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
@@ -99,6 +103,7 @@ let desktopDragGhost = null;
 let desktopDragGhostOffsetX = 16;
 let desktopDragGhostOffsetY = 16;
 let emptyDragImage = null;
+let trashDropzoneEl = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -137,17 +142,233 @@ function cloneLayoutState(layoutState) {
   return ensurePlaylists(layoutState).map((playlist) => playlist.slice());
 }
 
+function clonePlaylistMetaState(metaState, lengthHint = null) {
+  const expectedLength =
+    Number.isInteger(lengthHint) && lengthHint >= 0
+      ? lengthHint
+      : Array.isArray(metaState)
+        ? metaState.length
+        : ensurePlaylists(layout).length;
+  return normalizePlaylistMeta(metaState, expectedLength).map((meta) => ({ ...meta }));
+}
+
+function defaultPlaylistMeta() {
+  return { type: PLAYLIST_TYPE_MANUAL };
+}
+
+function sanitizeFolderKey(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/');
+  if (!normalized) return null;
+  return normalized;
+}
+
+function sanitizeFolderOriginalName(value, fallback = '') {
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/\s+/g, ' ');
+    if (normalized) {
+      return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+    }
+  }
+
+  if (typeof fallback === 'string') {
+    const normalizedFallback = fallback.trim().replace(/\s+/g, ' ');
+    if (normalizedFallback) {
+      return normalizedFallback.slice(0, PLAYLIST_NAME_MAX_LENGTH);
+    }
+  }
+
+  return '';
+}
+
+function sanitizePlaylistMetaEntry(value) {
+  if (!value || typeof value !== 'object') {
+    return defaultPlaylistMeta();
+  }
+
+  if (value.type !== PLAYLIST_TYPE_FOLDER) {
+    return defaultPlaylistMeta();
+  }
+
+  const folderKey = sanitizeFolderKey(value.folderKey);
+  if (!folderKey) {
+    return defaultPlaylistMeta();
+  }
+
+  const fallbackName = folderKey.split('/').filter(Boolean).pop() || folderKey;
+  return {
+    type: PLAYLIST_TYPE_FOLDER,
+    folderKey,
+    folderOriginalName: sanitizeFolderOriginalName(value.folderOriginalName, fallbackName),
+  };
+}
+
+function normalizePlaylistMeta(meta, expectedLength) {
+  const result = [];
+
+  for (let index = 0; index < expectedLength; index += 1) {
+    const rawValue = Array.isArray(meta) ? meta[index] : null;
+    result.push(sanitizePlaylistMetaEntry(rawValue));
+  }
+
+  return result;
+}
+
+function serializePlaylistMeta(meta, lengthHint = null) {
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  return JSON.stringify(normalizePlaylistMeta(meta, expectedLength));
+}
+
+function playlistMetaEqual(left, right, expectedLength) {
+  return serializePlaylistMeta(left, expectedLength) === serializePlaylistMeta(right, expectedLength);
+}
+
+function getPlaylistMetaEntry(playlistIndex) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return defaultPlaylistMeta();
+  const normalized = normalizePlaylistMeta(playlistMeta, ensurePlaylists(layout).length);
+  return normalized[playlistIndex] || defaultPlaylistMeta();
+}
+
+function isFolderPlaylistIndex(playlistIndex) {
+  return getPlaylistMetaEntry(playlistIndex).type === PLAYLIST_TYPE_FOLDER;
+}
+
+function normalizeAudioFolderTemplates(rawFolders, files) {
+  const allowedFiles = new Set(Array.isArray(files) ? files : []);
+  const result = [];
+
+  if (!Array.isArray(rawFolders)) return result;
+
+  rawFolders.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const folderKey = sanitizeFolderKey(entry.key);
+    if (!folderKey) return;
+
+    const folderNameFallback = folderKey.split('/').filter(Boolean).pop() || folderKey;
+    const folderName = sanitizeFolderOriginalName(entry.name, folderNameFallback);
+    const folderFiles = Array.isArray(entry.files)
+      ? entry.files
+          .filter((file) => typeof file === 'string' && file && allowedFiles.has(file))
+          .slice()
+          .sort((left, right) => left.localeCompare(right, 'ru'))
+      : [];
+
+    if (!folderFiles.length) return;
+    result.push({ key: folderKey, name: folderName || folderNameFallback, files: folderFiles });
+  });
+
+  result.sort((left, right) => left.key.localeCompare(right.key, 'ru'));
+  return result;
+}
+
+function getManualPlaylistIndex(metaState, layoutState) {
+  const normalizedLayout = ensurePlaylists(layoutState);
+  const normalizedMeta = normalizePlaylistMeta(metaState, normalizedLayout.length);
+  const existingIndex = normalizedMeta.findIndex((meta) => meta.type !== PLAYLIST_TYPE_FOLDER);
+  if (existingIndex >= 0) return existingIndex;
+  return -1;
+}
+
+function buildFileOccurrenceMap(layoutState) {
+  const occurrence = new Map();
+  const normalizedLayout = ensurePlaylists(layoutState);
+
+  normalizedLayout.forEach((playlist) => {
+    playlist.forEach((file) => {
+      if (typeof file !== 'string' || !file) return;
+      occurrence.set(file, (occurrence.get(file) || 0) + 1);
+    });
+  });
+
+  return occurrence;
+}
+
+function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
+  let nextLayout = ensurePlaylists(layoutState).map((playlist) => playlist.slice());
+  let nextNames = normalizePlaylistNames(namesState, nextLayout.length);
+  let nextMeta = normalizePlaylistMeta(metaState, nextLayout.length);
+
+  const folderIndexByKey = new Map();
+  nextMeta.forEach((meta, index) => {
+    if (meta.type !== PLAYLIST_TYPE_FOLDER || !meta.folderKey || folderIndexByKey.has(meta.folderKey)) return;
+    folderIndexByKey.set(meta.folderKey, index);
+  });
+
+  availableFolders.forEach((folder) => {
+    if (!folderIndexByKey.has(folder.key)) {
+      nextLayout.push(folder.files.slice());
+      nextNames.push(folder.name);
+      nextMeta.push({
+        type: PLAYLIST_TYPE_FOLDER,
+        folderKey: folder.key,
+        folderOriginalName: folder.name,
+      });
+      folderIndexByKey.set(folder.key, nextLayout.length - 1);
+      return;
+    }
+
+    const folderIndex = folderIndexByKey.get(folder.key);
+    nextMeta[folderIndex] = {
+      ...nextMeta[folderIndex],
+      type: PLAYLIST_TYPE_FOLDER,
+      folderKey: folder.key,
+      folderOriginalName: folder.name,
+    };
+  });
+
+  nextLayout = ensurePlaylists(nextLayout);
+  nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
+  nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
+
+  let manualIndex = getManualPlaylistIndex(nextMeta, nextLayout);
+  if (manualIndex < 0) {
+    nextLayout.push([]);
+    nextNames.push(defaultPlaylistName(nextLayout.length - 1));
+    nextMeta.push(defaultPlaylistMeta());
+    manualIndex = nextLayout.length - 1;
+  }
+
+  const occurrence = buildFileOccurrenceMap(nextLayout);
+  const rootFiles = availableFiles.filter((file) => typeof file === 'string' && file && !file.includes('/'));
+  rootFiles.forEach((file) => {
+    if ((occurrence.get(file) || 0) > 0) return;
+    nextLayout[manualIndex].push(file);
+    occurrence.set(file, (occurrence.get(file) || 0) + 1);
+  });
+
+  availableFolders.forEach((folder) => {
+    const folderIndex = folderIndexByKey.get(folder.key);
+    if (!Number.isInteger(folderIndex) || folderIndex < 0 || folderIndex >= nextLayout.length) return;
+
+    folder.files.forEach((file) => {
+      if ((occurrence.get(file) || 0) > 0) return;
+      nextLayout[folderIndex].push(file);
+      occurrence.set(file, (occurrence.get(file) || 0) + 1);
+    });
+  });
+
+  return {
+    layout: ensurePlaylists(nextLayout),
+    playlistNames: normalizePlaylistNames(nextNames, nextLayout.length),
+    playlistMeta: normalizePlaylistMeta(nextMeta, nextLayout.length),
+  };
+}
+
 function isCopyDragModifier(event) {
   return Boolean(event && (event.ctrlKey || event.metaKey));
 }
 
 function setDropEffectFromEvent(event) {
   if (!event || !event.dataTransfer) return;
-  event.dataTransfer.dropEffect = isCopyDragModifier(event) ? 'copy' : 'move';
+  event.dataTransfer.dropEffect = isActiveCopyDrag(event) ? 'copy' : 'move';
 }
 
 function normalizeDragMode(mode) {
-  if (mode === 'copy' || mode === 'cancel') return mode;
+  if (mode === 'copy' || mode === 'cancel' || mode === 'delete') return mode;
   return 'move';
 }
 
@@ -178,6 +399,9 @@ function clearDragModeBadge() {
 }
 
 function isActiveCopyDrag(event) {
+  if (dragContext && dragContext.sourcePlaylistType === PLAYLIST_TYPE_FOLDER) {
+    return true;
+  }
   if (touchCopyDragActive) {
     return touchDragMode === 'copy';
   }
@@ -259,10 +483,74 @@ function createDesktopDragGhost(card, clientX, clientY) {
   }
 }
 
+function ensureTrashDropzone() {
+  if (trashDropzoneEl) return trashDropzoneEl;
+
+  const trash = document.createElement('div');
+  trash.className = 'drag-trash';
+  trash.setAttribute('aria-label', 'Удалить трек');
+  trash.innerHTML = '<span class="drag-trash__icon">🗑</span><span class="drag-trash__label">Удалить</span>';
+  document.body.appendChild(trash);
+
+  trash.addEventListener('dragover', (event) => {
+    if (!draggingCard || !dragContext) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    trash.classList.add('is-active');
+    applyDragModeBadge('delete');
+    updateDesktopDragGhostPosition(event.clientX, event.clientY);
+  });
+
+  trash.addEventListener('dragleave', () => {
+    trash.classList.remove('is-active');
+  });
+
+  trash.addEventListener('drop', (event) => {
+    if (!draggingCard || !dragContext) return;
+    event.preventDefault();
+    event.stopPropagation();
+    trash.classList.remove('is-active');
+    handleDragDeleteFromContext().catch((err) => {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось удалить трек.');
+    });
+  });
+
+  trashDropzoneEl = trash;
+  return trashDropzoneEl;
+}
+
+function showTrashDropzone() {
+  const trash = ensureTrashDropzone();
+  trash.classList.add('is-visible');
+}
+
+function hideTrashDropzone() {
+  if (!trashDropzoneEl) return;
+  trashDropzoneEl.classList.remove('is-visible', 'is-active');
+}
+
+function isTrashDropzoneTarget(target) {
+  if (!trashDropzoneEl || !(target instanceof Element)) return false;
+  return trashDropzoneEl.contains(target);
+}
+
+function isPointOverTrashDropzone(clientX, clientY) {
+  if (!trashDropzoneEl || !trashDropzoneEl.classList.contains('is-visible')) return false;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  const rect = trashDropzoneEl.getBoundingClientRect();
+  return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+}
+
 function handleGlobalDragOver(event) {
   if (!draggingCard || !event.dataTransfer) return;
   updateDesktopDragGhostPosition(event.clientX, event.clientY);
   const target = event.target instanceof Element ? event.target : null;
+  if (isTrashDropzoneTarget(target)) {
+    applyDragModeBadge('delete');
+    event.dataTransfer.dropEffect = 'move';
+    return;
+  }
   if (target && zonesContainer.contains(target)) {
     applyDragModeBadge(isActiveCopyDrag(event) ? 'copy' : 'move');
     return;
@@ -359,6 +647,7 @@ function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
     touchCopyDragGhost.remove();
     touchCopyDragGhost = null;
   }
+  hideTrashDropzone();
   clearDesktopDragGhost();
   clearDragModeBadge();
   clearDragPreviewCard();
@@ -399,10 +688,27 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   updateTouchCopyGhostPosition(clientX, clientY);
   clearZoneDragOverState();
 
+  if (isPointOverTrashDropzone(clientX, clientY)) {
+    if (trashDropzoneEl) {
+      trashDropzoneEl.classList.add('is-active');
+    }
+    applyDragModeBadge('delete');
+    if (touchCopyDragGhost) {
+      touchCopyDragGhost.classList.remove('is-cancel');
+      touchCopyDragGhost.classList.add('is-delete');
+    }
+    return;
+  }
+
+  if (trashDropzoneEl) {
+    trashDropzoneEl.classList.remove('is-active');
+  }
+
   const zone = getZoneFromPoint(clientX, clientY);
   if (!zone) {
     applyDragModeBadge('cancel');
     if (touchCopyDragGhost) {
+      touchCopyDragGhost.classList.remove('is-delete');
       touchCopyDragGhost.classList.add('is-cancel');
     }
     return;
@@ -410,6 +716,7 @@ function updateTouchCopyDragPreview(clientX, clientY) {
 
   applyDragModeBadge(touchDragMode === 'copy' ? 'copy' : 'move');
   if (touchCopyDragGhost) {
+    touchCopyDragGhost.classList.remove('is-delete');
     touchCopyDragGhost.classList.remove('is-cancel');
   }
 
@@ -431,6 +738,15 @@ async function finishTouchCopyDrag(clientX, clientY) {
   if (!touchCopyDragMoved) {
     cleanupTouchCopyDrag({ restoreLayout: true });
     setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
+    return;
+  }
+
+  if (isPointOverTrashDropzone(clientX, clientY)) {
+    try {
+      await handleDragDeleteFromContext();
+    } finally {
+      cleanupTouchCopyDrag({ restoreLayout: false });
+    }
     return;
   }
 
@@ -498,11 +814,14 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
   const sourceBody = card.parentElement;
   const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+  const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
+  const resolvedMode = sourcePlaylistType === PLAYLIST_TYPE_FOLDER ? 'copy' : mode === 'copy' ? 'copy' : 'move';
 
   dragContext = {
     file: card.dataset.file || '',
     sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
     sourceIndex,
+    sourcePlaylistType,
     snapshotLayout: cloneLayoutState(layout),
   };
 
@@ -513,7 +832,7 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   touchCopyDragStartX = clientX;
   touchCopyDragStartY = clientY;
   touchCopyDragMoved = Boolean(moved);
-  touchDragMode = mode === 'copy' ? 'copy' : 'move';
+  touchDragMode = resolvedMode;
   card.classList.add('dragging');
 
   const ghost = card.cloneNode(true);
@@ -523,6 +842,7 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   touchCopyDragGhost = ghost;
   document.body.appendChild(ghost);
   updateTouchCopyGhostPosition(clientX, clientY);
+  showTrashDropzone();
   applyDragModeBadge(touchDragMode);
 
   window.addEventListener('pointermove', onTouchCopyDragPointerMove, true);
@@ -571,7 +891,9 @@ function startTouchCopyHold(card, event) {
 }
 
 function trackDisplayName(file) {
-  return stripExtension(file);
+  const normalized = typeof file === 'string' ? file.replace(/\\/g, '/') : '';
+  const basename = normalized.split('/').filter(Boolean).pop() || normalized;
+  return stripExtension(basename);
 }
 
 function stripExtension(filename) {
@@ -1348,7 +1670,7 @@ function startProgressLoop(audio, fileKey) {
 function buildTrackCard(
   file,
   basePath = '/audio',
-  { draggable = true, orderNumber = null, playlistIndex = null, playlistPosition = null } = {},
+  { draggable = true, orderNumber = null, playlistIndex = null, playlistPosition = null, canDelete = false } = {},
 ) {
   const key = trackKey(file, basePath);
   const card = document.createElement('div');
@@ -1361,6 +1683,10 @@ function buildTrackCard(
   }
   if (Number.isInteger(playlistPosition) && playlistPosition >= 0) {
     card.dataset.playlistPosition = String(playlistPosition);
+  }
+  card.dataset.canDelete = canDelete ? '1' : '0';
+  if (!canDelete) {
+    card.classList.add('is-locked');
   }
   addToMultiMap(cardsByFile, key, card);
 
@@ -1390,7 +1716,25 @@ function buildTrackCard(
   );
   addToMultiMap(buttonsByFile, key, playButton);
 
-  card.append(order, name, durationLabel, playButton);
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.className = 'track-remove-btn';
+  removeButton.textContent = '✕';
+  removeButton.title = canDelete
+    ? 'Удалить трек из плей-листа'
+    : 'Удаление недоступно: трек существует в единственном экземпляре';
+  removeButton.setAttribute('aria-label', 'Удалить трек');
+  removeButton.disabled = !canDelete;
+  removeButton.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeTrackFromPlaylist(playlistIndex, playlistPosition).catch((err) => {
+      console.error(err);
+      setStatus('Не удалось удалить трек.');
+    });
+  });
+
+  card.append(order, name, durationLabel, playButton, removeButton);
   if (draggable) {
     attachDragHandlers(card);
   }
@@ -1419,26 +1763,30 @@ function attachDragHandlers(card) {
     const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
     const sourceBody = card.parentElement;
     const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+    const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
 
     dragContext = {
       file: card.dataset.file || '',
       sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
       sourceIndex,
+      sourcePlaylistType,
       snapshotLayout: cloneLayoutState(layout),
     };
 
-    e.dataTransfer.effectAllowed = 'copyMove';
+    e.dataTransfer.effectAllowed = sourcePlaylistType === PLAYLIST_TYPE_FOLDER ? 'copy' : 'copyMove';
     e.dataTransfer.setData('text/plain', card.dataset.file);
     setDropEffectFromEvent(e);
     createDesktopDragGhost(card, e.clientX, e.clientY);
     e.dataTransfer.setDragImage(getEmptyDragImage(), 0, 0);
-    applyDragModeBadge(isCopyDragModifier(e) ? 'copy' : 'move');
+    showTrashDropzone();
+    applyDragModeBadge(isActiveCopyDrag(e) ? 'copy' : 'move');
     card.classList.add('dragging');
     draggingCard = card;
     dragDropHandled = false;
   });
 
   card.addEventListener('dragend', () => {
+    hideTrashDropzone();
     clearDesktopDragGhost();
     clearDragModeBadge();
     clearDragPreviewCard();
@@ -1569,25 +1917,17 @@ function playlistAutoplayEqual(left, right, expectedLength) {
 function normalizeLayoutForFiles(rawLayout, files) {
   const normalized = ensurePlaylists(rawLayout);
   const allowedFiles = new Set(Array.isArray(files) ? files : []);
-  const present = new Set();
-
-  const filtered = normalized.map((playlist) => {
-    const clean = [];
-    playlist.forEach((file) => {
-      if (typeof file !== 'string') return;
-      if (!allowedFiles.has(file)) return;
-      clean.push(file);
-      present.add(file);
-    });
-    return clean;
-  });
-
-  const missing = Array.isArray(files) ? files.filter((file) => !present.has(file)) : [];
-  if (missing.length) {
-    filtered[0] = filtered[0].concat(missing);
-  }
-
-  return ensurePlaylists(filtered);
+  return ensurePlaylists(
+    normalized.map((playlist) => {
+      const clean = [];
+      playlist.forEach((file) => {
+        if (typeof file !== 'string') return;
+        if (!allowedFiles.has(file)) return;
+        clean.push(file);
+      });
+      return clean;
+    }),
+  );
 }
 
 function isServerLayoutEmpty(playlists) {
@@ -1618,7 +1958,171 @@ function syncLayoutFromDom() {
   });
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+}
+
+function buildTrackOccurrenceMap(layoutState) {
+  const occurrence = new Map();
+  ensurePlaylists(layoutState).forEach((playlist) => {
+    playlist.forEach((file) => {
+      if (typeof file !== 'string' || !file) return;
+      occurrence.set(file, (occurrence.get(file) || 0) + 1);
+    });
+  });
+  return occurrence;
+}
+
+function getTrackDeleteEligibility(layoutState, playlistIndex, trackIndex) {
+  const normalizedLayout = ensurePlaylists(layoutState);
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= normalizedLayout.length) {
+    return { canDelete: false, reason: 'Трек не найден.' };
+  }
+
+  const playlist = normalizedLayout[playlistIndex];
+  if (!Array.isArray(playlist) || !Number.isInteger(trackIndex) || trackIndex < 0 || trackIndex >= playlist.length) {
+    return { canDelete: false, reason: 'Трек не найден.' };
+  }
+
+  const file = playlist[trackIndex];
+  if (typeof file !== 'string' || !file) {
+    return { canDelete: false, reason: 'Трек не найден.' };
+  }
+
+  const occurrence = buildTrackOccurrenceMap(normalizedLayout);
+  if ((occurrence.get(file) || 0) > 1) {
+    return { canDelete: true, reason: '', file };
+  }
+
+  return {
+    canDelete: false,
+    reason: 'Нельзя удалить единственный экземпляр трека. Сначала создайте его копию.',
+    file,
+  };
+}
+
+function resolveTrackIndexByContext(layoutState, context) {
+  if (!context || typeof context !== 'object') return { playlistIndex: -1, trackIndex: -1, file: '' };
+
+  const normalizedLayout = ensurePlaylists(layoutState);
+  const playlistIndex = Number.isInteger(context.sourceZoneIndex) ? context.sourceZoneIndex : -1;
+  if (playlistIndex < 0 || playlistIndex >= normalizedLayout.length) {
+    return { playlistIndex: -1, trackIndex: -1, file: context.file || '' };
+  }
+
+  const playlist = normalizedLayout[playlistIndex];
+  const expectedFile = typeof context.file === 'string' ? context.file : '';
+  let trackIndex = Number.isInteger(context.sourceIndex) ? context.sourceIndex : -1;
+
+  if (trackIndex < 0 || trackIndex >= playlist.length || playlist[trackIndex] !== expectedFile) {
+    trackIndex = expectedFile ? playlist.indexOf(expectedFile) : -1;
+  }
+
+  return {
+    playlistIndex,
+    trackIndex,
+    file: expectedFile,
+  };
+}
+
+async function removeTrackFromPlaylist(playlistIndex, trackIndex, { source = 'button' } = {}) {
+  const previousLayout = cloneLayoutState(layout);
+  const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
+  const previousAutoplay = playlistAutoplay.slice();
+
+  const sourceContext = {
+    sourceZoneIndex: playlistIndex,
+    sourceIndex: trackIndex,
+    file:
+      Number.isInteger(playlistIndex) &&
+      playlistIndex >= 0 &&
+      playlistIndex < previousLayout.length &&
+      Number.isInteger(trackIndex) &&
+      trackIndex >= 0 &&
+      trackIndex < previousLayout[playlistIndex].length
+        ? previousLayout[playlistIndex][trackIndex]
+        : '',
+  };
+  const resolution = resolveTrackIndexByContext(previousLayout, sourceContext);
+  const eligibility = getTrackDeleteEligibility(previousLayout, resolution.playlistIndex, resolution.trackIndex);
+
+  if (!eligibility.canDelete) {
+    setStatus(`Удаление недоступно: ${eligibility.reason}`);
+    return false;
+  }
+
+  const nextLayout = cloneLayoutState(previousLayout);
+  nextLayout[resolution.playlistIndex].splice(resolution.trackIndex, 1);
+
+  layout = ensurePlaylists(nextLayout);
+  playlistNames = normalizePlaylistNames(previousNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(source === 'drag' ? 'Трек удален через корзину и синхронизирован.' : 'Трек удален и синхронизирован.');
+    return true;
+  } catch (err) {
+    console.error(err);
+    layout = previousLayout;
+    playlistNames = previousNames;
+    playlistMeta = previousMeta;
+    playlistAutoplay = previousAutoplay;
+    renderZones();
+    setStatus('Не удалось синхронизировать удаление трека.');
+    return false;
+  }
+}
+
+async function handleDragDeleteFromContext() {
+  if (!dragContext) return false;
+
+  const snapshotLayout = cloneLayoutState(dragContext.snapshotLayout);
+  const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
+  const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
+  const snapshotAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, snapshotLayout.length);
+
+  const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
+  const eligibility = getTrackDeleteEligibility(snapshotLayout, resolution.playlistIndex, resolution.trackIndex);
+  if (!eligibility.canDelete) {
+    setStatus(`Удаление недоступно: ${eligibility.reason}`);
+    return false;
+  }
+
+  snapshotLayout[resolution.playlistIndex].splice(resolution.trackIndex, 1);
+
+  const previousLayout = cloneLayoutState(layout);
+  const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
+  const previousAutoplay = playlistAutoplay.slice();
+
+  layout = ensurePlaylists(snapshotLayout);
+  playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(snapshotAutoplay, layout.length);
+  dragDropHandled = true;
+  clearDragModeBadge();
+  clearDragPreviewCard();
+  hideTrashDropzone();
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus('Трек удален через корзину и синхронизирован.');
+    return true;
+  } catch (err) {
+    console.error(err);
+    layout = previousLayout;
+    playlistNames = previousNames;
+    playlistMeta = previousMeta;
+    playlistAutoplay = previousAutoplay;
+    renderZones();
+    setStatus('Не удалось синхронизировать удаление трека.');
+    return false;
+  }
 }
 
 function getTrackButton(file, playlistIndex = null, playlistPosition = null, basePath = '/audio') {
@@ -1687,6 +2191,7 @@ async function tryAutoplayNextTrack(finishedTrack) {
 }
 
 function resetTrackReferences() {
+  hideTrashDropzone();
   clearDesktopDragGhost();
   clearDragModeBadge();
   clearDragPreviewCard();
@@ -1700,18 +2205,29 @@ function resetTrackReferences() {
   hostHighlightedDescriptor = '';
 }
 
-function applyIncomingLayoutState(nextLayout, nextPlaylistNames, nextPlaylistAutoplay, version = null, render = true) {
+function applyIncomingLayoutState(
+  nextLayout,
+  nextPlaylistNames,
+  nextPlaylistMeta,
+  nextPlaylistAutoplay,
+  version = null,
+  render = true,
+) {
   const normalizedLayout = normalizeLayoutForFiles(nextLayout, availableFiles);
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
+  const normalizedMeta = normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
   const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextPlaylistAutoplay, normalizedLayout.length);
+  const withFolderCoverage = ensureFolderPlaylistsCoverage(normalizedLayout, normalizedNames, normalizedMeta);
   const changed =
-    !layoutsEqual(layout, normalizedLayout) ||
-    !playlistNamesEqual(playlistNames, normalizedNames, normalizedLayout.length) ||
-    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, normalizedLayout.length);
+    !layoutsEqual(layout, withFolderCoverage.layout) ||
+    !playlistNamesEqual(playlistNames, withFolderCoverage.playlistNames, withFolderCoverage.layout.length) ||
+    !playlistMetaEqual(playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
+    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length);
 
-  layout = normalizedLayout;
-  playlistNames = normalizedNames;
-  playlistAutoplay = normalizedAutoplay;
+  layout = withFolderCoverage.layout;
+  playlistNames = withFolderCoverage.playlistNames;
+  playlistMeta = withFolderCoverage.playlistMeta;
+  playlistAutoplay = normalizePlaylistAutoplayFlags(normalizedAutoplay, layout.length);
 
   const numericVersion = Number(version);
   if (Number.isFinite(numericVersion)) {
@@ -1836,16 +2352,27 @@ async function fetchSharedLayoutState() {
   return {
     layout: Array.isArray(data.layout) ? data.layout : [[]],
     playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
+    playlistMeta: Array.isArray(data.playlistMeta) ? data.playlistMeta : [],
     playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
     version: Number.isFinite(Number(data.version)) ? Number(data.version) : 0,
   };
 }
 
 async function pushSharedLayout({ renderOnApply = true } = {}) {
+  const payloadState = ensureFolderPlaylistsCoverage(layout, playlistNames, playlistMeta);
+  const payloadAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, payloadState.layout.length);
+
   const response = await fetch('/api/layout', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ layout, playlistNames, playlistAutoplay, clientId, version: layoutVersion }),
+    body: JSON.stringify({
+      layout: payloadState.layout,
+      playlistNames: payloadState.playlistNames,
+      playlistMeta: payloadState.playlistMeta,
+      playlistAutoplay: payloadAutoplay,
+      clientId,
+      version: layoutVersion,
+    }),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -1854,7 +2381,14 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
     throw new Error(message || 'Не удалось синхронизировать плей-листы');
   }
 
-  applyIncomingLayoutState(data.layout, data.playlistNames, data.playlistAutoplay, data.version, renderOnApply);
+  applyIncomingLayoutState(
+    data.layout,
+    data.playlistNames,
+    data.playlistMeta,
+    data.playlistAutoplay,
+    data.version,
+    renderOnApply,
+  );
 }
 
 function clearLayoutStreamConnection() {
@@ -1892,7 +2426,14 @@ function connectLayoutStream() {
     }
 
     if (!payload || !Array.isArray(payload.layout)) return;
-    applyIncomingLayoutState(payload.layout, payload.playlistNames, payload.playlistAutoplay, payload.version, true);
+    applyIncomingLayoutState(
+      payload.layout,
+      payload.playlistNames,
+      payload.playlistMeta,
+      payload.playlistAutoplay,
+      payload.version,
+      true,
+    );
   });
 
   stream.addEventListener('playback', (event) => {
@@ -1923,14 +2464,17 @@ async function initializeLayoutState() {
   const serverState = await fetchSharedLayoutState();
   const incomingLayout = ensurePlaylists(serverState.layout);
   const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
+  const incomingMeta = normalizePlaylistMeta(serverState.playlistMeta, incomingLayout.length);
   const incomingAutoplay = normalizePlaylistAutoplayFlags(serverState.playlistAutoplay, incomingLayout.length);
 
   let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
+  let nextMeta = normalizePlaylistMeta(incomingMeta, nextLayout.length);
   let nextAutoplay = normalizePlaylistAutoplayFlags(incomingAutoplay, nextLayout.length);
   let shouldPush =
     !layoutsEqual(incomingLayout, nextLayout) ||
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
+    !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length);
 
   if (currentRole === 'host' && isServerLayoutEmpty(incomingLayout)) {
@@ -1938,13 +2482,28 @@ async function initializeLayoutState() {
     if (legacyLayout && !layoutsEqual(legacyLayout, nextLayout)) {
       nextLayout = legacyLayout;
       nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
+      nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
       nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
       shouldPush = true;
     }
   }
 
+  const withFolderCoverage = ensureFolderPlaylistsCoverage(nextLayout, nextNames, nextMeta);
+  nextLayout = withFolderCoverage.layout;
+  nextNames = withFolderCoverage.playlistNames;
+  nextMeta = withFolderCoverage.playlistMeta;
+  nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+
+  shouldPush =
+    shouldPush ||
+    !layoutsEqual(incomingLayout, nextLayout) ||
+    !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
+    !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
+    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length);
+
   layout = nextLayout;
   playlistNames = nextNames;
+  playlistMeta = nextMeta;
   playlistAutoplay = nextAutoplay;
   layoutVersion = serverState.version;
 
@@ -1964,6 +2523,7 @@ async function addPlaylist() {
   layout = ensurePlaylists(layout);
   layout.push([]);
   playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
+  playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags([...playlistAutoplay, false], layout.length);
   renderZones();
 
@@ -2078,9 +2638,19 @@ function getLiveLockedPlaylistIndex() {
 
 function getPlaylistDeleteEligibility(playlistIndex) {
   const normalizedLayout = ensurePlaylists(layout);
+  const normalizedMeta = normalizePlaylistMeta(playlistMeta, normalizedLayout.length);
 
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= normalizedLayout.length) {
     return { canDelete: false, reason: 'Плей-лист не найден.' };
+  }
+
+  const metaEntry = normalizedMeta[playlistIndex];
+  const isLinkedFolderPlaylist =
+    metaEntry &&
+    metaEntry.type === PLAYLIST_TYPE_FOLDER &&
+    availableFolders.some((folder) => folder.key === metaEntry.folderKey);
+  if (isLinkedFolderPlaylist) {
+    return { canDelete: false, reason: 'Нельзя удалить авто-плей-лист папки, пока папка есть в /audio.' };
   }
 
   if (normalizedLayout.length <= 1) {
@@ -2127,6 +2697,7 @@ async function deletePlaylist(playlistIndex) {
 
   const previousLayout = ensurePlaylists(layout).map((playlist) => playlist.slice());
   const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
@@ -2134,11 +2705,14 @@ async function deletePlaylist(playlistIndex) {
 
   const nextNames = previousNames.slice();
   nextNames.splice(playlistIndex, 1);
+  const nextMeta = previousMeta.slice();
+  nextMeta.splice(playlistIndex, 1);
   const nextAutoplay = previousAutoplay.slice();
   nextAutoplay.splice(playlistIndex, 1);
 
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(nextNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
   renderZones();
 
@@ -2149,6 +2723,7 @@ async function deletePlaylist(playlistIndex) {
     console.error(err);
     layout = previousLayout;
     playlistNames = previousNames;
+    playlistMeta = previousMeta;
     playlistAutoplay = previousAutoplay;
     renderZones();
     setStatus(err && err.message ? err.message : 'Не удалось синхронизировать удаление плей-листа.');
@@ -2159,12 +2734,19 @@ function renderZones() {
   zonesContainer.innerHTML = '';
   resetTrackReferences();
   layout = ensurePlaylists(layout);
+  playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+  const trackOccurrence = buildTrackOccurrenceMap(layout);
 
   layout.forEach((playlistFiles, playlistIndex) => {
+    const metaEntry = playlistMeta[playlistIndex] || defaultPlaylistMeta();
     const zone = document.createElement('div');
     zone.className = 'zone';
     zone.dataset.zoneIndex = playlistIndex.toString();
+    zone.dataset.playlistType = metaEntry.type;
+    if (metaEntry.type === PLAYLIST_TYPE_FOLDER) {
+      zone.classList.add('zone--folder');
+    }
 
     zone.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -2178,6 +2760,8 @@ function renderZones() {
 
     const header = document.createElement('div');
     header.className = 'playlist-header';
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'playlist-title-wrap';
     const titleInput = document.createElement('input');
     titleInput.type = 'text';
     titleInput.className = 'playlist-title-input';
@@ -2198,6 +2782,18 @@ function renderZones() {
         titleInput.value = normalized;
       }
     });
+
+    if (metaEntry.type === PLAYLIST_TYPE_FOLDER) {
+      const folderIcon = document.createElement('span');
+      folderIcon.className = 'playlist-folder-icon';
+      folderIcon.textContent = '📁';
+      const originalFolderName = sanitizeFolderOriginalName(metaEntry.folderOriginalName, metaEntry.folderKey);
+      folderIcon.title = originalFolderName || metaEntry.folderKey || 'Папка';
+      folderIcon.setAttribute('aria-label', 'Плей-лист папки');
+      titleWrap.appendChild(folderIcon);
+    }
+
+    titleWrap.appendChild(titleInput);
 
     const count = document.createElement('span');
     count.className = 'playlist-count';
@@ -2245,18 +2841,20 @@ function renderZones() {
     });
 
     headerMeta.append(autoplayButton, count, deleteButton);
-    header.append(titleInput, headerMeta);
+    header.append(titleWrap, headerMeta);
 
     const body = document.createElement('div');
     body.className = 'zone-body';
 
     playlistFiles.forEach((file, rowIndex) => {
+      const canDeleteTrack = (trackOccurrence.get(file) || 0) > 1;
       body.appendChild(
         buildTrackCard(file, '/audio', {
           draggable: true,
           orderNumber: rowIndex + 1,
           playlistIndex,
           playlistPosition: rowIndex,
+          canDelete: canDeleteTrack,
         }),
       );
     });
@@ -2283,11 +2881,13 @@ function syncCurrentTrackState() {
 async function handleDrop(event, targetZoneIndex) {
   event.preventDefault();
   if (!draggingCard || !dragContext) {
+    hideTrashDropzone();
     clearDragModeBadge();
     clearDragPreviewCard();
     return;
   }
   if (!Number.isInteger(targetZoneIndex) || targetZoneIndex < 0) {
+    hideTrashDropzone();
     clearDragModeBadge();
     clearDragPreviewCard();
     return;
@@ -2295,6 +2895,7 @@ async function handleDrop(event, targetZoneIndex) {
 
   const targetZone = event.currentTarget;
   if (!targetZone) {
+    hideTrashDropzone();
     clearDragModeBadge();
     clearDragPreviewCard();
     return;
@@ -2303,17 +2904,22 @@ async function handleDrop(event, targetZoneIndex) {
   dragDropHandled = true;
 
   const previousLayout = cloneLayoutState(layout);
+  const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
+  const previousAutoplay = playlistAutoplay.slice();
   const isCopyDrop = isActiveCopyDrag(event);
 
   let nextLayout;
   if (isCopyDrop) {
     if (!dragContext.file) {
+      hideTrashDropzone();
       clearDragModeBadge();
       clearDragPreviewCard();
       return;
     }
     nextLayout = cloneLayoutState(dragContext.snapshotLayout);
     if (!Array.isArray(nextLayout[targetZoneIndex])) {
+      hideTrashDropzone();
       clearDragModeBadge();
       clearDragPreviewCard();
       return;
@@ -2345,11 +2951,13 @@ async function handleDrop(event, targetZoneIndex) {
     nextLayout = cloneLayoutState(layout);
   }
 
+  hideTrashDropzone();
   clearDragModeBadge();
   clearDragPreviewCard();
   layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(playlistNames, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+  playlistNames = normalizePlaylistNames(previousNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
+  playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
   renderZones();
   try {
     await pushSharedLayout();
@@ -2357,8 +2965,9 @@ async function handleDrop(event, targetZoneIndex) {
   } catch (err) {
     console.error(err);
     layout = previousLayout;
-    playlistNames = normalizePlaylistNames(playlistNames, layout.length);
-    playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+    playlistNames = normalizePlaylistNames(previousNames, layout.length);
+    playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
+    playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
     renderZones();
     setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
   }
@@ -2369,10 +2978,14 @@ async function fetchFileList(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error('Не удалось получить список файлов');
     const data = await res.json();
-    return { files: Array.isArray(data.files) ? data.files : [], ok: true };
+    return {
+      files: Array.isArray(data.files) ? data.files : [],
+      folders: Array.isArray(data.folders) ? data.folders : [],
+      ok: true,
+    };
   } catch (err) {
     console.error(err);
-    return { files: [], ok: false };
+    return { files: [], folders: [], ok: false };
   }
 }
 
@@ -2389,6 +3002,7 @@ async function loadTracks() {
   }
 
   availableFiles = audioResult.files;
+  availableFolders = normalizeAudioFolderTemplates(audioResult.folders, availableFiles);
   keepKnownDurationsForFiles(availableFiles);
   preloadTrackDurations(availableFiles);
 
@@ -2403,8 +3017,10 @@ async function loadTracks() {
     await initializeLayoutState();
   } catch (err) {
     console.error(err);
-    layout = normalizeLayoutForFiles([availableFiles.slice()], availableFiles);
-    playlistNames = normalizePlaylistNames([], layout.length);
+    const fallback = ensureFolderPlaylistsCoverage([availableFiles.filter((file) => !file.includes('/'))], [], []);
+    layout = normalizeLayoutForFiles(fallback.layout, availableFiles);
+    playlistNames = normalizePlaylistNames(fallback.playlistNames, layout.length);
+    playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, layout.length);
     playlistAutoplay = normalizePlaylistAutoplayFlags([], layout.length);
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }

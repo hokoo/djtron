@@ -289,7 +289,7 @@ body[data-role='slave'] #hostNowPlaying {
   border-radius: 8px;
   padding: 7px 8px;
   display: grid;
-  grid-template-columns: 28px 1fr auto 36px;
+  grid-template-columns: 28px 1fr auto 36px 28px;
   align-items: center;
   gap: 10px;
   background: rgba(0, 0, 0, 0.18);
@@ -335,6 +335,22 @@ body[data-role='slave'] #hostNowPlaying {
   background: rgba(127, 29, 29, 0.72);
 }
 
+.track-card.has-drag-mode[data-drag-mode='delete']::after {
+  content: 'DELETE';
+  border-color: #dc2626;
+  background: rgba(127, 29, 29, 0.78);
+}
+
+.track-card.is-locked {
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.03) 0 5px,
+      rgba(0, 0, 0, 0.06) 5px 10px
+    ),
+    rgba(0, 0, 0, 0.18);
+}
+
 .track-card.touch-hold-copy {
   border-color: var(--border-strong);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 0 10px var(--shadow-accent);
@@ -371,6 +387,11 @@ body[data-role='slave'] #hostNowPlaying {
 .desktop-drag-ghost.has-drag-mode[data-drag-mode='cancel'] {
   border-color: #b91c1c;
   box-shadow: 0 0 14px rgba(185, 28, 28, 0.65);
+}
+
+.desktop-drag-ghost.has-drag-mode[data-drag-mode='delete'] {
+  border-color: #dc2626;
+  box-shadow: 0 0 14px rgba(220, 38, 38, 0.7);
 }
 
 .touch-drag-ghost {
@@ -421,6 +442,63 @@ body[data-role='slave'] #hostNowPlaying {
   background: rgba(127, 29, 29, 0.72);
 }
 
+.touch-drag-ghost.is-delete {
+  border-color: #dc2626;
+  box-shadow: 0 0 14px rgba(220, 38, 38, 0.72);
+}
+
+.touch-drag-ghost.is-delete::after {
+  content: 'DELETE';
+  border-color: #dc2626;
+  background: rgba(127, 29, 29, 0.8);
+}
+
+.drag-trash {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1700;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--muted);
+  padding: 8px 10px;
+  min-width: 84px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: opacity 0.12s ease, transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease,
+    color 0.12s ease;
+}
+
+.drag-trash.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.drag-trash.is-active {
+  border-color: #dc2626;
+  color: #fff;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.6);
+}
+
+.drag-trash__icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.drag-trash__label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .zones-actions {
   display: flex;
   align-items: center;
@@ -465,6 +543,26 @@ body[data-role='slave'] #hostNowPlaying {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.playlist-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  gap: 6px;
+}
+
+.playlist-folder-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  min-width: 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: help;
 }
 
 .playlist-header-meta {
@@ -603,6 +701,39 @@ body[data-role='slave'] #hostNowPlaying {
   text-align: right;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
+}
+
+.track-remove-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.track-remove-btn:hover,
+.track-remove-btn:focus-visible {
+  outline: none;
+  border-color: #dc2626;
+  color: #fff;
+  background: rgba(127, 29, 29, 0.34);
+}
+
+.track-remove-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted);
 }
 
 button.play {
