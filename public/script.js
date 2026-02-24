@@ -46,6 +46,7 @@ const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const HOST_PROGRESS_REFRESH_INTERVAL_MS = 250;
 const TOUCH_COPY_HOLD_MS = 360;
+const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
@@ -89,6 +90,7 @@ let touchHoldTimer = null;
 let touchHoldPointerId = null;
 let touchHoldStartX = 0;
 let touchHoldStartY = 0;
+let touchHoldStartedAt = 0;
 let touchHoldCard = null;
 let touchCopyDragActive = false;
 let touchCopyDragPointerId = null;
@@ -629,6 +631,7 @@ function clearTouchCopyHold() {
     touchHoldTimer = null;
   }
   touchHoldPointerId = null;
+  touchHoldStartedAt = 0;
   touchHoldCard = null;
   removeTouchHoldListeners();
 }
@@ -638,17 +641,25 @@ function onTouchHoldPointerMove(event) {
   const deltaX = event.clientX - touchHoldStartX;
   const deltaY = event.clientY - touchHoldStartY;
   const distance = Math.hypot(deltaX, deltaY);
-  if (distance > TOUCH_DRAG_START_MOVE_PX) {
-    const heldCard = touchHoldCard;
-    const pointerId = touchHoldPointerId;
+  if (distance <= TOUCH_DRAG_START_MOVE_PX) return;
+
+  const elapsed = Date.now() - touchHoldStartedAt;
+  if (elapsed < TOUCH_DRAG_ACTIVATION_DELAY_MS) {
+    // Treat early movement as a regular scroll gesture, not as drag.
     clearTouchCopyHold();
-    if (!heldCard || pointerId === null) return;
-    startTouchCopyDrag(heldCard, pointerId, event.clientX, event.clientY, {
-      mode: 'move',
-      moved: true,
-    });
-    updateTouchCopyDragPreview(event.clientX, event.clientY);
+    return;
   }
+
+  const heldCard = touchHoldCard;
+  const pointerId = touchHoldPointerId;
+  clearTouchCopyHold();
+  if (!heldCard || pointerId === null) return;
+  event.preventDefault();
+  startTouchCopyDrag(heldCard, pointerId, event.clientX, event.clientY, {
+    mode: 'move',
+    moved: true,
+  });
+  updateTouchCopyDragPreview(event.clientX, event.clientY);
 }
 
 function onTouchHoldPointerEnd(event) {
@@ -842,6 +853,10 @@ function onTouchCopyDragPointerCancel(event) {
 
 function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', moved = false } = {}) {
   if (!card || !card.isConnected) return;
+  if (isTrackCardDragBlocked(card)) {
+    setStatus('Активный трек нельзя перемещать или копировать.');
+    return;
+  }
 
   const sourceZone = card.closest('.zone');
   const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
@@ -903,6 +918,7 @@ function startTouchCopyHold(card, event) {
   touchHoldPointerId = event.pointerId;
   touchHoldStartX = event.clientX;
   touchHoldStartY = event.clientY;
+  touchHoldStartedAt = Date.now();
   touchHoldCard = card;
   card.classList.add('touch-hold-copy');
 
@@ -1581,6 +1597,46 @@ function getTrackButtonByContext(fileKey, playbackContext = null) {
   return getFirstFromSet(buttons);
 }
 
+function isTrackCardContextActive(card, trackFile, playbackContext) {
+  if (!card || !trackFile || !playbackContext) return false;
+  if (!cardMatchesTrackContext(card, playbackContext)) return false;
+  return card.dataset.file === trackFile;
+}
+
+function isTrackCardDragBlocked(card) {
+  if (!(card instanceof HTMLElement)) return false;
+
+  if (
+    card.classList.contains('is-playing') ||
+    card.classList.contains('is-paused') ||
+    card.classList.contains('is-host-playing') ||
+    card.classList.contains('is-host-paused')
+  ) {
+    return true;
+  }
+
+  const cardFile = typeof card.dataset.file === 'string' ? card.dataset.file : '';
+  if (!cardFile) return false;
+
+  if (currentTrack && typeof currentTrack.file === 'string') {
+    if (isTrackCardContextActive(card, currentTrack.file, currentTrack)) {
+      return true;
+    }
+  }
+
+  if (hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()) {
+    const hostContext = {
+      playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
+      playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+    };
+    if (isTrackCardContextActive(card, hostPlaybackState.trackFile, hostContext)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function applyPlayButtonState(button, isPauseState) {
   if (!button) return;
   button.dataset.state = isPauseState ? 'pause' : 'play';
@@ -1764,6 +1820,11 @@ function attachDragHandlers(card) {
     const target = event.target instanceof Element ? event.target : null;
     if (target && target.closest('button, input, textarea, select, a')) return;
 
+    if (isTrackCardDragBlocked(card)) {
+      setStatus('Активный трек нельзя перемещать или копировать.');
+      return;
+    }
+
     event.preventDefault();
     startTouchCopyHold(card, event);
   });
@@ -1771,6 +1832,12 @@ function attachDragHandlers(card) {
   card.addEventListener('dragstart', (e) => {
     if (isLikelyTouchNativeDragEvent(e)) {
       e.preventDefault();
+      return;
+    }
+
+    if (isTrackCardDragBlocked(card)) {
+      e.preventDefault();
+      setStatus('Активный трек нельзя перемещать или копировать.');
       return;
     }
 
