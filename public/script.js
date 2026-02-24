@@ -65,6 +65,8 @@ const ZONES_PAN_TOUCH_GAIN = 2.4;
 const ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS = 0.16;
 const ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS = 0.02;
 const ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME = 0.92;
+const ZONES_WHEEL_SMOOTH_EASE = 0.24;
+const ZONES_WHEEL_SMOOTH_MIN_DELTA_PX = 0.45;
 const TRACK_TITLE_MODE_FILE = 'file';
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
@@ -156,6 +158,8 @@ let zonesTouchPanStartScrollLeft = 0;
 let zonesTouchPanLastMidX = 0;
 let zonesTouchPanLastAt = 0;
 let zonesTouchPanVelocityX = 0;
+const zonesWheelTargets = new Map();
+let zonesWheelSmoothRaf = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const SLAVE_SERVER_HINT = 'Этот клиент работает в режиме slave. Останавливать сервер может только хост (live).';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
@@ -2072,6 +2076,56 @@ function stopZonesPanMomentum() {
   zonesPanMomentumRaf = null;
 }
 
+function stopZonesWheelSmoothScroll() {
+  if (zonesWheelSmoothRaf !== null) {
+    cancelAnimationFrame(zonesWheelSmoothRaf);
+    zonesWheelSmoothRaf = null;
+  }
+  zonesWheelTargets.clear();
+}
+
+function runZonesWheelSmoothStep() {
+  zonesWheelSmoothRaf = null;
+  if (!zonesContainer || !zonesWheelTargets.size) {
+    zonesWheelTargets.clear();
+    return;
+  }
+
+  let hasPending = false;
+  const activeBodies = new Set(getZoneBodies());
+
+  for (const [body, targetValue] of zonesWheelTargets.entries()) {
+    if (!(body instanceof HTMLElement) || !activeBodies.has(body)) {
+      zonesWheelTargets.delete(body);
+      continue;
+    }
+
+    const maxScrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
+    const target = Math.max(0, Math.min(maxScrollTop, Number.isFinite(targetValue) ? targetValue : body.scrollTop));
+    const current = body.scrollTop;
+    const delta = target - current;
+
+    if (Math.abs(delta) <= ZONES_WHEEL_SMOOTH_MIN_DELTA_PX) {
+      body.scrollTop = target;
+      zonesWheelTargets.delete(body);
+      continue;
+    }
+
+    body.scrollTop = current + delta * ZONES_WHEEL_SMOOTH_EASE;
+    zonesWheelTargets.set(body, target);
+    hasPending = true;
+  }
+
+  if (hasPending && zonesWheelTargets.size) {
+    zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
+  }
+}
+
+function scheduleZonesWheelSmoothScroll() {
+  if (zonesWheelSmoothRaf !== null) return;
+  zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
+}
+
 function startZonesPanMomentum(initialVelocityPxPerMs) {
   if (!zonesContainer) return;
   stopZonesPanMomentum();
@@ -2139,7 +2193,7 @@ function normalizeWheelDeltaPixels(event) {
   };
 }
 
-function applySharedZonesVerticalScroll(deltaY) {
+function applySharedZonesVerticalScroll(deltaY, { smooth = false } = {}) {
   if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) return false;
 
   let changed = false;
@@ -2150,11 +2204,24 @@ function applySharedZonesVerticalScroll(deltaY) {
     const maxScrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
     if (maxScrollTop <= 0) continue;
 
-    const previous = body.scrollTop;
-    const next = Math.max(0, Math.min(maxScrollTop, previous + deltaY));
-    if (Math.abs(next - previous) < 0.01) continue;
-    body.scrollTop = next;
+    if (smooth) {
+      const previousTarget = zonesWheelTargets.has(body) ? zonesWheelTargets.get(body) : body.scrollTop;
+      const nextTarget = Math.max(0, Math.min(maxScrollTop, previousTarget + deltaY));
+      if (Math.abs(nextTarget - previousTarget) < 0.01 && Math.abs(nextTarget - body.scrollTop) < 0.01) continue;
+      zonesWheelTargets.set(body, nextTarget);
+      changed = true;
+      continue;
+    }
+
+    const previousScrollTop = body.scrollTop;
+    const nextScrollTop = Math.max(0, Math.min(maxScrollTop, previousScrollTop + deltaY));
+    if (Math.abs(nextScrollTop - previousScrollTop) < 0.01) continue;
+    body.scrollTop = nextScrollTop;
     changed = true;
+  }
+
+  if (smooth && changed) {
+    scheduleZonesWheelSmoothScroll();
   }
 
   return changed;
@@ -2174,7 +2241,7 @@ function onZonesWheel(event) {
     return;
   }
 
-  if (applySharedZonesVerticalScroll(deltaY)) {
+  if (applySharedZonesVerticalScroll(deltaY, { smooth: true })) {
     event.preventDefault();
   }
 }
@@ -2219,6 +2286,7 @@ function onZonesTouchStart(event) {
   if (!midpoint) return;
 
   stopZonesPanMomentum();
+  stopZonesWheelSmoothScroll();
   cleanupZonesTouchPanInteraction();
 
   zonesTouchPanActive = true;
@@ -2391,6 +2459,7 @@ function onZonesPanPointerDown(event) {
   if (!isZonesPanFreeAreaTarget(event.target instanceof Element ? event.target : null)) return;
 
   stopZonesPanMomentum();
+  stopZonesWheelSmoothScroll();
 
   if (zonesPanActive) {
     cleanupZonesPanInteraction();
@@ -4558,6 +4627,7 @@ async function bootstrap() {
     stopHostProgressLoop();
     cleanupNowPlayingSeekInteraction();
     stopZonesPanMomentum();
+    stopZonesWheelSmoothScroll();
     cleanupZonesPanInteraction();
     cleanupZonesTouchPanInteraction();
     clearTouchCopyHold();
