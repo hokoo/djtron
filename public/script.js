@@ -1572,6 +1572,23 @@ function buildPlaylistCoverage(layoutState) {
   return coverage;
 }
 
+function getLiveLockedPlaylistIndex() {
+  const hostPlaybackIndex =
+    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+      ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
+      : null;
+
+  if (hostPlaybackIndex !== null) {
+    return hostPlaybackIndex;
+  }
+
+  if (currentRole === 'host' && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
+    return normalizePlaylistTrackIndex(currentTrack.playlistIndex);
+  }
+
+  return null;
+}
+
 function getPlaylistDeleteEligibility(playlistIndex) {
   const normalizedLayout = ensurePlaylists(layout);
 
@@ -1581,6 +1598,11 @@ function getPlaylistDeleteEligibility(playlistIndex) {
 
   if (normalizedLayout.length <= 1) {
     return { canDelete: false, reason: 'Нельзя удалить последний плей-лист.' };
+  }
+
+  const liveLockedPlaylistIndex = getLiveLockedPlaylistIndex();
+  if (liveLockedPlaylistIndex !== null && liveLockedPlaylistIndex === playlistIndex) {
+    return { canDelete: false, reason: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' };
   }
 
   const playlist = normalizedLayout[playlistIndex];
@@ -1642,7 +1664,7 @@ async function deletePlaylist(playlistIndex) {
     playlistNames = previousNames;
     playlistAutoplay = previousAutoplay;
     renderZones();
-    setStatus('Не удалось синхронизировать удаление плей-листа.');
+    setStatus(err && err.message ? err.message : 'Не удалось синхронизировать удаление плей-листа.');
   }
 }
 

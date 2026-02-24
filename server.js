@@ -269,6 +269,20 @@ function sanitizePlaybackState(rawPlayback) {
   };
 }
 
+function hasLivePlaybackTrack(state) {
+  return Boolean(state && typeof state.trackFile === 'string' && state.trackFile.trim());
+}
+
+function isDeletingLivePlaybackPlaylist(nextLayout) {
+  if (!hasLivePlaybackTrack(sharedPlaybackState)) return false;
+
+  const livePlaylistIndex = normalizePlaylistTrackIndex(sharedPlaybackState.playlistIndex);
+  if (livePlaylistIndex === null) return false;
+
+  if (!Array.isArray(sharedLayoutState.layout[livePlaylistIndex])) return false;
+  return !Array.isArray(nextLayout[livePlaylistIndex]);
+}
+
 function loadPersistedLayoutState() {
   try {
     if (!fs.existsSync(LAYOUT_STATE_PATH)) {
@@ -1154,6 +1168,12 @@ async function handleApiLayoutUpdate(req, res) {
     sendJson(res, 400, { error: 'Неверный формат плей-листов' });
     return;
   }
+
+  if (isDeletingLivePlaybackPlaylist(nextLayout)) {
+    sendJson(res, 409, { error: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' });
+    return;
+  }
+
   const nextPlaylistNames = normalizePlaylistNames(body.playlistNames, nextLayout.length);
   const nextPlaylistAutoplay = auth.isServer
     ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
