@@ -7,6 +7,9 @@ const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
 const showVolumePresetsToggle = document.getElementById('showVolumePresets');
+const showVolumePresetsToggleRow = showVolumePresetsToggle
+  ? showVolumePresetsToggle.closest('.settings-toggle-row')
+  : null;
 const liveSeekEnabledToggle = document.getElementById('liveSeekEnabled');
 const liveSeekToggleRow = liveSeekEnabledToggle ? liveSeekEnabledToggle.closest('.settings-toggle-row') : null;
 const sidebar = document.getElementById('sidebar');
@@ -394,12 +397,17 @@ function setLiveSeekEnabled(
 function updateVolumePresetsUi() {
   if (!localVolumePresetsEl) return;
 
-  const shouldShow = showVolumePresetsEnabled && (isHostRole() || isCoHostRole());
+  const canManagePresets = isHostRole() || isCoHostRole();
+  if (showVolumePresetsToggleRow) {
+    showVolumePresetsToggleRow.style.display = canManagePresets ? 'flex' : 'none';
+  }
+
+  const shouldShow = showVolumePresetsEnabled && canManagePresets;
   localVolumePresetsEl.hidden = !shouldShow;
   if (showVolumePresetsToggle) {
     showVolumePresetsToggle.checked = showVolumePresetsEnabled;
     const hasActivePreset = !canDisableVolumePresetsSetting();
-    showVolumePresetsToggle.disabled = Boolean(showVolumePresetsEnabled && hasActivePreset);
+    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(showVolumePresetsEnabled && hasActivePreset);
   }
   if (!localVolumePresetButtons.length) return;
 
