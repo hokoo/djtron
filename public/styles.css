@@ -261,6 +261,7 @@ body[data-role='slave'] #localVolumePresets {
   position: relative;
   width: 100%;
   min-height: 44px;
+  --now-playing-time-slot-width: 28px;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.24);
@@ -336,6 +337,8 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
   right: 10px;
   top: 50%;
   transform: translateY(-50%);
+  min-width: var(--now-playing-time-slot-width);
+  text-align: right;
   z-index: 3;
   color: var(--text);
   font-size: 12px;
@@ -346,7 +349,7 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
 
 .now-playing-control__reel {
   position: absolute;
-  left: 10px;
+  right: calc(10px + var(--now-playing-time-slot-width) + 8px);
   top: 50%;
   width: 15px;
   height: 15px;
