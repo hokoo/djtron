@@ -1108,26 +1108,45 @@ function normalizeIpAddress(ip) {
   return normalized;
 }
 
-function buildLocalAddressSet() {
-  const set = new Set(['127.0.0.1', '::1']);
-  const interfaces = os.networkInterfaces();
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1']);
 
-  Object.values(interfaces).forEach((entries) => {
-    if (!Array.isArray(entries)) return;
-    entries.forEach((entry) => {
-      if (!entry || typeof entry.address !== 'string') return;
-      set.add(normalizeIpAddress(entry.address));
-    });
-  });
-
-  return set;
+function isLoopbackAddress(ip) {
+  return ip !== '' && LOOPBACK_ADDRESSES.has(ip);
 }
 
-const LOCAL_ADDRESSES = buildLocalAddressSet();
+function collectForwardedAddresses(req) {
+  const result = [];
+
+  const pushHeaderValues = (headerValue) => {
+    if (typeof headerValue === 'string') {
+      headerValue
+        .split(',')
+        .map((item) => normalizeIpAddress(item))
+        .filter(Boolean)
+        .forEach((item) => result.push(item));
+      return;
+    }
+
+    if (Array.isArray(headerValue)) {
+      headerValue.forEach((entry) => pushHeaderValues(entry));
+    }
+  };
+
+  pushHeaderValues(req.headers['x-forwarded-for']);
+  pushHeaderValues(req.headers['x-real-ip']);
+  return result;
+}
 
 function isServerRequest(req) {
   const remoteAddress = normalizeIpAddress(req.socket && req.socket.remoteAddress);
-  return remoteAddress !== '' && LOCAL_ADDRESSES.has(remoteAddress);
+  if (!isLoopbackAddress(remoteAddress)) return false;
+
+  const forwardedAddresses = collectForwardedAddresses(req);
+  if (forwardedAddresses.some((address) => !isLoopbackAddress(address))) {
+    return false;
+  }
+
+  return true;
 }
 
 function parseCookies(req) {
