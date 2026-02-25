@@ -117,7 +117,8 @@ body[data-role='slave'] #serverPanel {
 
 body[data-role='slave'] #cohostPanel,
 body[data-role='co-host'] #serverPanel,
-body[data-role='co-host'] #cohostPanel {
+body[data-role='co-host'] #cohostPanel,
+body[data-role='co-host'] #overlaySettingsPanel {
   display: none;
 }
 
