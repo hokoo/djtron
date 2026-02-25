@@ -194,6 +194,12 @@ body[data-role='slave'] #hostNowPlaying {
   justify-content: center;
   box-shadow: 0 0 14px var(--shadow-accent);
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.now-playing-control:focus,
+.now-playing-control:focus-visible {
+  outline: none;
 }
 
 .now-playing-control--host {
@@ -864,6 +870,12 @@ body[data-role='slave'] .playlist-folder-icon {
   cursor: pointer;
   border-radius: 4px;
   min-height: 20px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.track-order:focus,
+.track-order:focus-visible {
+  outline: none;
 }
 
 .track-name {
