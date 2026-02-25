@@ -3354,6 +3354,8 @@ function resolveAutoplayNextTrack(finishedTrack) {
 }
 
 async function tryAutoplayNextTrack(finishedTrack) {
+  if (currentRole !== 'host') return false;
+
   const nextTrack = resolveAutoplayNextTrack(finishedTrack);
   if (!nextTrack) return false;
 
