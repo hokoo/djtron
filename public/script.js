@@ -28,6 +28,7 @@ const updateButton = document.getElementById('updateButton');
 const updateStatusEl = document.getElementById('updateStatus');
 const releaseLinkEl = document.getElementById('releaseLink');
 const allowPrereleaseInput = document.getElementById('allowPrerelease');
+const allowPrereleaseRow = allowPrereleaseInput ? allowPrereleaseInput.closest('.update-settings') : null;
 const authOverlay = document.getElementById('authOverlay');
 const authForm = document.getElementById('authForm');
 const authUsernameInput = document.getElementById('authUsername');
@@ -358,6 +359,16 @@ function updateLiveSeekUi() {
       isSlaveRole() ||
       ((isHostRole() || isCoHostRole()) && liveSeekEnabled);
     nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
+  }
+}
+
+function updatePrereleaseSettingUi(role = currentRole) {
+  const isHost = isHostRole(role);
+  if (allowPrereleaseRow) {
+    allowPrereleaseRow.style.display = isHost ? 'flex' : 'none';
+  }
+  if (allowPrereleaseInput) {
+    allowPrereleaseInput.disabled = !isHost;
   }
 }
 
@@ -1799,6 +1810,7 @@ function applyRoleUi(role) {
   renderCohostUsers();
   updateVolumePresetsUi();
   updateLiveSeekUi();
+  updatePrereleaseSettingUi(resolvedRole);
 }
 
 function updateCurrentUser(info) {
@@ -6012,10 +6024,16 @@ function initUpdater() {
   if (allowPrereleaseInput) {
     allowPrereleaseInput.checked = loadBooleanSetting(SETTINGS_KEYS.allowPrerelease, false);
     allowPrereleaseInput.addEventListener('change', () => {
+      if (!isHostRole()) {
+        allowPrereleaseInput.checked = false;
+        return;
+      }
       saveSetting(SETTINGS_KEYS.allowPrerelease, allowPrereleaseInput.checked ? 'true' : 'false');
       checkForUpdates();
     });
   }
+
+  updatePrereleaseSettingUi();
 
   if (updateButton) {
     updateButton.addEventListener('click', applyUpdate);
@@ -6107,7 +6125,7 @@ async function checkForUpdates() {
 
   resetUpdateUi();
 
-  const allowPrerelease = allowPrereleaseInput ? allowPrereleaseInput.checked : false;
+  const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
 
   try {
     const res = await fetch(`/api/update/check?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`);
@@ -6139,7 +6157,7 @@ async function applyUpdate() {
   updateButton.disabled = true;
   setUpdateStatus('Скачиваем и устанавливаем обновление...');
 
-  const allowPrerelease = allowPrereleaseInput ? allowPrereleaseInput.checked : false;
+  const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
 
   try {
     const res = await fetch(`/api/update/apply?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`, { method: 'POST' });
