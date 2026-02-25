@@ -66,6 +66,8 @@ const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
 const PLAYBACK_BODY_LIMIT_BYTES = 32 * 1024;
 const AUDIO_TAG_SCAN_BYTES = 256 * 1024;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
+const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
+const TRACK_TITLE_KEY_MAX_LENGTH = 1024;
 const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -157,6 +159,7 @@ function getDefaultLayoutState() {
     playlistNames: ['Плей-лист 1'],
     playlistMeta: [{ type: 'manual' }],
     playlistAutoplay: [false],
+    trackTitleModesByTrack: {},
   };
 }
 
@@ -232,6 +235,32 @@ function normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
   for (let index = 0; index < layoutLength; index += 1) {
     const rawValue = Array.isArray(playlistAutoplay) ? playlistAutoplay[index] : false;
     result.push(Boolean(rawValue));
+  }
+
+  return result;
+}
+
+function sanitizeTrackTitleMode(value) {
+  return value === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_ATTRIBUTES : null;
+}
+
+function sanitizeTrackTitleModesByTrack(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const result = {};
+  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right, 'ru'));
+
+  for (const [rawKey, rawMode] of entries) {
+    if (typeof rawKey !== 'string') continue;
+    const normalizedKey = rawKey.trim().slice(0, TRACK_TITLE_KEY_MAX_LENGTH);
+    if (!normalizedKey) continue;
+
+    const normalizedMode = sanitizeTrackTitleMode(rawMode);
+    if (!normalizedMode) continue;
+
+    result[normalizedKey] = normalizedMode;
   }
 
   return result;
@@ -363,6 +392,7 @@ function loadPersistedLayoutState() {
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
     const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
     const sanitizedAutoplay = normalizePlaylistAutoplayFlags(parsed.playlistAutoplay, sanitizedLayout.length);
+    const sanitizedTrackTitleModes = sanitizeTrackTitleModesByTrack(parsed.trackTitleModesByTrack);
 
     const version = Number(parsed.version);
     const updatedAt = Number(parsed.updatedAt);
@@ -374,6 +404,7 @@ function loadPersistedLayoutState() {
       playlistNames: sanitizedNames,
       playlistMeta: sanitizedMeta,
       playlistAutoplay: sanitizedAutoplay,
+      trackTitleModesByTrack: sanitizedTrackTitleModes,
     };
   } catch (err) {
     console.error('Failed to load layout state cache', err);
@@ -413,6 +444,7 @@ function buildLayoutPayload(sourceClientId = null) {
     playlistNames: sharedLayoutState.playlistNames,
     playlistMeta: sharedLayoutState.playlistMeta,
     playlistAutoplay: sharedLayoutState.playlistAutoplay,
+    trackTitleModesByTrack: sharedLayoutState.trackTitleModesByTrack,
     version: sharedLayoutState.version,
     updatedAt: sharedLayoutState.updatedAt,
     sourceClientId,
@@ -1585,13 +1617,19 @@ async function handleApiLayoutUpdate(req, res) {
   const nextPlaylistAutoplay = auth.isServer
     ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
     : normalizePlaylistAutoplayFlags(sharedLayoutState.playlistAutoplay, nextLayout.length);
+  const nextTrackTitleModesByTrack = sanitizeTrackTitleModesByTrack(
+    body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
+      ? body.trackTitleModesByTrack
+      : sharedLayoutState.trackTitleModesByTrack,
+  );
 
   const sourceClientId = sanitizeClientId(body.clientId);
   const hasChanged =
     JSON.stringify(nextLayout) !== JSON.stringify(sharedLayoutState.layout) ||
     JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames) ||
     JSON.stringify(nextPlaylistMeta) !== JSON.stringify(sharedLayoutState.playlistMeta) ||
-    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay);
+    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay) ||
+    JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(sharedLayoutState.trackTitleModesByTrack);
 
   if (hasChanged) {
     sharedLayoutState = {
@@ -1599,6 +1637,7 @@ async function handleApiLayoutUpdate(req, res) {
       playlistNames: nextPlaylistNames,
       playlistMeta: nextPlaylistMeta,
       playlistAutoplay: nextPlaylistAutoplay,
+      trackTitleModesByTrack: nextTrackTitleModesByTrack,
       version: sharedLayoutState.version + 1,
       updatedAt: Date.now(),
     };

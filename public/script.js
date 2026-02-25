@@ -999,38 +999,77 @@ function normalizeTrackTitleMode(value) {
   return value === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_ATTRIBUTES : TRACK_TITLE_MODE_FILE;
 }
 
+function normalizeTrackTitleModesByTrackPayload(rawValue) {
+  if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) return new Map();
+
+  const result = new Map();
+  const keys = Object.keys(rawValue).sort((left, right) => left.localeCompare(right, 'ru'));
+  keys.forEach((rawKey) => {
+    if (typeof rawKey !== 'string' || !rawKey.trim()) return;
+    const mode = normalizeTrackTitleMode(rawValue[rawKey]);
+    if (mode !== TRACK_TITLE_MODE_ATTRIBUTES) return;
+    result.set(rawKey, TRACK_TITLE_MODE_ATTRIBUTES);
+  });
+  return result;
+}
+
 function parseTrackTitleModesByTrack(rawValue) {
   if (typeof rawValue !== 'string' || !rawValue.trim()) return new Map();
 
   try {
-    const parsed = JSON.parse(rawValue);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return new Map();
-    }
-
-    const result = new Map();
-    for (const [key, mode] of Object.entries(parsed)) {
-      if (normalizeTrackTitleMode(mode) !== TRACK_TITLE_MODE_ATTRIBUTES) continue;
-      if (typeof key !== 'string' || !key.trim()) continue;
-      result.set(key, TRACK_TITLE_MODE_ATTRIBUTES);
-    }
-    return result;
+    return normalizeTrackTitleModesByTrackPayload(JSON.parse(rawValue));
   } catch (err) {
     return new Map();
   }
 }
 
-function saveTrackTitleModesByTrackSetting() {
+function serializeTrackTitleModesByTrack(trackModesState = trackTitleModesByTrack) {
+  const normalized = trackModesState instanceof Map ? trackModesState : new Map();
   const serialized = {};
-  for (const [fileKey, mode] of trackTitleModesByTrack.entries()) {
+  const keys = Array.from(normalized.keys()).sort((left, right) => left.localeCompare(right, 'ru'));
+  for (const fileKey of keys) {
+    const mode = normalized.get(fileKey);
     if (normalizeTrackTitleMode(mode) !== TRACK_TITLE_MODE_ATTRIBUTES) continue;
     serialized[fileKey] = TRACK_TITLE_MODE_ATTRIBUTES;
   }
+  return serialized;
+}
+
+function saveTrackTitleModesByTrackSetting() {
+  const serialized = serializeTrackTitleModesByTrack();
   saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
 }
 
 function loadTrackTitleModesByTrackSetting() {
   trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
+}
+
+function trackTitleModesByTrackEqual(leftState, rightState) {
+  const leftSerialized = serializeTrackTitleModesByTrack(leftState);
+  const rightSerialized = serializeTrackTitleModesByTrack(rightState);
+  return JSON.stringify(leftSerialized) === JSON.stringify(rightSerialized);
+}
+
+function normalizeTrackTitleModesByTrackForFiles(trackModesState, files, basePath = '/audio') {
+  const normalizedState =
+    trackModesState instanceof Map ? new Map(trackModesState) : normalizeTrackTitleModesByTrackPayload(trackModesState);
+  const allowedKeys = new Set(
+    Array.isArray(files)
+      ? files
+          .filter((file) => typeof file === 'string' && file.trim())
+          .map((file) => trackKey(file, basePath))
+      : [],
+  );
+
+  const result = new Map();
+  const keys = Array.from(normalizedState.keys()).sort((left, right) => left.localeCompare(right, 'ru'));
+  keys.forEach((key) => {
+    if (!allowedKeys.has(key)) return;
+    if (normalizeTrackTitleMode(normalizedState.get(key)) !== TRACK_TITLE_MODE_ATTRIBUTES) return;
+    result.set(key, TRACK_TITLE_MODE_ATTRIBUTES);
+  });
+
+  return result;
 }
 
 function getTrackTitleModeByKey(fileKey) {
@@ -1043,22 +1082,9 @@ function getTrackTitleModeForTrack(file, basePath = '/audio') {
 }
 
 function keepTrackTitleModesForFiles(files, basePath = '/audio') {
-  const allowedKeys = new Set(
-    Array.isArray(files)
-      ? files
-          .filter((file) => typeof file === 'string' && file.trim())
-          .map((file) => trackKey(file, basePath))
-      : [],
-  );
-
-  let changed = false;
-  for (const key of trackTitleModesByTrack.keys()) {
-    if (allowedKeys.has(key)) continue;
-    trackTitleModesByTrack.delete(key);
-    changed = true;
-  }
-
-  if (changed) {
+  const normalized = normalizeTrackTitleModesByTrackForFiles(trackTitleModesByTrack, files, basePath);
+  if (!trackTitleModesByTrackEqual(trackTitleModesByTrack, normalized)) {
+    trackTitleModesByTrack = normalized;
     saveTrackTitleModesByTrackSetting();
   }
 }
@@ -1256,10 +1282,25 @@ function setTrackTitleModeForTrack(file, basePath = '/audio', mode, { persist = 
   return changed;
 }
 
-function toggleTrackTitleModeForTrack(file, basePath = '/audio') {
+async function toggleTrackTitleModeForTrack(file, basePath = '/audio') {
   const currentMode = getTrackTitleModeForTrack(file, basePath);
   const nextMode = currentMode === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_FILE : TRACK_TITLE_MODE_ATTRIBUTES;
-  setTrackTitleModeForTrack(file, basePath, nextMode, { persist: true, announce: true });
+  const changed = setTrackTitleModeForTrack(file, basePath, nextMode, { persist: true, announce: false });
+  if (!changed) return;
+
+  try {
+    await pushSharedLayout({ renderOnApply: false });
+    const label = trackFileDisplayName(file);
+    setStatus(
+      nextMode === TRACK_TITLE_MODE_ATTRIBUTES
+        ? `Режим названия "${label}": атрибуты.`
+        : `Режим названия "${label}": имя файла.`,
+    );
+  } catch (err) {
+    console.error(err);
+    setTrackTitleModeForTrack(file, basePath, currentMode, { persist: true, announce: false });
+    setStatus('Не удалось синхронизировать режим названия трека.');
+  }
 }
 
 function trackDisplayName(file, basePath = '/audio') {
@@ -3348,6 +3389,7 @@ function applyIncomingLayoutState(
   nextPlaylistNames,
   nextPlaylistMeta,
   nextPlaylistAutoplay,
+  nextTrackTitleModesByTrack = null,
   version = null,
   render = true,
 ) {
@@ -3355,17 +3397,27 @@ function applyIncomingLayoutState(
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
   const normalizedMeta = normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
   const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextPlaylistAutoplay, normalizedLayout.length);
+  const normalizedTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(
+    nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
+      ? nextTrackTitleModesByTrack
+      : trackTitleModesByTrack,
+    availableFiles,
+    '/audio',
+  );
   const withFolderCoverage = ensureFolderPlaylistsCoverage(normalizedLayout, normalizedNames, normalizedMeta);
   const changed =
     !layoutsEqual(layout, withFolderCoverage.layout) ||
     !playlistNamesEqual(playlistNames, withFolderCoverage.playlistNames, withFolderCoverage.layout.length) ||
     !playlistMetaEqual(playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
-    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length);
+    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length) ||
+    !trackTitleModesByTrackEqual(trackTitleModesByTrack, normalizedTrackTitleModes);
 
   layout = withFolderCoverage.layout;
   playlistNames = withFolderCoverage.playlistNames;
   playlistMeta = withFolderCoverage.playlistMeta;
   playlistAutoplay = normalizePlaylistAutoplayFlags(normalizedAutoplay, layout.length);
+  trackTitleModesByTrack = normalizedTrackTitleModes;
+  saveTrackTitleModesByTrackSetting();
 
   const numericVersion = Number(version);
   if (Number.isFinite(numericVersion)) {
@@ -3492,6 +3544,10 @@ async function fetchSharedLayoutState() {
     playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
     playlistMeta: Array.isArray(data.playlistMeta) ? data.playlistMeta : [],
     playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
+    trackTitleModesByTrack:
+      data && data.trackTitleModesByTrack && typeof data.trackTitleModesByTrack === 'object'
+        ? data.trackTitleModesByTrack
+        : serializeTrackTitleModesByTrack(),
     version: Number.isFinite(Number(data.version)) ? Number(data.version) : 0,
   };
 }
@@ -3508,6 +3564,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
       playlistNames: payloadState.playlistNames,
       playlistMeta: payloadState.playlistMeta,
       playlistAutoplay: payloadAutoplay,
+      trackTitleModesByTrack: serializeTrackTitleModesByTrack(),
       clientId,
       version: layoutVersion,
     }),
@@ -3524,6 +3581,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
     data.playlistNames,
     data.playlistMeta,
     data.playlistAutoplay,
+    data.trackTitleModesByTrack,
     data.version,
     renderOnApply,
   );
@@ -3569,6 +3627,7 @@ function connectLayoutStream() {
       payload.playlistNames,
       payload.playlistMeta,
       payload.playlistAutoplay,
+      payload.trackTitleModesByTrack,
       payload.version,
       true,
     );
@@ -3604,16 +3663,19 @@ async function initializeLayoutState() {
   const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
   const incomingMeta = normalizePlaylistMeta(serverState.playlistMeta, incomingLayout.length);
   const incomingAutoplay = normalizePlaylistAutoplayFlags(serverState.playlistAutoplay, incomingLayout.length);
+  const incomingTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, availableFiles, '/audio');
 
   let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
   let nextMeta = normalizePlaylistMeta(incomingMeta, nextLayout.length);
   let nextAutoplay = normalizePlaylistAutoplayFlags(incomingAutoplay, nextLayout.length);
+  let nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(incomingTrackTitleModes, availableFiles, '/audio');
   let shouldPush =
     !layoutsEqual(incomingLayout, nextLayout) ||
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
-    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length);
+    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
+    !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   if (currentRole === 'host' && isServerLayoutEmpty(incomingLayout)) {
     const legacyLayout = readLegacyLocalLayout(availableFiles);
@@ -3631,18 +3693,22 @@ async function initializeLayoutState() {
   nextNames = withFolderCoverage.playlistNames;
   nextMeta = withFolderCoverage.playlistMeta;
   nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+  nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(nextTrackTitleModes, availableFiles, '/audio');
 
   shouldPush =
     shouldPush ||
     !layoutsEqual(incomingLayout, nextLayout) ||
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
-    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length);
+    !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
+    !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   layout = nextLayout;
   playlistNames = nextNames;
   playlistMeta = nextMeta;
   playlistAutoplay = nextAutoplay;
+  trackTitleModesByTrack = nextTrackTitleModes;
+  saveTrackTitleModesByTrackSetting();
   layoutVersion = serverState.version;
 
   if (shouldPush) {
