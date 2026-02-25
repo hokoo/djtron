@@ -31,6 +31,11 @@ const updateStatusEl = document.getElementById('updateStatus');
 const releaseLinkEl = document.getElementById('releaseLink');
 const allowPrereleaseInput = document.getElementById('allowPrerelease');
 const allowPrereleaseRow = allowPrereleaseInput ? allowPrereleaseInput.closest('.update-settings') : null;
+const dspSetupPanelEl = document.getElementById('dspSetupPanel');
+const dspInstallCommandEl = document.getElementById('dspInstallCommand');
+const dspCopyInstallCommandBtn = document.getElementById('dspCopyInstallCommand');
+const dspCheckInstallBtn = document.getElementById('dspCheckInstall');
+const dspSetupStatusEl = document.getElementById('dspSetupStatus');
 const authOverlay = document.getElementById('authOverlay');
 const authForm = document.getElementById('authForm');
 const authUsernameInput = document.getElementById('authUsername');
@@ -80,6 +85,8 @@ const DEFAULT_RUNTIME_CONFIG_SCHEMA = Object.freeze({
   port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
   allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
   volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
+  dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
 });
 const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
@@ -119,7 +126,19 @@ const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible'
 const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
 const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
 const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
+const DEFAULT_DSP_WINGET_COMMAND = 'winget install "FFmpeg (Essentials Build)"';
+const LIVE_DSP_POLL_INTERVAL_MS = 1100;
+const LIVE_DSP_POLL_TIMEOUT_MS = 2 * 60 * 1000;
+const LIVE_DSP_RENDER_SOURCE = 'live-play-start';
+const LIVE_DSP_HANDOFF_LEAD_SECONDS = 0.055;
+const DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS = 22;
+const DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS = 19;
+const LIVE_DSP_WARMUP_TIMEOUT_MS = 12 * 1000;
+const LIVE_DSP_WARMUP_MAX_TRACKED = 64;
+const LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED = 24;
 let LIVE_VOLUME_PRESET_VALUES = DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
+let liveDspEntryCompensationSeconds = DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS / 1000;
+let liveDspExitCompensationSeconds = DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS / 1000;
 const DEFAULT_LIVE_VOLUME = 1;
 const AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS = 0.04;
 const AUTOPLAY_OVERLAY_STATE_IDLE = 'idle';
@@ -149,6 +168,7 @@ let layout = [[]]; // array of playlists -> array of filenames
 let playlistNames = ['Плей-лист 1'];
 let playlistMeta = [{ type: PLAYLIST_TYPE_MANUAL }];
 let playlistAutoplay = [false];
+let playlistDsp = [false];
 let availableFiles = [];
 let availableFolders = [];
 let audioCatalogSignature = '';
@@ -185,12 +205,30 @@ let runtimeServerConfig = {
   port: null,
   allowContextMenu: false,
   volumePresets: DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice(),
+  dspEntryCompensationMs: DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
+  dspExitCompensationMs: DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
   schema: {
     port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
     allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
     volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
+    dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
   },
 };
+let dspStatusState = {
+  enabled: null,
+  ffmpegAvailable: null,
+  ffmpegError: null,
+  wingetCommand: DEFAULT_DSP_WINGET_COMMAND,
+  checkedAt: 0,
+};
+let dspStatusRequestInFlight = false;
+let liveDspRenderToken = 0;
+let liveDspNextReadyDescriptor = '';
+let liveDspNextReadySliceSeconds = null;
+let dspTransitionPlayback = null;
+let dspTransitionWarmupPromises = new Map();
+let liveDspContinuationWarmupPromises = new Map();
 let touchHoldTimer = null;
 let touchHoldPointerId = null;
 let touchHoldStartX = 0;
@@ -402,11 +440,22 @@ function parsePortCandidate(value, fallback = null) {
   return numeric;
 }
 
+function parseDspCompensationMsConfigValue(value, fallback = null) {
+  if (value === null || value === undefined) return fallback;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const normalized = Math.trunc(numeric);
+  if (normalized < 0 || normalized > 250) return fallback;
+  return normalized;
+}
+
 function getDefaultRuntimeConfigSchema() {
   return {
     port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
     allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
     volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
+    dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
   };
 }
 
@@ -444,6 +493,14 @@ function sanitizeRuntimeConfigPayload(rawPayload) {
     port: parsePortCandidate(payloadValues.port, null),
     allowContextMenu: parseBooleanConfigValue(payloadValues.allowContextMenu, false),
     volumePresets: parseVolumePresetsConfigValue(payloadValues.volumePresets, DEFAULT_LIVE_VOLUME_PRESET_VALUES),
+    dspEntryCompensationMs: parseDspCompensationMsConfigValue(
+      payloadValues.dspEntryCompensationMs,
+      DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
+    ),
+    dspExitCompensationMs: parseDspCompensationMsConfigValue(
+      payloadValues.dspExitCompensationMs,
+      DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
+    ),
     schema,
   };
 }
@@ -540,6 +597,8 @@ function applyRuntimeConfigFromSources(serverConfig = null) {
     localOverrides.volumePresets && localOverrides.volumePresets.length
       ? localOverrides.volumePresets.slice()
       : runtimeServerConfig.volumePresets.slice();
+  liveDspEntryCompensationSeconds = runtimeServerConfig.dspEntryCompensationMs / 1000;
+  liveDspExitCompensationSeconds = runtimeServerConfig.dspExitCompensationMs / 1000;
 
   applyRuntimeClientConfig();
 }
@@ -672,6 +731,176 @@ function updatePrereleaseSettingUi(role = currentRole) {
   }
   if (allowPrereleaseInput) {
     allowPrereleaseInput.disabled = !isHost;
+  }
+}
+
+function setDspSetupStatus(message) {
+  if (!dspSetupStatusEl) return;
+  dspSetupStatusEl.textContent = message || '';
+}
+
+function updateDspSetupUi(role = currentRole) {
+  if (!dspSetupPanelEl) return;
+
+  const isHost = isHostRole(role);
+  if (!isHost) {
+    dspSetupPanelEl.hidden = true;
+    return;
+  }
+
+  const enabled = dspStatusState.enabled;
+  const available = dspStatusState.ffmpegAvailable;
+  const installCommand =
+    typeof dspStatusState.wingetCommand === 'string' && dspStatusState.wingetCommand.trim()
+      ? dspStatusState.wingetCommand.trim()
+      : DEFAULT_DSP_WINGET_COMMAND;
+
+  if (dspInstallCommandEl) {
+    dspInstallCommandEl.textContent = installCommand;
+  }
+
+  const shouldShowPanel = enabled !== false && available !== true;
+  dspSetupPanelEl.hidden = !shouldShowPanel;
+  if (!shouldShowPanel) return;
+
+  if (available === false) {
+    const details = dspStatusState.ffmpegError ? ` (${dspStatusState.ffmpegError})` : '';
+    setDspSetupStatus(`ffmpeg не найден${details}`);
+    return;
+  }
+
+  if (dspStatusState.ffmpegError) {
+    setDspSetupStatus(`Не удалось проверить ffmpeg: ${dspStatusState.ffmpegError}`);
+    return;
+  }
+
+  setDspSetupStatus('Проверяем доступность ffmpeg...');
+}
+
+async function copyTextToClipboard(text) {
+  if (!text) return false;
+
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  document.body.append(textarea);
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+
+  if (!copied) {
+    throw new Error('Clipboard API недоступен');
+  }
+
+  return true;
+}
+
+function parseDspStatusPayload(data) {
+  const payload = data && typeof data === 'object' ? data : {};
+  const queue = payload.queue && typeof payload.queue === 'object' ? payload.queue : null;
+  if (!queue) {
+    throw new Error('Некорректный ответ DSP API');
+  }
+
+  dspStatusState.enabled = Boolean(queue.enabled);
+  dspStatusState.ffmpegAvailable = typeof queue.ffmpegAvailable === 'boolean' ? queue.ffmpegAvailable : null;
+  dspStatusState.ffmpegError =
+    typeof queue.ffmpegError === 'string' && queue.ffmpegError.trim() ? queue.ffmpegError.trim() : null;
+  dspStatusState.wingetCommand =
+    typeof queue.wingetCommand === 'string' && queue.wingetCommand.trim()
+      ? queue.wingetCommand.trim()
+      : DEFAULT_DSP_WINGET_COMMAND;
+  dspStatusState.checkedAt = Date.now();
+}
+
+async function refreshDspStatus({ announceError = false, userInitiated = false } = {}) {
+  if (!isHostRole()) return;
+  if (dspStatusRequestInFlight) return;
+
+  dspStatusRequestInFlight = true;
+  if (dspCheckInstallBtn) {
+    dspCheckInstallBtn.disabled = true;
+  }
+
+  if (userInitiated) {
+    setDspSetupStatus('Проверяем наличие ffmpeg...');
+  }
+
+  try {
+    const response = await fetch('/api/dsp/transitions?limit=1');
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const message = data && typeof data.error === 'string' && data.error ? data.error : 'Не удалось проверить DSP';
+      throw new Error(message);
+    }
+
+    parseDspStatusPayload(data);
+    updateDspSetupUi(currentRole);
+
+    if (userInitiated && dspStatusState.ffmpegAvailable === true) {
+      setStatus('ffmpeg найден. DSP готов.');
+    }
+  } catch (err) {
+    console.error('Не удалось проверить ffmpeg', err);
+    dspStatusState.enabled = true;
+    dspStatusState.ffmpegAvailable = null;
+    dspStatusState.ffmpegError = err && err.message ? err.message : 'Ошибка запроса';
+    dspStatusState.checkedAt = Date.now();
+    updateDspSetupUi(currentRole);
+
+    if (announceError || userInitiated) {
+      setStatus(dspStatusState.ffmpegError || 'Не удалось проверить ffmpeg.');
+    }
+  } finally {
+    dspStatusRequestInFlight = false;
+    if (dspCheckInstallBtn) {
+      dspCheckInstallBtn.disabled = !isHostRole();
+    }
+  }
+}
+
+function initDspSetupPanel() {
+  updateDspSetupUi(currentRole);
+
+  if (dspCopyInstallCommandBtn) {
+    dspCopyInstallCommandBtn.addEventListener('click', async () => {
+      const command =
+        typeof dspStatusState.wingetCommand === 'string' && dspStatusState.wingetCommand.trim()
+          ? dspStatusState.wingetCommand.trim()
+          : DEFAULT_DSP_WINGET_COMMAND;
+      try {
+        await copyTextToClipboard(command);
+        setDspSetupStatus('Команда скопирована. Вставьте ее в PowerShell или cmd.');
+        setStatus('Команда установки ffmpeg скопирована.');
+      } catch (err) {
+        console.error('Не удалось скопировать команду установки ffmpeg', err);
+        setDspSetupStatus('Не удалось скопировать автоматически. Скопируйте строку вручную.');
+      }
+    });
+  }
+
+  if (dspCheckInstallBtn) {
+    dspCheckInstallBtn.addEventListener('click', () => {
+      refreshDspStatus({ announceError: true, userInitiated: true });
+    });
+  }
+
+  if (isHostRole()) {
+    refreshDspStatus({ announceError: false, userInitiated: false });
   }
 }
 
@@ -1922,6 +2151,13 @@ function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
 }
 
+function waitMs(ms) {
+  const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  return new Promise((resolve) => {
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
 function isTouchFullscreenPreferredDevice() {
   const hasTouchPoints = (() => {
     if (typeof navigator !== 'object' || !navigator) return false;
@@ -2102,6 +2338,13 @@ function applyRoleUi(role) {
     stopAndClearLocalPlayback();
   }
 
+  if (!isHost) {
+    if (isDspTransitionPlaybackActive()) {
+      stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
+    }
+    resetLiveDspNextTrackPreview();
+  }
+
   if (isHost) {
     stopHostProgressLoop();
     requestHostPlaybackSync(true);
@@ -2115,6 +2358,11 @@ function applyRoleUi(role) {
   updateVolumePresetsUi();
   updateLiveSeekUi();
   updatePrereleaseSettingUi(resolvedRole);
+  updateDspSetupUi(resolvedRole);
+
+  if (isHost && (!isHostRole(previousRole) || dspStatusState.checkedAt <= 0)) {
+    refreshDspStatus({ announceError: false, userInitiated: false });
+  }
 }
 
 function updateCurrentUser(info) {
@@ -2639,6 +2887,139 @@ function clearHostTrackHighlight() {
   }
 }
 
+function clearLiveDspNextTrackHighlight() {
+  for (const cards of cardsByFile.values()) {
+    if (!cards || !cards.size) continue;
+    for (const card of cards) {
+      card.classList.remove('is-dsp-next-ready');
+    }
+  }
+}
+
+function normalizeTrackPlaybackContext(playbackContext = null) {
+  return {
+    playlistIndex: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistIndex : null),
+    playlistPosition: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistPosition : null),
+  };
+}
+
+function buildLiveDspNextTrackDescriptor(trackFile, playbackContext = null, basePath = '/audio') {
+  const { playlistIndex, playlistPosition } = normalizeTrackPlaybackContext(playbackContext);
+  if (typeof trackFile !== 'string' || !trackFile.trim()) return '';
+  if (playlistIndex === null || playlistPosition === null) return '';
+  const fileKey = trackKey(trackFile, basePath);
+  return [fileKey, String(playlistIndex), String(playlistPosition)].join('|');
+}
+
+function parseLiveDspNextTrackDescriptor(descriptor) {
+  if (typeof descriptor !== 'string' || !descriptor) return null;
+  const parts = descriptor.split('|');
+  if (parts.length < 3) return null;
+
+  const playlistIndex = normalizePlaylistTrackIndex(parts[parts.length - 2]);
+  const playlistPosition = normalizePlaylistTrackIndex(parts[parts.length - 1]);
+  if (playlistIndex === null || playlistPosition === null) return null;
+
+  const fileKey = parts.slice(0, parts.length - 2).join('|');
+  if (!fileKey) return null;
+
+  return {
+    fileKey,
+    playbackContext: {
+      playlistIndex,
+      playlistPosition,
+    },
+  };
+}
+
+function syncLiveDspNextTrackHighlight() {
+  clearLiveDspNextTrackHighlight();
+}
+
+function resetLiveDspNextTrackPreview() {
+  liveDspRenderToken += 1;
+  liveDspNextReadyDescriptor = '';
+  liveDspNextReadySliceSeconds = null;
+  clearLiveDspContinuationWarmups();
+  syncLiveDspNextTrackHighlight();
+}
+
+function isDspTransitionPlaybackActive() {
+  return Boolean(dspTransitionPlayback && dspTransitionPlayback.audio);
+}
+
+function clearDspTransitionTrackHighlight() {
+  for (const cards of cardsByFile.values()) {
+    if (!cards || !cards.size) continue;
+    for (const card of cards) {
+      card.classList.remove('is-dsp-transition-source', 'is-dsp-transition-target');
+    }
+  }
+}
+
+function syncDspTransitionTrackHighlight() {
+  clearDspTransitionTrackHighlight();
+  if (!isDspTransitionPlaybackActive()) return;
+
+  const sourceTrack = dspTransitionPlayback.fromTrack || null;
+  const targetTrack = dspTransitionPlayback.toTrack || null;
+
+  if (sourceTrack && sourceTrack.key) {
+    const sourceCard = getTrackCardByContext(sourceTrack.key, sourceTrack);
+    if (sourceCard) {
+      sourceCard.classList.add('is-dsp-transition-source');
+    }
+  }
+
+  if (targetTrack && targetTrack.key) {
+    const targetCard = getTrackCardByContext(targetTrack.key, targetTrack);
+    if (targetCard) {
+      targetCard.classList.add('is-dsp-transition-target');
+    }
+  }
+}
+
+function setDspTransitionReelReverse(active) {
+  const enabled = Boolean(active);
+  if (nowPlayingControlBtn) {
+    nowPlayingControlBtn.classList.toggle('is-dsp-transition-reverse', enabled);
+  }
+  if (hostNowPlayingControlEl) {
+    hostNowPlayingControlEl.classList.toggle('is-dsp-transition-reverse', enabled);
+  }
+}
+
+function stopDspTransitionPlayback({ stopAudio = true, clearTrackState = true } = {}) {
+  if (!dspTransitionPlayback) return;
+
+  const activePlayback = dspTransitionPlayback;
+  dspTransitionPlayback = null;
+  setDspTransitionReelReverse(false);
+  clearDspTransitionTrackHighlight();
+
+  if (clearTrackState) {
+    const sourceTrack = activePlayback.fromTrack || null;
+    const targetTrack = activePlayback.toTrack || null;
+    if (sourceTrack && sourceTrack.key) {
+      setButtonPlaying(sourceTrack.key, false, sourceTrack);
+      setTrackPaused(sourceTrack.key, false, sourceTrack);
+    }
+    if (targetTrack && targetTrack.key) {
+      setButtonPlaying(targetTrack.key, false, targetTrack);
+      setTrackPaused(targetTrack.key, false, targetTrack);
+    }
+  }
+
+  if (stopAudio && activePlayback.audio) {
+    try {
+      activePlayback.audio.pause();
+      activePlayback.audio.currentTime = 0;
+    } catch (err) {
+      // ignore stop errors for detached audio nodes
+    }
+  }
+}
+
 function buildHostTrackHighlightDescriptor() {
   if (!isRemoteLiveMirrorRole()) return 'none';
   if (!hostPlaybackState || !hostPlaybackState.trackFile) return 'none';
@@ -2849,6 +3230,10 @@ function keepKnownDurationsForFiles(files, basePath = '/audio') {
 }
 
 function stopAndClearLocalPlayback() {
+  if (isDspTransitionPlaybackActive()) {
+    stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
+  }
+
   if (currentAudio) {
     try {
       currentAudio.pause();
@@ -2867,6 +3252,7 @@ function stopAndClearLocalPlayback() {
   stopProgressLoop();
   currentAudio = null;
   currentTrack = null;
+  resetLiveDspNextTrackPreview();
   syncNowPlayingPanel();
 }
 
@@ -2930,6 +3316,7 @@ function syncNowPlayingPanel() {
   if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
 
   if (isCoHostRole()) {
+    setDspTransitionReelReverse(false);
     const hostTrackKey =
       hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
         ? trackKey(hostPlaybackState.trackFile, '/audio')
@@ -2944,6 +3331,36 @@ function syncNowPlayingPanel() {
     }
     return;
   }
+
+  if (isDspTransitionPlaybackActive()) {
+    const playback = dspTransitionPlayback;
+    const transitionAudio = playback && playback.audio ? playback.audio : null;
+    const sourceTrack = playback && playback.fromTrack ? playback.fromTrack : null;
+    const targetTrack = playback && playback.toTrack ? playback.toTrack : null;
+
+    nowPlayingTitleEl.textContent =
+      sourceTrack && targetTrack
+        ? `Переход: ${trackDisplayName(sourceTrack.file)} -> ${trackDisplayName(targetTrack.file)}`
+        : 'Переход...';
+    nowPlayingControlLabelEl.textContent = '❚❚';
+    setNowPlayingReelActive(true, false);
+    setDspTransitionReelReverse(true);
+
+    const activeDuration = getDspTransitionDurationSeconds();
+    const currentTime =
+      transitionAudio && Number.isFinite(transitionAudio.currentTime) && transitionAudio.currentTime >= 0
+        ? transitionAudio.currentTime
+        : 0;
+    const progressPercent = activeDuration ? Math.min(100, (currentTime / activeDuration) * 100) : 0;
+    const remaining = activeDuration ? Math.max(0, activeDuration - currentTime) : null;
+
+    nowPlayingControlBtn.disabled = !canSeekNowPlaying();
+    setNowPlayingProgress(progressPercent);
+    setNowPlayingTime(remaining, { useCeil: true });
+    return;
+  }
+
+  setDspTransitionReelReverse(false);
 
   const nextActiveKey = currentTrack && currentAudio ? currentTrack.key : null;
   if (activeDurationTrackKey && activeDurationTrackKey !== nextActiveKey) {
@@ -2985,6 +3402,53 @@ function getHostPlaybackDurationSeconds() {
   return duration;
 }
 
+function getDspTransitionDurationSeconds() {
+  if (!isDspTransitionPlaybackActive()) return null;
+  const playback = dspTransitionPlayback;
+  const transitionAudio = playback && playback.audio ? playback.audio : null;
+  if (!transitionAudio) return null;
+
+  const resolvedDuration =
+    getDuration(transitionAudio) ||
+    (Number.isFinite(playback.duration) && playback.duration > 0 ? playback.duration : null);
+  if (!Number.isFinite(resolvedDuration) || resolvedDuration <= 0) return null;
+
+  playback.duration = resolvedDuration;
+  return resolvedDuration;
+}
+
+function seekDspTransitionPlaybackByRatio(positionRatio) {
+  if (!isDspTransitionPlaybackActive()) return false;
+
+  const playback = dspTransitionPlayback;
+  const transitionAudio = playback && playback.audio ? playback.audio : null;
+  if (!transitionAudio) return false;
+
+  const ratio = normalizePlaybackSeekRatio(positionRatio);
+  if (ratio === null) return false;
+
+  const duration = getDspTransitionDurationSeconds();
+  if (!Number.isFinite(duration) || duration <= 0) return false;
+
+  const nextTime = Math.max(0, Math.min(duration, ratio * duration));
+  try {
+    if (typeof transitionAudio.fastSeek === 'function') {
+      transitionAudio.fastSeek(nextTime);
+    } else {
+      transitionAudio.currentTime = nextTime;
+    }
+  } catch (err) {
+    try {
+      transitionAudio.currentTime = nextTime;
+    } catch (fallbackErr) {
+      return false;
+    }
+  }
+
+  syncNowPlayingPanel();
+  return true;
+}
+
 function canSeekNowPlaying() {
   if (isSlaveRole()) {
     if (!currentTrack || !currentAudio) return false;
@@ -2994,6 +3458,10 @@ function canSeekNowPlaying() {
 
   if (isHostRole()) {
     if (!liveSeekEnabled) return false;
+    if (isDspTransitionPlaybackActive()) {
+      const transitionDuration = getDspTransitionDurationSeconds();
+      return Boolean(Number.isFinite(transitionDuration) && transitionDuration > 0);
+    }
     if (!currentTrack || !currentAudio) return false;
     const duration = getCurrentTrackDurationSeconds();
     return Boolean(Number.isFinite(duration) && duration > 0);
@@ -3083,6 +3551,10 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
     syncNowPlayingPanel();
     queueCoHostSeekCurrentPlayback(ratio, { immediate: Boolean(finalize), finalize: Boolean(finalize) });
     return true;
+  }
+
+  if (isHostRole() && isDspTransitionPlaybackActive()) {
+    return seekDspTransitionPlaybackByRatio(ratio);
   }
 
   if (!currentTrack || !currentAudio) return false;
@@ -3656,6 +4128,8 @@ function onZonesPanPointerDown(event) {
 }
 
 async function toggleNowPlayingPlayback() {
+  if (isDspTransitionPlaybackActive()) return;
+
   if (isCoHostRole()) {
     try {
       await requestCoHostToggleCurrentPlayback();
@@ -3754,7 +4228,9 @@ function isTrackCardDragBlocked(card) {
     card.classList.contains('is-playing') ||
     card.classList.contains('is-paused') ||
     card.classList.contains('is-host-playing') ||
-    card.classList.contains('is-host-paused')
+    card.classList.contains('is-host-paused') ||
+    card.classList.contains('is-dsp-transition-source') ||
+    card.classList.contains('is-dsp-transition-target')
   ) {
     return true;
   }
@@ -3832,6 +4308,57 @@ function setTrackPaused(fileKey, isPaused, playbackContext = null) {
 
   targetCard.classList.add('is-paused');
   targetCard.classList.remove('is-playing');
+}
+
+function normalizeAudioStartOffsetSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return Math.max(0, numeric);
+}
+
+async function seekAudioToOffset(audio, offsetSeconds) {
+  if (!audio) return;
+  const normalizedOffset = normalizeAudioStartOffsetSeconds(offsetSeconds);
+  if (normalizedOffset === null) return;
+
+  const applySeek = () => {
+    const duration = getDuration(audio);
+    let targetTime = normalizedOffset;
+    if (duration && duration > 0) {
+      targetTime = Math.min(normalizedOffset, Math.max(0, duration - 0.02));
+    }
+    if (!Number.isFinite(targetTime) || targetTime <= 0) return;
+    try {
+      audio.currentTime = targetTime;
+    } catch (err) {
+      // ignore seek failures for unsupported formats/devices
+    }
+  };
+
+  if (Number.isFinite(audio.duration) && audio.duration > 0) {
+    applySeek();
+    return;
+  }
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      audio.removeEventListener('loadedmetadata', onMeta);
+      audio.removeEventListener('durationchange', onMeta);
+      audio.removeEventListener('error', onDone);
+      resolve();
+    };
+    const onMeta = () => finish();
+    const onDone = () => finish();
+    audio.addEventListener('loadedmetadata', onMeta);
+    audio.addEventListener('durationchange', onMeta);
+    audio.addEventListener('error', onDone);
+    setTimeout(finish, 700);
+  });
+
+  applySeek();
 }
 
 // Only trust the real duration reported by the browser.
@@ -4141,6 +4668,18 @@ function normalizePlaylistAutoplayFlags(flags, expectedLength) {
   return result;
 }
 
+function normalizePlaylistDspFlags(flags, autoplayFlags, expectedLength) {
+  const normalizedAutoplay = normalizePlaylistAutoplayFlags(autoplayFlags, expectedLength);
+  const result = [];
+
+  for (let index = 0; index < expectedLength; index += 1) {
+    const rawValue = Array.isArray(flags) ? flags[index] : false;
+    result.push(Boolean(rawValue) && Boolean(normalizedAutoplay[index]));
+  }
+
+  return result;
+}
+
 function serializeLayout(playlists) {
   return JSON.stringify(ensurePlaylists(playlists));
 }
@@ -4165,6 +4704,15 @@ function serializePlaylistAutoplay(flags, lengthHint = null) {
 
 function playlistAutoplayEqual(left, right, expectedLength) {
   return serializePlaylistAutoplay(left, expectedLength) === serializePlaylistAutoplay(right, expectedLength);
+}
+
+function serializePlaylistDsp(flags, autoplayFlags, lengthHint = null) {
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  return JSON.stringify(normalizePlaylistDspFlags(flags, autoplayFlags, expectedLength));
+}
+
+function playlistDspEqual(left, right, autoplayFlags, expectedLength) {
+  return serializePlaylistDsp(left, autoplayFlags, expectedLength) === serializePlaylistDsp(right, autoplayFlags, expectedLength);
 }
 
 function normalizeLayoutForFiles(rawLayout, files) {
@@ -4213,6 +4761,7 @@ function syncLayoutFromDom() {
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
 }
 
 function buildTrackOccurrenceMap(layoutState) {
@@ -4285,6 +4834,7 @@ async function handleDragDeleteFromContext() {
   const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
   const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
   const snapshotAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, snapshotLayout.length);
+  const snapshotDsp = normalizePlaylistDspFlags(playlistDsp, snapshotAutoplay, snapshotLayout.length);
 
   const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
   const eligibility = getTrackDeleteEligibility(snapshotLayout, resolution.playlistIndex, resolution.trackIndex);
@@ -4299,11 +4849,13 @@ async function handleDragDeleteFromContext() {
   const previousNames = playlistNames.slice();
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
 
   layout = ensurePlaylists(snapshotLayout);
   playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
   playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(snapshotAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(snapshotDsp, playlistAutoplay, layout.length);
   dragDropHandled = true;
   clearDragModeBadge();
   clearDragPreviewCard();
@@ -4320,6 +4872,7 @@ async function handleDragDeleteFromContext() {
     playlistNames = previousNames;
     playlistMeta = previousMeta;
     playlistAutoplay = previousAutoplay;
+    playlistDsp = previousDsp;
     renderZones();
     setStatus('Не удалось синхронизировать удаление трека.');
     return false;
@@ -4346,19 +4899,19 @@ function getTrackButton(file, playlistIndex = null, playlistPosition = null, bas
   return getFirstFromSet(candidates);
 }
 
-function resolveAutoplayNextTrack(finishedTrack) {
-  if (!finishedTrack || typeof finishedTrack.file !== 'string') return null;
+function resolveSequentialNextTrack(track, { requireAutoplay = false } = {}) {
+  if (!track || typeof track.file !== 'string') return null;
 
-  const preferredPlaylistIndex = Number.isInteger(finishedTrack.playlistIndex) ? finishedTrack.playlistIndex : -1;
+  const preferredPlaylistIndex = Number.isInteger(track.playlistIndex) ? track.playlistIndex : -1;
   if (preferredPlaylistIndex < 0 || preferredPlaylistIndex >= layout.length) return null;
 
-  if (!playlistAutoplay[preferredPlaylistIndex]) return null;
+  if (requireAutoplay && !playlistAutoplay[preferredPlaylistIndex]) return null;
   const playlist = Array.isArray(layout[preferredPlaylistIndex]) ? layout[preferredPlaylistIndex] : [];
   if (!playlist.length) return null;
 
-  let currentIndex = Number.isInteger(finishedTrack.playlistPosition) ? finishedTrack.playlistPosition : -1;
-  if (currentIndex < 0 || currentIndex >= playlist.length || playlist[currentIndex] !== finishedTrack.file) {
-    currentIndex = playlist.indexOf(finishedTrack.file);
+  let currentIndex = Number.isInteger(track.playlistPosition) ? track.playlistPosition : -1;
+  if (currentIndex < 0 || currentIndex >= playlist.length || playlist[currentIndex] !== track.file) {
+    currentIndex = playlist.indexOf(track.file);
   }
 
   if (currentIndex < 0) return null;
@@ -4376,11 +4929,652 @@ function resolveAutoplayNextTrack(finishedTrack) {
   };
 }
 
+function resolveAutoplayNextTrack(finishedTrack) {
+  return resolveSequentialNextTrack(finishedTrack, { requireAutoplay: true });
+}
+
+function isPlaylistDspEnabled(playlistIndex) {
+  const normalizedIndex = normalizePlaylistTrackIndex(playlistIndex);
+  if (normalizedIndex === null) return false;
+  if (normalizedIndex < 0 || normalizedIndex >= playlistDsp.length) return false;
+  return Boolean(playlistDsp[normalizedIndex]);
+}
+
+function setLiveDspNextTrackReady(nextTrack, details = null) {
+  if (!nextTrack || typeof nextTrack.file !== 'string') {
+    liveDspNextReadyDescriptor = '';
+    liveDspNextReadySliceSeconds = null;
+    syncLiveDspNextTrackHighlight();
+    return;
+  }
+
+  liveDspNextReadyDescriptor = buildLiveDspNextTrackDescriptor(
+    nextTrack.file,
+    {
+      playlistIndex: nextTrack.playlistIndex,
+      playlistPosition: nextTrack.playlistPosition,
+    },
+    nextTrack.basePath || '/audio',
+  );
+  const normalizedSliceSeconds = normalizeDspTransitionSliceSeconds(details && details.sliceSeconds);
+  liveDspNextReadySliceSeconds = normalizedSliceSeconds > 0 ? normalizedSliceSeconds : null;
+  syncLiveDspNextTrackHighlight();
+}
+
+function resolveReadyDspSliceWindowSeconds(nextTrack) {
+  if (!nextTrack || typeof nextTrack.file !== 'string') return null;
+  if (nextTrack.basePath && nextTrack.basePath !== '/audio') return null;
+  if (!liveDspNextReadyDescriptor) return null;
+
+  const expectedDescriptor = buildLiveDspNextTrackDescriptor(
+    nextTrack.file,
+    {
+      playlistIndex: nextTrack.playlistIndex,
+      playlistPosition: nextTrack.playlistPosition,
+    },
+    nextTrack.basePath || '/audio',
+  );
+  if (!expectedDescriptor || expectedDescriptor !== liveDspNextReadyDescriptor) return null;
+
+  const sliceSeconds = normalizeDspTransitionSliceSeconds(liveDspNextReadySliceSeconds);
+  if (sliceSeconds <= 0) return null;
+  return sliceSeconds;
+}
+
+function normalizeDspTransitionSliceSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.max(0, numeric);
+}
+
+async function warmupDspTransitionOutput(outputUrl, { urgent = false } = {}) {
+  const normalizedUrl = typeof outputUrl === 'string' ? outputUrl.trim() : '';
+  if (!normalizedUrl) return false;
+
+  const existingPromise = dspTransitionWarmupPromises.get(normalizedUrl);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timeoutMs = urgent ? Math.max(3000, LIVE_DSP_WARMUP_TIMEOUT_MS) : LIVE_DSP_WARMUP_TIMEOUT_MS;
+  const timeoutId = controller
+    ? setTimeout(() => {
+        try {
+          controller.abort();
+        } catch (err) {
+          // ignore abort failures
+        }
+      }, timeoutMs)
+    : null;
+
+  const warmupPromise = fetch(normalizedUrl, {
+    method: 'GET',
+    credentials: 'same-origin',
+    cache: 'force-cache',
+    signal: controller ? controller.signal : undefined,
+  })
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response.arrayBuffer();
+    })
+    .then(() => true)
+    .catch(() => false)
+    .finally(() => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+    });
+
+  dspTransitionWarmupPromises.set(normalizedUrl, warmupPromise);
+  if (dspTransitionWarmupPromises.size > LIVE_DSP_WARMUP_MAX_TRACKED) {
+    const firstKey = dspTransitionWarmupPromises.keys().next().value;
+    if (firstKey && firstKey !== normalizedUrl) {
+      dspTransitionWarmupPromises.delete(firstKey);
+    }
+  }
+
+  return warmupPromise;
+}
+
+function disposePreparedContinuationAudio(audio) {
+  if (!audio) return;
+  try {
+    audio.pause();
+  } catch (err) {
+    // ignore pause failures for detached audio elements
+  }
+  try {
+    audio.currentTime = 0;
+  } catch (err) {
+    // ignore seek failures for detached audio elements
+  }
+}
+
+function buildLiveDspContinuationWarmupKey(track, sliceSeconds = 0) {
+  if (!track || typeof track.file !== 'string' || !track.file.trim()) return '';
+  const descriptor = buildLiveDspNextTrackDescriptor(
+    track.file,
+    {
+      playlistIndex: normalizePlaylistTrackIndex(track.playlistIndex),
+      playlistPosition: normalizePlaylistTrackIndex(track.playlistPosition),
+    },
+    track.basePath || '/audio',
+  );
+  if (!descriptor) return '';
+  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
+  return `${descriptor}|slice=${normalizedSlice.toFixed(3)}`;
+}
+
+function clearLiveDspContinuationWarmups() {
+  const pendingPromises = Array.from(liveDspContinuationWarmupPromises.values());
+  liveDspContinuationWarmupPromises.clear();
+  pendingPromises.forEach((promise) => {
+    Promise.resolve(promise)
+      .then((audio) => {
+        if (audio) disposePreparedContinuationAudio(audio);
+      })
+      .catch(() => {});
+  });
+}
+
+function primeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
+  const targetTrack = toPlaybackTrackDescriptor(nextTrack, '/audio');
+  const key = buildLiveDspContinuationWarmupKey(targetTrack, sliceSeconds);
+  if (!key) return null;
+
+  const existing = liveDspContinuationWarmupPromises.get(key);
+  if (existing) return existing;
+
+  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
+  const basePromise = (async () => {
+    const preparedAudio = createAudio(targetTrack);
+    preparedAudio.preload = 'auto';
+    preparedAudio.volume = getEffectiveLiveVolume();
+    if (normalizedSlice > 0) {
+      await seekAudioToOffset(preparedAudio, normalizedSlice);
+    }
+    return preparedAudio;
+  })();
+
+  let trackedPromise = null;
+  trackedPromise = basePromise
+    .then((audio) => {
+      const stillTracked = liveDspContinuationWarmupPromises.get(key) === trackedPromise;
+      if (!stillTracked) {
+        if (audio) disposePreparedContinuationAudio(audio);
+        return null;
+      }
+      if (!audio) {
+        liveDspContinuationWarmupPromises.delete(key);
+        return null;
+      }
+      return audio;
+    })
+    .catch(() => {
+      if (liveDspContinuationWarmupPromises.get(key) === trackedPromise) {
+        liveDspContinuationWarmupPromises.delete(key);
+      }
+      return null;
+    });
+
+  liveDspContinuationWarmupPromises.set(key, trackedPromise);
+  while (liveDspContinuationWarmupPromises.size > LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED) {
+    const oldestKey = liveDspContinuationWarmupPromises.keys().next().value;
+    if (!oldestKey || oldestKey === key) break;
+    liveDspContinuationWarmupPromises.delete(oldestKey);
+  }
+
+  return trackedPromise;
+}
+
+function consumeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
+  const targetTrack = toPlaybackTrackDescriptor(nextTrack, '/audio');
+  const key = buildLiveDspContinuationWarmupKey(targetTrack, sliceSeconds);
+  if (!key) return null;
+
+  const warmupPromise = liveDspContinuationWarmupPromises.get(key);
+  if (!warmupPromise) return null;
+  liveDspContinuationWarmupPromises.delete(key);
+  return warmupPromise;
+}
+
+function toPlaybackTrackDescriptor(track, fallbackBasePath = '/audio') {
+  const file = track && typeof track.file === 'string' ? track.file : '';
+  const basePath = track && typeof track.basePath === 'string' && track.basePath ? track.basePath : fallbackBasePath;
+  return {
+    file,
+    basePath,
+    key: trackKey(file, basePath),
+    playlistIndex: normalizePlaylistTrackIndex(track ? track.playlistIndex : null),
+    playlistPosition: normalizePlaylistTrackIndex(track ? track.playlistPosition : null),
+  };
+}
+
+async function fetchDspTransitionPairDetails(fromFile, toFile) {
+  const response = await fetch(`/api/dsp/transitions?from=${encodeURIComponent(fromFile)}&to=${encodeURIComponent(toFile)}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data && typeof data.error === 'string' ? data.error : 'Не удалось получить статус DSP transition.';
+    throw new Error(message);
+  }
+
+  const transition = data && data.transition && typeof data.transition === 'object' ? data.transition : null;
+  const status = transition && typeof transition.status === 'string' ? transition.status.trim().toLowerCase() : 'missing';
+  const outputUrl = transition && typeof transition.outputUrl === 'string' ? transition.outputUrl : null;
+  const sliceSeconds = normalizeDspTransitionSliceSeconds(transition && transition.sliceSeconds);
+
+  return {
+    status: status || 'missing',
+    outputUrl,
+    sliceSeconds,
+    transition,
+  };
+}
+
+async function pollLiveDspTransitionUntilReady(fromTrack, nextTrack, tokenAtStart) {
+  const startedAt = Date.now();
+
+  while (liveDspRenderToken === tokenAtStart && Date.now() - startedAt <= LIVE_DSP_POLL_TIMEOUT_MS) {
+    let details = null;
+    let status = 'missing';
+    try {
+      details = await fetchDspTransitionPairDetails(fromTrack.file, nextTrack.file);
+      status = details.status;
+    } catch (err) {
+      // keep waiting during transient API errors
+    }
+
+    if (liveDspRenderToken !== tokenAtStart) return;
+    if (status === 'ready') {
+      if (details && details.outputUrl) {
+        warmupDspTransitionOutput(details.outputUrl).catch(() => {});
+      }
+      if (details) {
+        primeLiveDspContinuationWarmup(nextTrack, details.sliceSeconds);
+      }
+      setLiveDspNextTrackReady(nextTrack, details);
+      return;
+    }
+    if (status === 'failed') {
+      setLiveDspNextTrackReady(null);
+      return;
+    }
+
+    await waitMs(LIVE_DSP_POLL_INTERVAL_MS);
+  }
+}
+
+async function queueLiveDspTransitionForTrack(fromTrack, nextTrack, tokenAtStart) {
+  try {
+    const response = await fetch('/api/dsp/transitions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        from: fromTrack.file,
+        to: nextTrack.file,
+        force: true,
+        source: LIVE_DSP_RENDER_SOURCE,
+        priority: 'high',
+      }),
+    });
+
+    if (!response.ok) {
+      return;
+    }
+  } catch (err) {
+    return;
+  }
+
+  await pollLiveDspTransitionUntilReady(fromTrack, nextTrack, tokenAtStart);
+}
+
+function triggerLiveDspTransitionForTrack(track) {
+  if (!isHostRole()) return;
+  if (!track || typeof track.file !== 'string') return;
+  if ((track.basePath || '/audio') !== '/audio') return;
+
+  const token = liveDspRenderToken + 1;
+  liveDspRenderToken = token;
+  setLiveDspNextTrackReady(null);
+
+  const nextTrack = resolveSequentialNextTrack(track, { requireAutoplay: false });
+  if (!nextTrack) return;
+  if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return;
+
+  queueLiveDspTransitionForTrack(track, nextTrack, token).catch((err) => {
+    console.error('Не удалось подготовить DSP transition на старте трека', err);
+  });
+}
+
+function resolveDspSourceSegmentSeconds(sliceSeconds, transitionDetails = null) {
+  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
+  if (normalizedSlice <= 0) return 0;
+
+  const aggressiveJoin =
+    transitionDetails && typeof transitionDetails === 'object' && transitionDetails.aggressiveJoin
+      ? transitionDetails.aggressiveJoin
+      : null;
+  const rawTailTrim = aggressiveJoin ? Number(aggressiveJoin.sourceTailTrimSeconds) : NaN;
+  if (!Number.isFinite(rawTailTrim) || rawTailTrim <= 0) {
+    return normalizedSlice;
+  }
+
+  const maxTrim = Math.max(0, normalizedSlice - 0.05);
+  const safeTailTrim = Math.max(0, Math.min(maxTrim, rawTailTrim));
+  return Math.max(0.05, normalizedSlice - safeTailTrim);
+}
+
+function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds, transitionDetails = null) {
+  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
+  if (normalizedSlice <= 0) return 0;
+  const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(normalizedSlice, transitionDetails);
+
+  const hasCurrentSourceTrack =
+    sourceTrack &&
+    sourceTrack.key &&
+    currentTrack &&
+    currentTrack.key === sourceTrack.key &&
+    currentAudio &&
+    !currentAudio.paused;
+
+  if (!hasCurrentSourceTrack) {
+    // Source track already ended: skip source segment and continue from target side of transition.
+    return sourceSegmentSeconds;
+  }
+
+  const sourceDuration = getDuration(currentAudio) || getKnownDurationSeconds(sourceTrack.key);
+  const sourceCurrentTime = Number.isFinite(currentAudio.currentTime) ? Math.max(0, currentAudio.currentTime) : null;
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || sourceCurrentTime === null) {
+    return 0;
+  }
+
+  const remainingSeconds = Math.max(0, sourceDuration - sourceCurrentTime);
+  const offsetSeconds = normalizedSlice - remainingSeconds;
+  if (!Number.isFinite(offsetSeconds) || offsetSeconds <= 0) return 0;
+  return Math.max(0, Math.min(offsetSeconds, sourceSegmentSeconds));
+}
+
+async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
+  if (!isHostRole()) return false;
+  if (!finishedTrack || !nextTrack) return false;
+  if ((finishedTrack.basePath || '/audio') !== '/audio') return false;
+  if ((nextTrack.basePath || '/audio') !== '/audio') return false;
+  if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return false;
+
+  let details;
+  try {
+    details = await fetchDspTransitionPairDetails(finishedTrack.file, nextTrack.file);
+  } catch (err) {
+    return false;
+  }
+
+  if (details.status !== 'ready' || !details.outputUrl) {
+    return false;
+  }
+  warmupDspTransitionOutput(details.outputUrl, { urgent: true }).catch(() => {});
+
+  const sourceTrack = toPlaybackTrackDescriptor(finishedTrack, '/audio');
+  const targetTrack = toPlaybackTrackDescriptor(nextTrack, '/audio');
+  const targetButton = getTrackButton(
+    nextTrack.file,
+    nextTrack.playlistIndex,
+    nextTrack.playlistPosition,
+    nextTrack.basePath || '/audio',
+  );
+  if (!targetButton) return false;
+  const sliceSeconds = normalizeDspTransitionSliceSeconds(details.sliceSeconds);
+  let cachedContinuationWarmup = consumeLiveDspContinuationWarmup(nextTrack, sliceSeconds);
+  if (!cachedContinuationWarmup) {
+    cachedContinuationWarmup = primeLiveDspContinuationWarmup(nextTrack, sliceSeconds);
+  }
+  const transitionStartOffsetSeconds = resolveDspTransitionStartOffsetSeconds(
+    sourceTrack,
+    sliceSeconds,
+    details.transition,
+  );
+  const transitionOffsetPlannedAt = performance.now();
+
+  if (isDspTransitionPlaybackActive()) {
+    stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
+  }
+
+  resetFadeState();
+  stopProgressLoop();
+  if (currentAudio) {
+    try {
+      currentAudio.pause();
+    } catch (err) {
+      // ignore pause errors while switching to DSP transition
+    }
+  }
+  currentAudio = null;
+  currentTrack = null;
+
+  setButtonPlaying(sourceTrack.key, true, sourceTrack);
+  setTrackPaused(sourceTrack.key, false, sourceTrack);
+  setButtonPlaying(targetTrack.key, true, targetTrack);
+  setTrackPaused(targetTrack.key, false, targetTrack);
+
+  const transitionAudio = new Audio(details.outputUrl);
+  transitionAudio.preload = 'auto';
+  transitionAudio.volume = getEffectiveLiveVolume();
+  dspTransitionPlayback = {
+    audio: transitionAudio,
+    fromTrack: sourceTrack,
+    toTrack: targetTrack,
+    duration: null,
+    sliceSeconds,
+    startOffsetSeconds: transitionStartOffsetSeconds,
+    outputUrl: details.outputUrl,
+  };
+  syncDspTransitionTrackHighlight();
+  syncNowPlayingPanel();
+
+  const resolveAdjustedTransitionStartOffsetSeconds = () => {
+    const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
+    const rawOffset = Math.max(
+      0,
+      transitionStartOffsetSeconds + startupDelaySeconds + liveDspEntryCompensationSeconds,
+    );
+    const knownDuration =
+      getDuration(transitionAudio) ||
+      (dspTransitionPlayback && Number.isFinite(dspTransitionPlayback.duration) && dspTransitionPlayback.duration > 0
+        ? dspTransitionPlayback.duration
+        : null);
+    if (!knownDuration) return rawOffset;
+    return Math.max(0, Math.min(rawOffset, Math.max(0, knownDuration - 0.02)));
+  };
+
+  let handoffStarted = false;
+  let continuationAudio = null;
+  let continuationPreparePromise = null;
+  let cachedContinuationResolved = false;
+
+  const prepareContinuationAudio = async () => {
+    if (continuationAudio) return continuationAudio;
+    if (continuationPreparePromise) return continuationPreparePromise;
+
+    continuationPreparePromise = (async () => {
+      if (!cachedContinuationResolved && cachedContinuationWarmup) {
+        cachedContinuationResolved = true;
+        try {
+          const cachedAudio = await cachedContinuationWarmup;
+          if (cachedAudio) {
+            cachedAudio.volume = getEffectiveLiveVolume();
+            continuationAudio = cachedAudio;
+            return cachedAudio;
+          }
+        } catch (err) {
+          // ignore cache warmup errors and fallback to direct prepare
+        }
+      }
+
+      const preparedAudio = createAudio(targetTrack);
+      preparedAudio.preload = 'auto';
+      preparedAudio.volume = getEffectiveLiveVolume();
+      if (sliceSeconds > 0) {
+        await seekAudioToOffset(preparedAudio, sliceSeconds);
+      }
+      continuationAudio = preparedAudio;
+      return preparedAudio;
+    })().finally(() => {
+      continuationPreparePromise = null;
+    });
+
+    return continuationPreparePromise;
+  };
+
+  const fallbackToRegularNextTrackStart = async () => {
+    stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
+    const refreshedButton = getTrackButton(
+      nextTrack.file,
+      nextTrack.playlistIndex,
+      nextTrack.playlistPosition,
+      nextTrack.basePath || '/audio',
+    );
+    if (!refreshedButton) {
+      setStatus('Не удалось продолжить после перехода: следующий трек не найден.');
+      syncNowPlayingPanel();
+      return;
+    }
+
+    await handlePlay(nextTrack.file, refreshedButton, nextTrack.basePath || '/audio', {
+      playlistIndex: nextTrack.playlistIndex,
+      playlistPosition: nextTrack.playlistPosition,
+      fromAutoplay: true,
+      fromDspTransition: true,
+      startAtSeconds: sliceSeconds,
+    });
+  };
+
+  const startNextTrackFromTransition = async ({ reason = 'ended' } = {}) => {
+    if (handoffStarted) return;
+    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) {
+      return;
+    }
+    handoffStarted = true;
+
+    let preparedAudio = continuationAudio;
+    if (!preparedAudio) {
+      try {
+        preparedAudio = await prepareContinuationAudio();
+      } catch (err) {
+        preparedAudio = null;
+      }
+    }
+
+    if (!preparedAudio) {
+      await fallbackToRegularNextTrackStart();
+      return;
+    }
+
+    try {
+      preparedAudio.volume = getEffectiveLiveVolume();
+      await preparedAudio.play();
+    } catch (err) {
+      await fallbackToRegularNextTrackStart();
+      return;
+    }
+
+    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) {
+      return;
+    }
+
+    stopDspTransitionPlayback({ stopAudio: true, clearTrackState: false });
+    currentAudio = preparedAudio;
+    currentTrack = targetTrack;
+    setButtonPlaying(sourceTrack.key, false, sourceTrack);
+    setTrackPaused(sourceTrack.key, false, sourceTrack);
+    setButtonPlaying(targetTrack.key, true, targetTrack);
+    setTrackPaused(targetTrack.key, false, targetTrack);
+    startProgressLoop(preparedAudio, targetTrack.key);
+    setStatus(`Играет: ${nextTrack.file}`);
+    triggerLiveDspTransitionForTrack(targetTrack);
+    syncNowPlayingPanel();
+    requestHostPlaybackSync(true);
+  };
+
+  transitionAudio.addEventListener('loadedmetadata', () => {
+    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    const duration = getDuration(transitionAudio);
+    if (duration) {
+      dspTransitionPlayback.duration = duration;
+    }
+    syncNowPlayingPanel();
+  });
+
+  transitionAudio.addEventListener('timeupdate', () => {
+    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    if (!handoffStarted) {
+      const activeDuration = getDuration(transitionAudio) || dspTransitionPlayback.duration;
+      const currentTime =
+        Number.isFinite(transitionAudio.currentTime) && transitionAudio.currentTime >= 0
+          ? transitionAudio.currentTime
+          : 0;
+      if (Number.isFinite(activeDuration) && activeDuration > 0) {
+        const remaining = Math.max(0, activeDuration - currentTime);
+        const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + liveDspExitCompensationSeconds);
+        if (remaining <= handoffLeadSeconds) {
+          startNextTrackFromTransition({ reason: 'near-end' }).catch((err) => {
+            console.error('Не удалось переключиться с DSP transition (near-end)', err);
+          });
+        }
+      }
+    }
+    syncNowPlayingPanel();
+  });
+
+  transitionAudio.addEventListener('ended', () => {
+    startNextTrackFromTransition({ reason: 'ended' }).catch((err) => {
+      console.error('Не удалось завершить DSP transition', err);
+      stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
+      syncNowPlayingPanel();
+    });
+  });
+
+  transitionAudio.addEventListener('error', () => {
+    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
+    setStatus('Ошибка воспроизведения DSP перехода. Переходим к следующему треку.');
+    handlePlay(nextTrack.file, targetButton, nextTrack.basePath || '/audio', {
+      playlistIndex: nextTrack.playlistIndex,
+      playlistPosition: nextTrack.playlistPosition,
+      fromAutoplay: true,
+    }).catch((err) => {
+      console.error('Не удалось запустить следующий трек после ошибки DSP transition', err);
+    });
+  });
+
+  prepareContinuationAudio().catch(() => {});
+
+  try {
+    const adjustedTransitionStartOffsetSeconds = resolveAdjustedTransitionStartOffsetSeconds();
+    if (adjustedTransitionStartOffsetSeconds > 0) {
+      await seekAudioToOffset(transitionAudio, adjustedTransitionStartOffsetSeconds);
+    }
+    if (dspTransitionPlayback && dspTransitionPlayback.audio === transitionAudio) {
+      dspTransitionPlayback.startOffsetSeconds = adjustedTransitionStartOffsetSeconds;
+    }
+    await transitionAudio.play();
+    setStatus(`Переход: ${finishedTrack.file} -> ${nextTrack.file}`);
+    return true;
+  } catch (err) {
+    stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
+    return false;
+  }
+}
+
 async function tryAutoplayNextTrack(finishedTrack) {
   if (!isHostRole()) return false;
 
   const nextTrack = resolveAutoplayNextTrack(finishedTrack);
   if (!nextTrack) return false;
+
+  const transitionStarted = await tryStartAutoplayWithDspTransition(finishedTrack, nextTrack);
+  if (transitionStarted) return true;
 
   const button = getTrackButton(nextTrack.file, nextTrack.playlistIndex, nextTrack.playlistPosition, nextTrack.basePath);
   if (!button) return false;
@@ -4414,6 +5608,7 @@ function applyIncomingLayoutState(
   nextPlaylistNames,
   nextPlaylistMeta,
   nextPlaylistAutoplay,
+  nextPlaylistDsp,
   nextTrackTitleModesByTrack = null,
   version = null,
   render = true,
@@ -4422,6 +5617,7 @@ function applyIncomingLayoutState(
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
   const normalizedMeta = normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
   const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextPlaylistAutoplay, normalizedLayout.length);
+  const normalizedDsp = normalizePlaylistDspFlags(nextPlaylistDsp, normalizedAutoplay, normalizedLayout.length);
   const normalizedTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(
     nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
       ? nextTrackTitleModesByTrack
@@ -4435,12 +5631,14 @@ function applyIncomingLayoutState(
     !playlistNamesEqual(playlistNames, withFolderCoverage.playlistNames, withFolderCoverage.layout.length) ||
     !playlistMetaEqual(playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
     !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length) ||
+    !playlistDspEqual(playlistDsp, normalizedDsp, normalizedAutoplay, withFolderCoverage.layout.length) ||
     !trackTitleModesByTrackEqual(trackTitleModesByTrack, normalizedTrackTitleModes);
 
   layout = withFolderCoverage.layout;
   playlistNames = withFolderCoverage.playlistNames;
   playlistMeta = withFolderCoverage.playlistMeta;
   playlistAutoplay = normalizePlaylistAutoplayFlags(normalizedAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(normalizedDsp, playlistAutoplay, layout.length);
   trackTitleModesByTrack = normalizedTrackTitleModes;
   saveTrackTitleModesByTrackSetting();
 
@@ -4672,15 +5870,22 @@ async function executeIncomingPlaybackCommand(commandPayload) {
     }
 
     if (command.type === PLAYBACK_COMMAND_SEEK_CURRENT) {
-      if (!liveSeekEnabled || !currentTrack || !currentAudio) {
-        return;
-      }
-      const duration = getCurrentTrackDurationSeconds();
-      if (!Number.isFinite(duration) || duration <= 0) {
+      if (!liveSeekEnabled) {
         return;
       }
       const ratio = normalizePlaybackSeekRatio(command.positionRatio);
       if (ratio === null) {
+        return;
+      }
+      if (isDspTransitionPlaybackActive()) {
+        seekDspTransitionPlaybackByRatio(ratio);
+        return;
+      }
+      if (!currentTrack || !currentAudio) {
+        return;
+      }
+      const duration = getCurrentTrackDurationSeconds();
+      if (!Number.isFinite(duration) || duration <= 0) {
         return;
       }
       const nextTime = Math.max(0, Math.min(duration, ratio * duration));
@@ -4921,6 +6126,7 @@ async function fetchSharedLayoutState() {
     playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
     playlistMeta: Array.isArray(data.playlistMeta) ? data.playlistMeta : [],
     playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
+    playlistDsp: Array.isArray(data.playlistDsp) ? data.playlistDsp : [],
     trackTitleModesByTrack:
       data && data.trackTitleModesByTrack && typeof data.trackTitleModesByTrack === 'object'
         ? data.trackTitleModesByTrack
@@ -4932,6 +6138,7 @@ async function fetchSharedLayoutState() {
 async function pushSharedLayout({ renderOnApply = true } = {}) {
   const payloadState = ensureFolderPlaylistsCoverage(layout, playlistNames, playlistMeta);
   const payloadAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, payloadState.layout.length);
+  const payloadDsp = normalizePlaylistDspFlags(playlistDsp, payloadAutoplay, payloadState.layout.length);
 
   const response = await fetch('/api/layout', {
     method: 'POST',
@@ -4941,6 +6148,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
       playlistNames: payloadState.playlistNames,
       playlistMeta: payloadState.playlistMeta,
       playlistAutoplay: payloadAutoplay,
+      playlistDsp: payloadDsp,
       trackTitleModesByTrack: serializeTrackTitleModesByTrack(),
       clientId,
       version: layoutVersion,
@@ -4958,6 +6166,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
     data.playlistNames,
     data.playlistMeta,
     data.playlistAutoplay,
+    data.playlistDsp,
     data.trackTitleModesByTrack,
     data.version,
     renderOnApply,
@@ -5004,6 +6213,7 @@ function connectLayoutStream() {
       payload.playlistNames,
       payload.playlistMeta,
       payload.playlistAutoplay,
+      payload.playlistDsp,
       payload.trackTitleModesByTrack,
       payload.version,
       true,
@@ -5060,18 +6270,21 @@ async function initializeLayoutState() {
   const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
   const incomingMeta = normalizePlaylistMeta(serverState.playlistMeta, incomingLayout.length);
   const incomingAutoplay = normalizePlaylistAutoplayFlags(serverState.playlistAutoplay, incomingLayout.length);
+  const incomingDsp = normalizePlaylistDspFlags(serverState.playlistDsp, incomingAutoplay, incomingLayout.length);
   const incomingTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, availableFiles, '/audio');
 
   let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
   let nextMeta = normalizePlaylistMeta(incomingMeta, nextLayout.length);
   let nextAutoplay = normalizePlaylistAutoplayFlags(incomingAutoplay, nextLayout.length);
+  let nextDsp = normalizePlaylistDspFlags(incomingDsp, nextAutoplay, nextLayout.length);
   let nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(incomingTrackTitleModes, availableFiles, '/audio');
   let shouldPush =
     !layoutsEqual(incomingLayout, nextLayout) ||
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
+    !playlistDspEqual(incomingDsp, nextDsp, nextAutoplay, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   if (isHostRole() && isServerLayoutEmpty(incomingLayout)) {
@@ -5081,6 +6294,7 @@ async function initializeLayoutState() {
       nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
       nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
       nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+      nextDsp = normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
       shouldPush = true;
     }
   }
@@ -5090,6 +6304,7 @@ async function initializeLayoutState() {
   nextNames = withFolderCoverage.playlistNames;
   nextMeta = withFolderCoverage.playlistMeta;
   nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+  nextDsp = normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
   nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(nextTrackTitleModes, availableFiles, '/audio');
 
   shouldPush =
@@ -5098,12 +6313,14 @@ async function initializeLayoutState() {
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
+    !playlistDspEqual(incomingDsp, nextDsp, nextAutoplay, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   layout = nextLayout;
   playlistNames = nextNames;
   playlistMeta = nextMeta;
   playlistAutoplay = nextAutoplay;
+  playlistDsp = nextDsp;
   trackTitleModesByTrack = nextTrackTitleModes;
   saveTrackTitleModesByTrackSetting();
   layoutVersion = serverState.version;
@@ -5126,6 +6343,7 @@ async function addPlaylist() {
   playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
   playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags([...playlistAutoplay, false], layout.length);
+  playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], playlistAutoplay, layout.length);
   renderZones();
 
   try {
@@ -5173,13 +6391,21 @@ async function togglePlaylistAutoplay(playlistIndex) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
 
   const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
   const nextAutoplay = playlistAutoplay.slice();
   nextAutoplay[playlistIndex] = !nextAutoplay[playlistIndex];
   const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
+  const normalizedDsp = normalizePlaylistDspFlags(playlistDsp, normalizedAutoplay, layout.length);
 
-  if (playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, layout.length)) return;
+  if (
+    playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, layout.length) &&
+    playlistDspEqual(playlistDsp, normalizedDsp, normalizedAutoplay, layout.length)
+  ) {
+    return;
+  }
 
   playlistAutoplay = normalizedAutoplay;
+  playlistDsp = normalizedDsp;
   renderZones();
 
   try {
@@ -5192,8 +6418,42 @@ async function togglePlaylistAutoplay(playlistIndex) {
   } catch (err) {
     console.error(err);
     playlistAutoplay = previousAutoplay;
+    playlistDsp = previousDsp;
     renderZones();
     setStatus('Не удалось синхронизировать автопроигрывание плей-листа.');
+  }
+}
+
+async function togglePlaylistDsp(playlistIndex) {
+  if (!isHostRole()) {
+    setStatus('DSP для плей-листа может менять только хост.');
+    return;
+  }
+
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (!playlistAutoplay[playlistIndex]) {
+    setStatus('DSP можно включить только при активном автопроигрывании.');
+    return;
+  }
+
+  const previousDsp = playlistDsp.slice();
+  const nextDsp = playlistDsp.slice();
+  nextDsp[playlistIndex] = !nextDsp[playlistIndex];
+  const normalizedDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
+
+  if (playlistDspEqual(playlistDsp, normalizedDsp, playlistAutoplay, layout.length)) return;
+
+  playlistDsp = normalizedDsp;
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
+  } catch (err) {
+    console.error(err);
+    playlistDsp = previousDsp;
+    renderZones();
+    setStatus('Не удалось синхронизировать DSP плей-листа.');
   }
 }
 
@@ -5323,6 +6583,7 @@ async function deletePlaylist(playlistIndex) {
   const previousNames = playlistNames.slice();
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
   nextLayout.splice(playlistIndex, 1);
@@ -5333,11 +6594,14 @@ async function deletePlaylist(playlistIndex) {
   nextMeta.splice(playlistIndex, 1);
   const nextAutoplay = previousAutoplay.slice();
   nextAutoplay.splice(playlistIndex, 1);
+  const nextDsp = previousDsp.slice();
+  nextDsp.splice(playlistIndex, 1);
 
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(nextNames, layout.length);
   playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
   renderZones();
 
   try {
@@ -5349,6 +6613,7 @@ async function deletePlaylist(playlistIndex) {
     playlistNames = previousNames;
     playlistMeta = previousMeta;
     playlistAutoplay = previousAutoplay;
+    playlistDsp = previousDsp;
     renderZones();
     setStatus(err && err.message ? err.message : 'Не удалось синхронизировать удаление плей-листа.');
   }
@@ -5360,6 +6625,7 @@ function renderZones() {
   layout = ensurePlaylists(layout);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
   const trackOccurrence = buildTrackOccurrenceMap(layout);
 
   layout.forEach((playlistFiles, playlistIndex) => {
@@ -5433,7 +6699,9 @@ function renderZones() {
     autoplayButton.textContent = 'A';
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
+    const isDspEnabled = Boolean(playlistDsp[playlistIndex]);
     const canManageAutoplay = isHostRole();
+    const canManageDsp = canManageAutoplay && isAutoplayEnabled;
     autoplayButton.dataset.state = isAutoplayEnabled ? 'on' : 'off';
     autoplayButton.setAttribute('aria-pressed', isAutoplayEnabled ? 'true' : 'false');
     autoplayButton.title = canManageAutoplay
@@ -5446,6 +6714,31 @@ function renderZones() {
       event.stopPropagation();
       if (!canManageAutoplay) return;
       togglePlaylistAutoplay(playlistIndex);
+    });
+
+    const dspButton = document.createElement('button');
+    dspButton.type = 'button';
+    dspButton.className = 'playlist-dsp-toggle';
+    dspButton.textContent = 'DSP';
+    dspButton.setAttribute('aria-label', 'DSP переходы для плей-листа');
+    dspButton.dataset.state = isDspEnabled ? 'on' : 'off';
+    dspButton.setAttribute('aria-pressed', isDspEnabled ? 'true' : 'false');
+    dspButton.classList.toggle('is-on', isDspEnabled);
+    dspButton.disabled = !canManageDsp;
+    if (!isAutoplayEnabled) {
+      dspButton.title = canManageAutoplay
+        ? 'DSP: недоступно, пока выключено автопроигрывание'
+        : 'DSP: недоступно (только хост)';
+    } else {
+      dspButton.title = canManageDsp
+        ? `DSP: ${isDspEnabled ? 'вкл' : 'выкл'}`
+        : `DSP: ${isDspEnabled ? 'вкл' : 'выкл'} (только хост)`;
+    }
+    dspButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!canManageDsp) return;
+      togglePlaylistDsp(playlistIndex);
     });
 
     const deleteButton = document.createElement('button');
@@ -5471,7 +6764,7 @@ function renderZones() {
     activeReel.setAttribute('aria-hidden', 'true');
     activeReel.style.display = 'none';
 
-    headerMeta.append(autoplayButton, count, deleteButton, activeReel);
+    headerMeta.append(autoplayButton, dspButton, count, deleteButton, activeReel);
     header.append(titleWrap, headerMeta);
 
     const body = document.createElement('div');
@@ -5506,6 +6799,8 @@ function syncCurrentTrackState() {
     setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
     setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
   }
+  syncDspTransitionTrackHighlight();
+  syncLiveDspNextTrackHighlight();
   syncPlaylistHeaderActiveState();
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
@@ -5540,6 +6835,7 @@ async function handleDrop(event, targetZoneIndex) {
   const previousNames = playlistNames.slice();
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
 
   let nextLayout;
@@ -5591,6 +6887,7 @@ async function handleDrop(event, targetZoneIndex) {
   playlistNames = normalizePlaylistNames(previousNames, layout.length);
   playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
   playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
   renderZones();
   try {
     await pushSharedLayout();
@@ -5601,6 +6898,7 @@ async function handleDrop(event, targetZoneIndex) {
     playlistNames = normalizePlaylistNames(previousNames, layout.length);
     playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
     playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
     setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
   }
@@ -5704,6 +7002,7 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
     playlistNames = normalizePlaylistNames(fallback.playlistNames, layout.length);
     playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, layout.length);
     playlistAutoplay = normalizePlaylistAutoplayFlags([], layout.length);
+    playlistDsp = normalizePlaylistDspFlags([], playlistAutoplay, layout.length);
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }
 
@@ -5911,16 +7210,23 @@ function shouldTriggerAutoplayOverlayTransition(audio, track) {
   if (audio.paused) return false;
   if (currentAudio !== audio) return false;
   if (!currentTrack || currentTrack.key !== track.key) return false;
-
-  const overlaySeconds = getOverlaySeconds();
-  if (overlaySeconds <= 0) return false;
   if (!Number.isFinite(audio.duration) || audio.duration <= 0) return false;
   if (!Number.isFinite(audio.currentTime) || audio.currentTime < 0) return false;
+
+  const nextTrack = resolveAutoplayNextTrack(track);
+  if (!nextTrack) return false;
+
+  const overlaySeconds = Math.max(0, getOverlaySeconds());
+  const readyDspSliceWindowSeconds = resolveReadyDspSliceWindowSeconds(nextTrack);
+  const triggerWindowSeconds = Number.isFinite(readyDspSliceWindowSeconds)
+    ? Math.max(overlaySeconds, readyDspSliceWindowSeconds)
+    : overlaySeconds;
+  if (triggerWindowSeconds <= 0) return false;
 
   const remainingSeconds = audio.duration - audio.currentTime;
   if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) return false;
 
-  return remainingSeconds <= overlaySeconds + AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS;
+  return remainingSeconds <= triggerWindowSeconds + AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS;
 }
 
 function maybeTriggerAutoplayOverlayTransition(audio, track) {
@@ -5959,6 +7265,7 @@ function createAudio(track) {
     if (wasCurrentTrack) {
       currentAudio = null;
       currentTrack = null;
+      resetLiveDspNextTrackPreview();
     }
     setButtonPlaying(key, false, track);
     setTrackPaused(key, false, track);
@@ -5996,6 +7303,7 @@ function createAudio(track) {
     if (currentTrack && currentTrack.key === key) {
       currentAudio = null;
       currentTrack = null;
+      resetLiveDspNextTrackPreview();
     }
     syncNowPlayingPanel();
     requestHostPlaybackSync(true);
@@ -6051,6 +7359,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
   const overlaySeconds = getOverlaySeconds();
   const curve = getTransitionCurve();
   const targetVolume = getEffectiveLiveVolume();
+  const startAtSeconds = normalizeAudioStartOffsetSeconds(playbackContext.startAtSeconds);
   const resolvedPlaylistIndex =
     Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
       ? playbackContext.playlistIndex
@@ -6068,6 +7377,11 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
   };
 
   button.disabled = true;
+
+  if (isDspTransitionPlaybackActive()) {
+    stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
+    resetLiveDspNextTrackPreview();
+  }
 
   if (isCoHostRole()) {
     try {
@@ -6100,6 +7414,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
       setButtonPlaying(track.key, true, track);
       startProgressLoop(currentAudio, track.key);
       setStatus(`Играет: ${file}`);
+      triggerLiveDspTransitionForTrack(track);
     } catch (err) {
       console.error(err);
       setStatus('Не удалось продолжить воспроизведение.');
@@ -6118,6 +7433,9 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
   audio.volume = overlaySeconds > 0 && currentAudio && !currentAudio.paused ? 0 : targetVolume;
 
   try {
+    if (startAtSeconds !== null) {
+      await seekAudioToOffset(audio, startAtSeconds);
+    }
     await audio.play();
 
     if (currentAudio && !currentAudio.paused && overlaySeconds > 0) {
@@ -6125,6 +7443,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
       setButtonPlaying(track.key, true, track);
       setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
+      triggerLiveDspTransitionForTrack(track);
       applyOverlay(currentAudio, audio, targetVolume, overlaySeconds, curve, track, oldTrack);
     } else {
       if (currentAudio) {
@@ -6143,6 +7462,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
       setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
       setStatus(`Играет: ${file}`);
+      triggerLiveDspTransitionForTrack(track);
       syncNowPlayingPanel();
       requestHostPlaybackSync(true);
     }
@@ -6652,6 +7972,7 @@ async function bootstrap() {
   initSettings();
   initSidebarToggle();
   initServerControls();
+  initDspSetupPanel();
   initPlaylistControls();
   initTouchFullscreenToggle();
   initNowPlayingControls();

@@ -79,6 +79,17 @@
 				<button id="touchFullscreenToggle" class="secondary ghost fullscreen-toggle" type="button" hidden aria-label="Полноэкранный режим">⛶</button>
 			</div>
 
+			<div id="dspSetupPanel" class="server-panel dsp-setup" hidden>
+				<p class="dsp-setup__title">DSP переходы недоступны</p>
+				<p class="dsp-setup__hint">Установите FFmpeg на ПК хоста:</p>
+				<code id="dspInstallCommand" class="dsp-setup__command">winget install "FFmpeg (Essentials Build)"</code>
+				<div class="dsp-setup__actions">
+					<button id="dspCopyInstallCommand" class="secondary ghost" type="button">Скопировать</button>
+					<button id="dspCheckInstall" class="secondary ghost" type="button">Проверить</button>
+				</div>
+				<p id="dspSetupStatus" class="dsp-setup__status" aria-live="polite"></p>
+			</div>
+
 			<div id="serverPanel" class="server-panel">
 				<div class="server-actions">
 					<button id="stopServer" class="secondary danger">Остановить сервер</button>

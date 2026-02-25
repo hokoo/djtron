@@ -12,3 +12,32 @@
 # localStorage override is allowed only for Host role
 # Examples:
 # volume_presets=10,30,50
+
+# Local DSP transitions (ffmpeg-based)
+# dsp_enabled=true
+# dsp_ffmpeg_path=ffmpeg
+# dsp_ffprobe_path=ffprobe
+# dsp_transition_output_format=wav
+# dsp_transition_seconds=5
+# dsp_slice_seconds=15
+# dsp_live_entry_compensation_ms=22
+# dsp_live_exit_compensation_ms=19
+# dsp_tempo_align_enabled=true
+# dsp_tempo_max_adjust_percent=12
+# dsp_tempo_glide_enabled=true
+# dsp_tempo_glide_segments=4
+# dsp_tempo_glide_anchor_seconds=0.22
+# dsp_tempo_analysis_seconds=90
+# dsp_aggressive_join=true
+# dsp_join_intensity=0.78
+# dsp_trim_silence_enabled=true
+# dsp_trim_silence_db=-36
+# dsp_trim_min_silence_seconds=0.14
+# dsp_trim_max_seconds=4.8
+# dsp_no_gap_guard=true
+# dsp_trim_guard_threshold_boost_db=10
+# dsp_no_gap_energy_trim=true
+# dsp_no_gap_energy_floor_ratio=0.18
+# dsp_no_gap_energy_mean_multiplier=1.7
+# dsp_max_queue=500
+# dsp_log_max_bytes=4194304

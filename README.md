@@ -38,6 +38,33 @@ npm start
 - `port` - порт сервера (если `PORT` не задан через переменную окружения).
 - `allow_context_menu` (или `context_menu`) - `true/false`; при `true` отключает блокировку контекстного меню.
 - `volume_presets` - пользовательский набор пресетов громкости в процентах (`0-100` формат).
+- `dsp_enabled` - `true/false`; включает локальную DSP-подготовку переходов.
+- `dsp_ffmpeg_path` - путь к бинарнику `ffmpeg` (по умолчанию `ffmpeg` из `PATH`).
+- `dsp_ffprobe_path` - путь к бинарнику `ffprobe` (по умолчанию `ffprobe` из `PATH`).
+- `dsp_transition_output_format` - формат transition-файлов (`wav` или `mp3`), по умолчанию `wav` для более точных стыков.
+- `dsp_transition_seconds` - длительность склейки по умолчанию.
+- `dsp_slice_seconds` - длина хвоста/головы треков, используемых для сборки transition.
+- `dsp_live_entry_compensation_ms` - компенсация старта transition на стыке `track -> transition` (мс).
+- `dsp_live_exit_compensation_ms` - компенсация handoff на стыке `transition -> track` (мс).
+- `dsp_tempo_align_enabled` - `true/false`; выравнивание темпа второго трека под первый.
+- `dsp_tempo_max_adjust_percent` - предел авто-коррекции темпа (в процентах, симметрично).
+- `dsp_tempo_glide_enabled` - `true/false`; плавно доводит темп target к `1.0` к концу transition.
+- `dsp_tempo_glide_segments` - число сегментов для tempo-glide (обычно `3-6`).
+- `dsp_tempo_glide_anchor_seconds` - "якорный" хвост transition без time-stretch перед стыком с оригинальным треком.
+- `dsp_tempo_analysis_seconds` - длина фрагмента для BPM-анализа при отсутствии метаданных.
+- `dsp_aggressive_join` - `true/false`; более резкая склейка (короче crossfade, более быстрый вход/выход).
+- `dsp_join_intensity` - интенсивность агрессивной склейки (`0..1`).
+- `dsp_trim_silence_enabled` - `true/false`; автообрезка тишины в хвосте первого и голове второго трека.
+- `dsp_trim_silence_db` - порог тишины (dB) для обрезки.
+- `dsp_trim_min_silence_seconds` - минимальная длина паузы, считающаяся тишиной.
+- `dsp_trim_max_seconds` - максимум секунд обрезки на хвост/голову.
+- `dsp_no_gap_guard` - `true/false`; дополнительный агрессивный trim-проход, чтобы убирать паузы между склеиваемыми битами.
+- `dsp_trim_guard_threshold_boost_db` - насколько поднять порог dB в no-gap guard проходе.
+- `dsp_no_gap_energy_trim` - `true/false`; энерго-анализ границ (вырезает не только тишину, но и очень тихие "безбитовые" участки).
+- `dsp_no_gap_energy_floor_ratio` - доля от "сильного" уровня сигнала для порога energy-trim.
+- `dsp_no_gap_energy_mean_multiplier` - множитель среднего уровня для порога energy-trim.
+- `dsp_max_queue` - максимальный размер очереди DSP-задач.
+- `dsp_log_max_bytes` - ограничение размера `dsp.log` перед ротацией в `dsp.log.prev`.
 
 Пример:
 
@@ -45,6 +72,27 @@ npm start
 port=3010
 allow_context_menu=true
 volume_presets=15,35,60
+dsp_enabled=true
+dsp_transition_output_format=wav
+dsp_transition_seconds=5
+dsp_slice_seconds=15
+dsp_live_entry_compensation_ms=22
+dsp_live_exit_compensation_ms=19
+dsp_tempo_align_enabled=true
+dsp_tempo_max_adjust_percent=12
+dsp_tempo_glide_enabled=true
+dsp_tempo_glide_segments=4
+dsp_tempo_glide_anchor_seconds=0.22
+dsp_aggressive_join=true
+dsp_join_intensity=0.78
+dsp_trim_silence_enabled=true
+dsp_trim_silence_db=-36
+dsp_trim_max_seconds=4.8
+dsp_no_gap_guard=true
+dsp_trim_guard_threshold_boost_db=10
+dsp_no_gap_energy_trim=true
+dsp_no_gap_energy_floor_ratio=0.18
+dsp_no_gap_energy_mean_multiplier=1.7
 ```
 
 Схема уровней переопределения (`override-scope`):
@@ -58,6 +106,8 @@ volume_presets=15,35,60
 - `port` -> `none` (не читается из `localStorage` вообще).
 - `allow_context_menu` -> `client` (`djtron:config:allowContextMenu`).
 - `volume_presets` -> `host` (`djtron:config:volumePresets`).
+- `dsp_live_entry_compensation_ms` -> `none`.
+- `dsp_live_exit_compensation_ms` -> `none`.
 
 Если ключа нет в разрешенном уровне `localStorage`, используется серверное значение из `extra.conf`.
 
@@ -140,6 +190,29 @@ myStrongPassword123
 
 - djTRON автоматически отслеживает изменения в `audio/` (новые файлы/папки).
 - Есть кнопка `Обновить` для ручного пересканирования медиатеки без перезагрузки страницы.
+
+## Локальный DSP (MVP)
+
+- Используется один сервер Node.js: отдельный HTTP-сервис не требуется.
+- DSP-переходы рендерятся локально через `ffmpeg` в фоне и кэшируются на диске:
+  - каталог кэша: `.cache/dsp/transitions/`.
+- По умолчанию transitions сохраняются в `wav` (точнее на стыках, меньше микросдвигов, чем при mp3-пере-кодировании).
+- Для переходов включено выравнивание темпа (BPM) второго трека под первый через `rubberband` (с ограничением по проценту изменения).
+- Темп второго трека в переходе можно плавно доводить до нативного значения (`dsp_tempo_glide_enabled`, `dsp_tempo_glide_segments`).
+- Включен агрессивный режим склейки: автообрезка тишины в конце/начале и более интенсивный crossfade.
+- Дополнительно работает no-gap guard, который делает второй trim-проход с более высоким порогом, чтобы убрать «провалы» между битами.
+- Очередь автоматически подготавливает переходы между соседними треками в каждом плей-листе:
+  - при старте сервера;
+  - после каждого изменения layout.
+- В тестовом режиме при запуске трека host дополнительно ставит в очередь пару
+  `текущий -> следующий` (в том же плей-листе) с высоким приоритетом.
+- API:
+  - `GET /api/dsp/transitions` - список задач и состояние очереди.
+  - `GET /api/dsp/transitions?from=<track>&to=<track>` - статус конкретной пары.
+  - `POST /api/dsp/transitions` - ручная постановка задач (только Host).
+  - `GET /api/dsp/transitions/file/<id>` - доступ к готовому transition-файлу.
+- Логи DSP пишутся в файл `dsp.log` в корне проекта (кратко: enqueue/start/ready/failed).
+- Для работы нужен установленный `ffmpeg`. Если его нет, задачи переходят в `failed` с причиной ошибки.
 
 ## Сохранение состояния
 

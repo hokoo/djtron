@@ -383,6 +383,10 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
   animation-play-state: running;
 }
 
+.now-playing-control.is-dsp-transition-reverse .now-playing-control__reel {
+  animation-direction: reverse;
+}
+
 .now-playing-control--host .now-playing-control__reel {
   color: #7f1d1d;
 }
@@ -941,6 +945,46 @@ body[data-role='co-host'] .playlist-folder-icon {
   box-shadow: inset 0 0 10px 4px var(--shadow-accent);
 }
 
+.playlist-dsp-toggle {
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 0.2s ease, text-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.playlist-dsp-toggle:not(:disabled):hover,
+.playlist-dsp-toggle:not(:disabled):focus-visible {
+  outline: none;
+  color: #fff;
+}
+
+.playlist-dsp-toggle.is-on {
+  color: var(--playlist-active-reel-color, var(--active-track-reel-color, var(--border-strong)));
+  text-shadow: 0 0 12px var(--shadow-accent), 0 0 24px var(--shadow-accent), 0 0 32px var(--shadow-accent);
+}
+
+.playlist-dsp-toggle:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+  text-shadow: none;
+}
+
+.playlist-dsp-toggle.is-on:disabled {
+  opacity: 0.82;
+  color: var(--playlist-active-reel-color, var(--active-track-reel-color, var(--border-strong)));
+  text-shadow: 0 0 12px var(--shadow-accent), 0 0 24px var(--shadow-accent), 0 0 32px var(--shadow-accent);
+}
+
 .playlist-delete-btn {
   width: 24px;
   height: 24px;
@@ -1274,6 +1318,57 @@ button.sidebar-toggle:focus-visible {
   margin: 0 0 12px;
 }
 
+.dsp-setup {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 10px;
+}
+
+.dsp-setup__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dsp-setup__hint {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dsp-setup__command {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.26);
+  color: var(--text);
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.dsp-setup__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dsp-setup__actions button {
+  flex: 1 1 auto;
+  min-height: 36px;
+}
+
+.dsp-setup__status {
+  margin: 8px 0 0;
+  color: var(--hint);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .server-actions {
   display: flex;
   flex-direction: column;
@@ -1562,12 +1657,26 @@ button.secondary:disabled {
   z-index: 2;
 }
 
+.track-card:is(.is-dsp-transition-source, .is-dsp-transition-target) {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 12px var(--shadow-accent);
+  animation: track-playing-shadow 4.6s ease-in-out infinite;
+  background: rgba(0, 0, 0, 0.32);
+  z-index: 2;
+}
+
 .track-card.is-playing .track-name,
 .track-card.is-playing .track-order,
 .track-card.is-playing .track-duration,
 .track-card.is-paused .track-name,
 .track-card.is-paused .track-order,
-.track-card.is-paused .track-duration {
+.track-card.is-paused .track-duration,
+.track-card.is-dsp-transition-source .track-name,
+.track-card.is-dsp-transition-source .track-order,
+.track-card.is-dsp-transition-source .track-duration,
+.track-card.is-dsp-transition-target .track-name,
+.track-card.is-dsp-transition-target .track-order,
+.track-card.is-dsp-transition-target .track-duration {
   color: #f8fafc;
 }
 
@@ -1632,6 +1741,10 @@ body[data-role='co-host'] .track-card:is(.is-host-playing, .is-host-paused) .tra
   --active-track-reel-color: var(--border-strong);
 }
 
+.track-card:is(.is-dsp-transition-source, .is-dsp-transition-target) {
+  --active-track-reel-color: var(--border-strong);
+}
+
 body[data-role='slave'] .track-card.is-host-playing,
 body[data-role='slave'] .track-card.is-host-paused {
   --active-track-reel-color: #7f1d1d;
@@ -1642,12 +1755,12 @@ body[data-role='co-host'] .track-card.is-host-paused {
   --active-track-reel-color: #8b5cf6;
 }
 
-.track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused) .track-order {
+.track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused, .is-dsp-transition-source, .is-dsp-transition-target) .track-order {
   position: relative;
   color: transparent;
 }
 
-.track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused) .track-order::before {
+.track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused, .is-dsp-transition-source, .is-dsp-transition-target) .track-order::before {
   content: '';
   position: absolute;
   left: 50%;
@@ -1671,6 +1784,11 @@ body[data-role='co-host'] .track-card.is-host-paused {
 
 .track-card:is(.is-playing, .is-host-playing) .track-order::before {
   animation-play-state: running;
+}
+
+.track-card:is(.is-dsp-transition-source, .is-dsp-transition-target) .track-order::before {
+  animation-play-state: running;
+  animation-direction: reverse;
 }
 
 @keyframes reel-spin {
