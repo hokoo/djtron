@@ -42,17 +42,6 @@
 				</div>
 			</section>
 
-			<section class="panel sidebar-panel" id="serverPanel">
-				<div class="server-actions">
-					<div>
-						<p class="server-actions__title">Управление сервером</p>
-						<p class="server-actions__hint">Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится
-							и страница перестанет отвечать.</p>
-					</div>
-					<button id="stopServer" class="secondary danger">Остановить сервер</button>
-				</div>
-			</section>
-
 			<div id="cohostPanel" class="cohost-panel" hidden>
 				<div id="cohostUsers" class="cohost-users" aria-live="polite"></div>
 			</div>
@@ -67,6 +56,12 @@
 				>Обновить</button>
 				<button id="addPlaylist" class="secondary ghost" type="button">+ Плей-лист</button>
 				<button id="touchFullscreenToggle" class="secondary ghost fullscreen-toggle" type="button" hidden aria-label="Полноэкранный режим">⛶</button>
+			</div>
+
+			<div id="serverPanel" class="server-panel">
+				<div class="server-actions">
+					<button id="stopServer" class="secondary danger">Остановить сервер</button>
+				</div>
 			</div>
 
 			<section class="panel sidebar-panel sidebar-repo">

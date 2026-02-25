@@ -5333,14 +5333,23 @@ function initSidebarToggle() {
   });
 }
 
-async function stopServer() {
-  if (!stopServerBtn) return;
+async function stopServer({ requireConfirmation = true } = {}) {
   if (!isHostRole()) {
     setStatus('Остановку сервера может выполнить только хост (live).');
     return;
   }
 
-  stopServerBtn.disabled = true;
+  if (requireConfirmation) {
+    const confirmed = window.confirm('Остановить сервер? Все подключенные клиенты будут отключены.');
+    if (!confirmed) {
+      setStatus('Остановка сервера отменена.');
+      return;
+    }
+  }
+
+  if (stopServerBtn) {
+    stopServerBtn.disabled = true;
+  }
   setStatus('Останавливаем сервер...');
 
   try {
@@ -5362,13 +5371,17 @@ async function stopServer() {
   } catch (err) {
     console.error(err);
     setStatus(err.message || 'Не удалось остановить сервер. Попробуйте ещё раз.');
-    stopServerBtn.disabled = false;
+    if (stopServerBtn) {
+      stopServerBtn.disabled = false;
+    }
   }
 }
 
 function initServerControls() {
   if (!stopServerBtn) return;
-  stopServerBtn.addEventListener('click', stopServer);
+  stopServerBtn.addEventListener('click', () => {
+    stopServer({ requireConfirmation: true });
+  });
 }
 
 function initPlaylistControls() {
@@ -5571,11 +5584,7 @@ function startShutdownCountdown(seconds = 20) {
   const tick = () => {
     if (remaining <= 0) {
       shutdownCountdownTimer = null;
-      if (stopServerBtn) {
-        stopServerBtn.click();
-      } else {
-        stopServer();
-      }
+      stopServer({ requireConfirmation: false });
       return;
     }
 

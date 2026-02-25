@@ -1134,6 +1134,11 @@ button.sidebar-toggle:focus-visible {
   color: var(--muted);
 }
 
+.server-panel {
+  width: 100%;
+  margin: 0 0 12px;
+}
+
 .server-actions {
   display: flex;
   flex-direction: column;
