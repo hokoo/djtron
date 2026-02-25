@@ -523,7 +523,18 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   color: var(--muted);
 }
 
-.settings input,
+.settings-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-label-row .settings-toggle-switch {
+  flex: 0 0 auto;
+}
+
+.settings input:not([type='checkbox']),
 .settings select {
   padding: 8px 10px;
   border: 1px solid var(--border);

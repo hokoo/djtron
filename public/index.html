@@ -26,11 +26,29 @@
 			<section class="panel sidebar-panel" id="overlaySettingsPanel">
 				<div class="settings">
 					<label>
-						Перекрытия треков (сек)
+						<span class="settings-label-row">
+							<span>Перекрытие (с)</span>
+							<input
+								type="checkbox"
+								id="overlayEnabled"
+								class="cohost-role-switch settings-toggle-switch"
+								aria-label="Включить перекрытие"
+								checked
+							/>
+						</span>
 						<input type="number" id="overlayTime" min="0" step="0.1"/>
 					</label>
 					<label>
-						Затухание при остановке (сек)
+						<span class="settings-label-row">
+							<span>Затухание (с)</span>
+							<input
+								type="checkbox"
+								id="stopFadeEnabled"
+								class="cohost-role-switch settings-toggle-switch"
+								aria-label="Включить затухание"
+								checked
+							/>
+						</span>
 						<input type="number" id="stopFadeTime" min="0" step="0.1"/>
 					</label>
 					<label>

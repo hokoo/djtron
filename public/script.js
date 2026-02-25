@@ -6,6 +6,8 @@ const touchFullscreenToggleBtn = document.getElementById('touchFullscreenToggle'
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
+const overlayEnabledToggle = document.getElementById('overlayEnabled');
+const stopFadeEnabledToggle = document.getElementById('stopFadeEnabled');
 const showVolumePresetsToggle = document.getElementById('showVolumePresets');
 const showVolumePresetsToggleRow = showVolumePresetsToggle
   ? showVolumePresetsToggle.closest('.settings-toggle-row')
@@ -56,6 +58,8 @@ const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
   overlayCurve: 'player:overlayCurve',
   stopFade: 'player:stopFade',
+  overlayEnabled: 'player:overlayEnabled',
+  stopFadeEnabled: 'player:stopFadeEnabled',
   sidebarOpen: 'player:sidebarOpen',
   allowPrerelease: 'player:allowPrerelease',
   showVolumePresets: 'player:showVolumePresets',
@@ -104,6 +108,11 @@ const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
 const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
 const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
 const DEFAULT_LIVE_VOLUME = 1;
+const AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS = 0.04;
+const AUTOPLAY_OVERLAY_STATE_IDLE = 'idle';
+const AUTOPLAY_OVERLAY_STATE_PENDING = 'pending';
+const AUTOPLAY_OVERLAY_STATE_STARTED = 'started';
+const AUTOPLAY_OVERLAY_STATE_FAILED = 'failed';
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -280,6 +289,38 @@ function normalizePlaybackSeekRatio(value) {
   if (numeric <= 0) return 0;
   if (numeric >= 1) return 1;
   return numeric;
+}
+
+function isOverlayEnabled() {
+  return overlayEnabledToggle ? overlayEnabledToggle.checked : true;
+}
+
+function isStopFadeEnabled() {
+  return stopFadeEnabledToggle ? stopFadeEnabledToggle.checked : true;
+}
+
+function getOverlaySeconds() {
+  if (!isOverlayEnabled()) return 0;
+  return Math.max(0, parseFloat(overlayTimeInput ? overlayTimeInput.value : '0') || 0);
+}
+
+function getStopFadeSeconds() {
+  if (!isStopFadeEnabled()) return 0;
+  return Math.max(0, parseFloat(stopFadeInput ? stopFadeInput.value : '0') || 0);
+}
+
+function getTransitionCurve() {
+  const curve = overlayCurveSelect && typeof overlayCurveSelect.value === 'string' ? overlayCurveSelect.value : '';
+  return curve || 'linear';
+}
+
+function updateTransitionSettingsUi() {
+  if (overlayTimeInput) {
+    overlayTimeInput.disabled = !isOverlayEnabled();
+  }
+  if (stopFadeInput) {
+    stopFadeInput.disabled = !isStopFadeEnabled();
+  }
 }
 
 function applyLiveVolumeToCurrentAudio() {
@@ -3372,11 +3413,7 @@ async function toggleNowPlayingPlayback() {
       startProgressLoop(currentAudio, currentTrack.key);
       setStatus(`Играет: ${currentTrack.file}`);
     } else {
-      currentAudio.pause();
-      stopProgressLoop();
-      setButtonPlaying(currentTrack.key, false, currentTrack);
-      setTrackPaused(currentTrack.key, true, currentTrack);
-      setStatus(`Пауза: ${currentTrack.file}`);
+      await pauseCurrentPlayback(currentTrack, currentAudio);
     }
   } catch (err) {
     console.error(err);
@@ -5546,6 +5583,100 @@ function fadeOutAndStop(audio, durationSeconds, curve, track) {
   });
 }
 
+function fadeOutAndPause(audio, durationSeconds, curve) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const safeResolve = (pausedWithFade) => {
+      if (settled) return;
+      settled = true;
+      resolve(pausedWithFade);
+    };
+
+    if (!audio) return safeResolve(false);
+    const duration = Math.max(0, durationSeconds || 0) * 1000;
+    if (duration === 0) {
+      audio.pause();
+      return safeResolve(true);
+    }
+
+    resetFadeState();
+    const token = fadeCancel;
+    const start = performance.now();
+    const startVolume = clampVolume(audio.volume);
+
+    function step(now) {
+      if (token.cancelled) return safeResolve(false);
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = easing(progress, curve);
+      audio.volume = clampVolume(startVolume * (1 - eased));
+      if (progress < 1) {
+        requestAnimationFrame(step);
+      } else {
+        audio.pause();
+        audio.volume = startVolume;
+        safeResolve(true);
+      }
+    }
+
+    requestAnimationFrame(step);
+  });
+}
+
+async function pauseCurrentPlayback(track, audio) {
+  if (!track || !audio) return false;
+
+  const stopFadeSeconds = getStopFadeSeconds();
+  const curve = getTransitionCurve();
+
+  if (!audio.paused && stopFadeSeconds > 0) {
+    const pausedWithFade = await fadeOutAndPause(audio, stopFadeSeconds, curve);
+    if (!pausedWithFade) return false;
+  } else if (!audio.paused) {
+    audio.pause();
+  }
+
+  stopProgressLoop();
+  setButtonPlaying(track.key, false, track);
+  setTrackPaused(track.key, true, track);
+  setStatus(`Пауза: ${track.file}`);
+  return true;
+}
+
+function shouldTriggerAutoplayOverlayTransition(audio, track) {
+  if (!audio || !track) return false;
+  if (!isHostRole()) return false;
+  if (audio.paused) return false;
+  if (currentAudio !== audio) return false;
+  if (!currentTrack || currentTrack.key !== track.key) return false;
+
+  const overlaySeconds = getOverlaySeconds();
+  if (overlaySeconds <= 0) return false;
+  if (!Number.isFinite(audio.duration) || audio.duration <= 0) return false;
+  if (!Number.isFinite(audio.currentTime) || audio.currentTime < 0) return false;
+
+  const remainingSeconds = audio.duration - audio.currentTime;
+  if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) return false;
+
+  return remainingSeconds <= overlaySeconds + AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS;
+}
+
+function maybeTriggerAutoplayOverlayTransition(audio, track) {
+  if (!shouldTriggerAutoplayOverlayTransition(audio, track)) return;
+  if (audio.dataset.autoplayOverlayState !== AUTOPLAY_OVERLAY_STATE_IDLE) return;
+
+  audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_PENDING;
+  tryAutoplayNextTrack(track)
+    .then((started) => {
+      audio.dataset.autoplayOverlayState = started
+        ? AUTOPLAY_OVERLAY_STATE_STARTED
+        : AUTOPLAY_OVERLAY_STATE_FAILED;
+    })
+    .catch((err) => {
+      audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_FAILED;
+      console.error('Autoplay overlay transition failed', err);
+    });
+}
+
 function createAudio(track) {
   const { file, basePath, key } = track;
   const encoded = encodeURIComponent(file);
@@ -5553,6 +5684,11 @@ function createAudio(track) {
   const audio = new Audio(`${normalizedBase}/${encoded}`);
   audio.preload = 'metadata';
   audio.load();
+  audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_IDLE;
+
+  audio.addEventListener('timeupdate', () => {
+    maybeTriggerAutoplayOverlayTransition(audio, track);
+  });
 
   audio.addEventListener('ended', () => {
     const wasCurrentTrack = Boolean(currentTrack && currentTrack.key === key);
@@ -5569,6 +5705,12 @@ function createAudio(track) {
     requestHostPlaybackSync(true);
 
     if (!wasCurrentTrack) return;
+    if (
+      audio.dataset.autoplayOverlayState === AUTOPLAY_OVERLAY_STATE_PENDING ||
+      audio.dataset.autoplayOverlayState === AUTOPLAY_OVERLAY_STATE_STARTED
+    ) {
+      return;
+    }
 
     tryAutoplayNextTrack(track)
       .then((started) => {
@@ -5643,8 +5785,8 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
 }
 
 async function handlePlay(file, button, basePath = '/audio', playbackContext = {}) {
-  const overlaySeconds = Math.max(0, parseFloat(overlayTimeInput.value) || 0);
-  const curve = overlayCurveSelect.value;
+  const overlaySeconds = getOverlaySeconds();
+  const curve = getTransitionCurve();
   const targetVolume = getEffectiveLiveVolume();
   const resolvedPlaylistIndex =
     Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
@@ -5681,11 +5823,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
   }
 
   if (currentTrack && currentTrack.key === track.key && currentAudio && !currentAudio.paused) {
-    currentAudio.pause();
-    stopProgressLoop();
-    setButtonPlaying(track.key, false, track);
-    setTrackPaused(track.key, true, track);
-    setStatus(`Пауза: ${file}`);
+    await pauseCurrentPlayback(track, currentAudio);
     syncNowPlayingPanel();
     requestHostPlaybackSync(true);
     button.disabled = false;
@@ -5765,6 +5903,13 @@ function initSettings() {
   overlayTimeInput.value = loadSetting(SETTINGS_KEYS.overlayTime, '0.3');
   overlayCurveSelect.value = loadSetting(SETTINGS_KEYS.overlayCurve, 'linear');
   stopFadeInput.value = loadSetting(SETTINGS_KEYS.stopFade, '0.4');
+  if (overlayEnabledToggle) {
+    overlayEnabledToggle.checked = loadBooleanSetting(SETTINGS_KEYS.overlayEnabled, true);
+  }
+  if (stopFadeEnabledToggle) {
+    stopFadeEnabledToggle.checked = loadBooleanSetting(SETTINGS_KEYS.stopFadeEnabled, true);
+  }
+  updateTransitionSettingsUi();
 
   overlayTimeInput.addEventListener('change', () => {
     const sanitized = Math.max(0, parseFloat(overlayTimeInput.value) || 0).toString();
@@ -5781,6 +5926,20 @@ function initSettings() {
   overlayCurveSelect.addEventListener('change', () => {
     saveSetting(SETTINGS_KEYS.overlayCurve, overlayCurveSelect.value);
   });
+
+  if (overlayEnabledToggle) {
+    overlayEnabledToggle.addEventListener('change', () => {
+      saveSetting(SETTINGS_KEYS.overlayEnabled, overlayEnabledToggle.checked ? 'true' : 'false');
+      updateTransitionSettingsUi();
+    });
+  }
+
+  if (stopFadeEnabledToggle) {
+    stopFadeEnabledToggle.addEventListener('change', () => {
+      saveSetting(SETTINGS_KEYS.stopFadeEnabled, stopFadeEnabledToggle.checked ? 'true' : 'false');
+      updateTransitionSettingsUi();
+    });
+  }
 }
 
 function setSidebarOpen(isOpen) {
