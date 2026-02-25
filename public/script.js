@@ -152,6 +152,7 @@ let fadeCancel = { cancelled: false };
 let buttonsByFile = new Map();
 let cardsByFile = new Map();
 let durationLabelsByFile = new Map();
+let playlistDurationLabelsByIndex = new Map();
 let trackNameLabelsByFile = new Map();
 let knownTrackDurations = new Map();
 let durationLoadPromises = new Map();
@@ -2751,6 +2752,20 @@ function formatDuration(seconds, { useCeil = false } = {}) {
   return `${minutes}:${String(restSeconds).padStart(2, '0')}`;
 }
 
+function formatPlaylistDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const restSeconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(restSeconds).padStart(2, '0')}`;
+  }
+
+  return `${minutes}:${String(restSeconds).padStart(2, '0')}`;
+}
+
 function normalizePlaylistTrackIndex(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isInteger(parsed) || parsed < 0) return null;
@@ -3137,6 +3152,38 @@ function refreshTrackDurationLabels(fileKey) {
   }
 }
 
+function getPlaylistTotalDurationSeconds(playlistIndex) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return 0;
+  const playlist = Array.isArray(layout[playlistIndex]) ? layout[playlistIndex] : [];
+  let totalSeconds = 0;
+
+  for (const file of playlist) {
+    if (typeof file !== 'string' || !file) continue;
+    const knownDuration = getKnownDurationSeconds(trackKey(file, '/audio'));
+    if (!Number.isFinite(knownDuration) || knownDuration <= 0) continue;
+    totalSeconds += knownDuration;
+  }
+
+  return totalSeconds;
+}
+
+function getPlaylistDurationText(playlistIndex) {
+  return formatPlaylistDuration(getPlaylistTotalDurationSeconds(playlistIndex));
+}
+
+function refreshPlaylistDurationLabel(playlistIndex) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return;
+  const label = playlistDurationLabelsByIndex.get(playlistIndex);
+  if (!label) return;
+  label.textContent = getPlaylistDurationText(playlistIndex);
+}
+
+function refreshAllPlaylistDurationLabels() {
+  for (const playlistIndex of playlistDurationLabelsByIndex.keys()) {
+    refreshPlaylistDurationLabel(playlistIndex);
+  }
+}
+
 function cacheTrackDuration(fileKey, durationSeconds) {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
 
@@ -3145,6 +3192,7 @@ function cacheTrackDuration(fileKey, durationSeconds) {
 
   knownTrackDurations.set(fileKey, durationSeconds);
   refreshTrackDurationLabels(fileKey);
+  refreshAllPlaylistDurationLabels();
 
   if (currentTrack && currentTrack.key === fileKey) {
     syncNowPlayingPanel();
@@ -5599,6 +5647,7 @@ function resetTrackReferences() {
   buttonsByFile = new Map();
   cardsByFile = new Map();
   durationLabelsByFile = new Map();
+  playlistDurationLabelsByIndex = new Map();
   trackNameLabelsByFile = new Map();
   hostHighlightedDescriptor = '';
 }
@@ -6688,7 +6737,8 @@ function renderZones() {
 
     const count = document.createElement('span');
     count.className = 'playlist-count';
-    count.textContent = `${playlistFiles.length}`;
+    count.textContent = getPlaylistDurationText(playlistIndex);
+    playlistDurationLabelsByIndex.set(playlistIndex, count);
 
     const headerMeta = document.createElement('div');
     headerMeta.className = 'playlist-header-meta';
