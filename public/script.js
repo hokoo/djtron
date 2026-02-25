@@ -51,7 +51,6 @@ const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
 const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
-const HOST_PROGRESS_REFRESH_INTERVAL_MS = 250;
 const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
 const TOUCH_COPY_HOLD_MS = 360;
 const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
@@ -117,7 +116,7 @@ let hostPlaybackSyncInFlight = false;
 let hostPlaybackSyncQueued = false;
 let hostPlaybackSyncQueuedForce = false;
 let lastHostPlaybackSyncAt = 0;
-let hostProgressTimer = null;
+let hostProgressRaf = null;
 let hostHighlightedDescriptor = '';
 let touchHoldTimer = null;
 let touchHoldPointerId = null;
@@ -1606,7 +1605,7 @@ function loadBooleanSetting(key, fallback = false) {
 function setNowPlayingProgress(percent) {
   if (!nowPlayingProgressEl) return;
   const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-  nowPlayingProgressEl.style.width = `${safePercent}%`;
+  nowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
 }
 
 function setNowPlayingReelActive(active, paused = false) {
@@ -1634,7 +1633,7 @@ function setNowPlayingTime(seconds, { useCeil = true } = {}) {
 function setHostNowPlayingProgress(percent) {
   if (!hostNowPlayingProgressEl) return;
   const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-  hostNowPlayingProgressEl.style.width = `${safePercent}%`;
+  hostNowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
 }
 
 function setHostNowPlayingReelActive(active, paused = false) {
@@ -1757,16 +1756,20 @@ function getHostPlaybackElapsedSeconds() {
 }
 
 function stopHostProgressLoop() {
-  if (hostProgressTimer === null) return;
-  clearInterval(hostProgressTimer);
-  hostProgressTimer = null;
+  if (hostProgressRaf === null) return;
+  cancelAnimationFrame(hostProgressRaf);
+  hostProgressRaf = null;
 }
 
 function startHostProgressLoop() {
-  if (hostProgressTimer !== null) return;
-  hostProgressTimer = setInterval(() => {
+  if (hostProgressRaf !== null) return;
+  const tick = () => {
+    if (hostProgressRaf === null) return;
     syncHostNowPlayingPanel();
-  }, HOST_PROGRESS_REFRESH_INTERVAL_MS);
+    if (hostProgressRaf === null) return;
+    hostProgressRaf = requestAnimationFrame(tick);
+  };
+  hostProgressRaf = requestAnimationFrame(tick);
 }
 
 function clearHostTrackHighlight() {

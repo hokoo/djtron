@@ -226,9 +226,12 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
   top: 0;
   left: 0;
   height: 100%;
-  width: 0;
+  width: 100%;
+  --progress-ratio: 0;
+  clip-path: inset(0 calc((1 - var(--progress-ratio)) * 100%) 0 0);
   background: linear-gradient(90deg, var(--primary), var(--shadow-accent-strong));
-  transition: width 0.08s linear;
+  transition: clip-path 0.1s linear;
+  will-change: clip-path;
 }
 
 .now-playing-control__label {
@@ -294,6 +297,10 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
 
 .now-playing-control--host .now-playing-control__reel {
   color: #7f1d1d;
+}
+
+body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
+  filter: drop-shadow(0 0 1px rgba(20, 5, 5, 0.95)) drop-shadow(0 0 5px rgba(252, 165, 165, 0.35));
 }
 
 .now-playing-control:disabled {
