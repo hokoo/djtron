@@ -6,6 +6,7 @@ const touchFullscreenToggleBtn = document.getElementById('touchFullscreenToggle'
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
+const showVolumePresetsToggle = document.getElementById('showVolumePresets');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const serverPanelEl = document.getElementById('serverPanel');
@@ -32,6 +33,10 @@ const nowPlayingControlLabelEl = document.getElementById('nowPlayingControlLabel
 const nowPlayingProgressEl = document.getElementById('nowPlayingProgress');
 const nowPlayingTimeEl = document.getElementById('nowPlayingTime');
 const nowPlayingReelEl = document.getElementById('nowPlayingReel');
+const localVolumePresetsEl = document.getElementById('localVolumePresets');
+const localVolumePresetButtons = localVolumePresetsEl
+  ? Array.from(localVolumePresetsEl.querySelectorAll('.volume-presets__button'))
+  : [];
 const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
 const hostNowPlayingControlEl = document.getElementById('hostNowPlayingControl');
 const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingControlLabel');
@@ -45,6 +50,7 @@ const SETTINGS_KEYS = {
   stopFade: 'player:stopFade',
   sidebarOpen: 'player:sidebarOpen',
   allowPrerelease: 'player:allowPrerelease',
+  showVolumePresets: 'player:showVolumePresets',
   trackTitleModesByTrack: 'player:trackTitleModesByTrack',
 };
 const LAYOUT_STORAGE_KEY = 'player:playlists';
@@ -81,6 +87,10 @@ const ROLE_SLAVE = 'slave';
 const ROLE_COHOST = 'co-host';
 const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
 const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
+const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
+const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible';
+const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
+const DEFAULT_LIVE_VOLUME = 1;
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -115,6 +125,8 @@ let tracksReloadQueuedReason = 'auto';
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
+let showVolumePresetsEnabled = false;
+let livePlaybackVolume = DEFAULT_LIVE_VOLUME;
 let layoutVersion = 0;
 let layoutStream = null;
 let layoutStreamReconnectTimer = null;
@@ -205,6 +217,122 @@ function clampVolume(value) {
   if (value < 0) return 0;
   if (value > 1) return 1;
   return value;
+}
+
+function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const normalized = clampVolume(numeric);
+  if (Math.abs(normalized - 1) < 0.0001) {
+    return 1;
+  }
+  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
+    if (Math.abs(normalized - preset) < 0.0001) {
+      return preset;
+    }
+  }
+  return fallback;
+}
+
+function getActiveVolumePresetValue(volume = livePlaybackVolume) {
+  const normalized = normalizeLiveVolumePreset(volume, DEFAULT_LIVE_VOLUME);
+  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
+    if (Math.abs(normalized - preset) < 0.0001) {
+      return preset;
+    }
+  }
+  return null;
+}
+
+function formatVolumePresetLabel(volume) {
+  return `${Math.round(clampVolume(volume) * 100)}%`;
+}
+
+function canDisableVolumePresetsSetting(volume = livePlaybackVolume) {
+  return getActiveVolumePresetValue(volume) === null;
+}
+
+function applyLiveVolumeToCurrentAudio() {
+  if (!currentAudio) return;
+  currentAudio.volume = clampVolume(livePlaybackVolume);
+}
+
+function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) {
+  const normalized = normalizeLiveVolumePreset(volume, livePlaybackVolume);
+  const changed = Math.abs(normalized - livePlaybackVolume) >= 0.0001;
+  livePlaybackVolume = normalized;
+
+  if (isHostRole()) {
+    applyLiveVolumeToCurrentAudio();
+    if (sync && changed) {
+      requestHostPlaybackSync(true);
+    }
+  }
+
+  updateVolumePresetsUi();
+  if (announce) {
+    setStatus(`Громкость: ${formatVolumePresetLabel(livePlaybackVolume)}.`);
+  }
+  return changed;
+}
+
+function getEffectiveLiveVolume() {
+  return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+}
+
+function setShowVolumePresetsEnabled(
+  enabled,
+  { persist = false, sync = false, announce = false } = {},
+) {
+  let normalized = Boolean(enabled);
+  if (!normalized && !canDisableVolumePresetsSetting()) {
+    normalized = true;
+  }
+
+  const changed = normalized !== showVolumePresetsEnabled;
+  showVolumePresetsEnabled = normalized;
+
+  if (showVolumePresetsToggle) {
+    showVolumePresetsToggle.checked = normalized;
+  }
+
+  if (persist) {
+    saveSetting(SETTINGS_KEYS.showVolumePresets, normalized ? 'true' : 'false');
+  }
+
+  updateVolumePresetsUi();
+
+  if (sync && changed && isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
+
+  if (announce) {
+    setStatus(normalized ? 'Пресеты громкости включены.' : 'Пресеты громкости выключены.');
+  }
+
+  return changed;
+}
+
+function updateVolumePresetsUi() {
+  if (!localVolumePresetsEl) return;
+
+  const shouldShow = showVolumePresetsEnabled && (isHostRole() || isCoHostRole());
+  localVolumePresetsEl.hidden = !shouldShow;
+  if (showVolumePresetsToggle) {
+    showVolumePresetsToggle.checked = showVolumePresetsEnabled;
+    const hasActivePreset = !canDisableVolumePresetsSetting();
+    showVolumePresetsToggle.disabled = Boolean(showVolumePresetsEnabled && hasActivePreset);
+  }
+  if (!localVolumePresetButtons.length) return;
+
+  const activePreset = getActiveVolumePresetValue();
+  for (const button of localVolumePresetButtons) {
+    const buttonVolume = normalizeLiveVolumePreset(button.dataset.volume, null);
+    const isActive = buttonVolume !== null && activePreset !== null && Math.abs(buttonVolume - activePreset) < 0.0001;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    button.title = `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)}`;
+  }
 }
 
 function trackKey(file, basePath = '/audio') {
@@ -1367,6 +1495,8 @@ function getDefaultHostPlaybackState() {
     paused: false,
     currentTime: 0,
     duration: null,
+    volume: DEFAULT_LIVE_VOLUME,
+    showVolumePresets: false,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -1572,6 +1702,7 @@ function applyRoleUi(role) {
   }
 
   renderCohostUsers();
+  updateVolumePresetsUi();
 }
 
 function updateCurrentUser(info) {
@@ -1871,6 +2002,16 @@ function sanitizeIncomingHostPlaybackState(rawState) {
     return base;
   }
 
+  base.volume = normalizeLiveVolumePreset(rawState.volume, DEFAULT_LIVE_VOLUME);
+  const hasExplicitShowVolumePresets = Object.prototype.hasOwnProperty.call(rawState, 'showVolumePresets');
+  let showVolumePresets = hasExplicitShowVolumePresets
+    ? Boolean(rawState.showVolumePresets)
+    : getActiveVolumePresetValue(base.volume) !== null;
+  if (!showVolumePresets && getActiveVolumePresetValue(base.volume) !== null) {
+    showVolumePresets = true;
+  }
+  base.showVolumePresets = showVolumePresets;
+
   const rawTrackFile = typeof rawState.trackFile === 'string' ? rawState.trackFile.trim() : '';
   if (!rawTrackFile) {
     base.updatedAt = Number.isFinite(Number(rawState.updatedAt)) ? Number(rawState.updatedAt) : Date.now();
@@ -1894,6 +2035,8 @@ function sanitizeIncomingHostPlaybackState(rawState) {
     paused: Boolean(rawState.paused),
     currentTime,
     duration,
+    volume: base.volume,
+    showVolumePresets: base.showVolumePresets,
     playlistIndex: normalizePlaylistTrackIndex(rawState.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(rawState.playlistPosition),
     updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
@@ -1908,6 +2051,8 @@ function serializeHostPlaybackState(state) {
     paused: normalized.paused,
     currentTime: normalized.currentTime,
     duration: normalized.duration,
+    volume: normalized.volume,
+    showVolumePresets: normalized.showVolumePresets,
     playlistIndex: normalized.playlistIndex,
     playlistPosition: normalized.playlistPosition,
     updatedAt: normalized.updatedAt,
@@ -3754,6 +3899,8 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
   const normalizedState = sanitizeIncomingHostPlaybackState(nextState);
   const changed = serializeHostPlaybackState(hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
   hostPlaybackState = normalizedState;
+  setLivePlaybackVolume(normalizedState.volume, { sync: false, announce: false });
+  setShowVolumePresetsEnabled(normalizedState.showVolumePresets, { persist: isHostRole(), sync: false });
 
   if (sync || changed) {
     if (isCoHostRole()) {
@@ -3772,6 +3919,8 @@ function buildLocalPlaybackSnapshot() {
       paused: false,
       currentTime: 0,
       duration: null,
+      volume: getEffectiveLiveVolume(),
+      showVolumePresets: showVolumePresetsEnabled,
       playlistIndex: null,
       playlistPosition: null,
     };
@@ -3786,6 +3935,8 @@ function buildLocalPlaybackSnapshot() {
     paused: Boolean(currentAudio.paused),
     currentTime,
     duration: Number.isFinite(resolvedDuration) && resolvedDuration > 0 ? resolvedDuration : null,
+    volume: getEffectiveLiveVolume(),
+    showVolumePresets: showVolumePresetsEnabled,
     playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
   };
@@ -3826,6 +3977,27 @@ function normalizeIncomingPlaybackCommand(rawCommand) {
   if (type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
     return {
       type: PLAYBACK_COMMAND_TOGGLE_CURRENT,
+      sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+      sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+    };
+  }
+
+  if (type === PLAYBACK_COMMAND_SET_VOLUME) {
+    const volume = normalizeLiveVolumePreset(rawCommand.volume, null);
+    if (volume === null) return null;
+
+    return {
+      type: PLAYBACK_COMMAND_SET_VOLUME,
+      volume,
+      sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+      sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+    };
+  }
+
+  if (type === PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE) {
+    return {
+      type: PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE,
+      showVolumePresets: Boolean(rawCommand.showVolumePresets),
       sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
       sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
     };
@@ -3883,6 +4055,27 @@ async function executeIncomingPlaybackCommand(commandPayload) {
       return;
     }
 
+    if (command.type === PLAYBACK_COMMAND_SET_VOLUME) {
+      setLivePlaybackVolume(command.volume, { sync: true, announce: false });
+      if (sourceTag) {
+        setStatus(`Live управление${sourceTag}: громкость ${formatVolumePresetLabel(command.volume)}.`);
+      }
+      return;
+    }
+
+    if (command.type === PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE) {
+      if (!command.showVolumePresets && !canDisableVolumePresetsSetting()) {
+        setStatus('Нельзя скрыть пресеты, пока активен выбранный уровень громкости.');
+        updateVolumePresetsUi();
+        return;
+      }
+      setShowVolumePresetsEnabled(command.showVolumePresets, { persist: true, sync: true });
+      if (sourceTag) {
+        setStatus(`Live управление${sourceTag}: пресеты громкости ${command.showVolumePresets ? 'включены' : 'выключены'}.`);
+      }
+      return;
+    }
+
     const button = getTrackButton(command.file, command.playlistIndex, command.playlistPosition, command.basePath);
     if (!button) {
       setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
@@ -3926,6 +4119,23 @@ async function requestCoHostPlayTrack(file, basePath = '/audio', playbackContext
 async function requestCoHostToggleCurrentPlayback() {
   if (!isCoHostRole()) return false;
   await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_TOGGLE_CURRENT });
+  return true;
+}
+
+async function requestCoHostSetLiveVolume(volume) {
+  if (!isCoHostRole()) return false;
+  const normalized = normalizeLiveVolumePreset(volume, null);
+  if (normalized === null) return false;
+  await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_SET_VOLUME, volume: normalized });
+  return true;
+}
+
+async function requestCoHostSetVolumePresetsVisibility(showVolumePresets) {
+  if (!isCoHostRole()) return false;
+  await sendLivePlaybackCommand({
+    type: PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE,
+    showVolumePresets: Boolean(showVolumePresets),
+  });
   return true;
 }
 
@@ -4736,6 +4946,7 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
   } catch (err) {
     console.error(err);
     hostPlaybackState = getDefaultHostPlaybackState();
+    setLivePlaybackVolume(hostPlaybackState.volume, { sync: false, announce: false });
   }
 
   renderZones();
@@ -4968,7 +5179,7 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
 async function handlePlay(file, button, basePath = '/audio', playbackContext = {}) {
   const overlaySeconds = Math.max(0, parseFloat(overlayTimeInput.value) || 0);
   const curve = overlayCurveSelect.value;
-  const targetVolume = 1;
+  const targetVolume = getEffectiveLiveVolume();
   const resolvedPlaylistIndex =
     Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
       ? playbackContext.playlistIndex
@@ -5175,10 +5386,95 @@ function initPlaylistControls() {
   setPlaylistControlsLoading(false);
 }
 
+async function onVolumePresetButtonClick(event) {
+  const button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const presetVolume = normalizeLiveVolumePreset(button ? button.dataset.volume : null, null);
+  if (presetVolume === null) return;
+
+  const activePreset = getActiveVolumePresetValue();
+  const shouldTurnOffPreset = activePreset !== null && Math.abs(activePreset - presetVolume) < 0.0001;
+  const targetVolume = shouldTurnOffPreset ? DEFAULT_LIVE_VOLUME : presetVolume;
+
+  if (isHostRole()) {
+    setLivePlaybackVolume(targetVolume, { sync: true, announce: true });
+    return;
+  }
+
+  if (!isCoHostRole()) return;
+
+  const previousVolume = getEffectiveLiveVolume();
+  setLivePlaybackVolume(targetVolume, { sync: false, announce: false });
+  try {
+    await requestCoHostSetLiveVolume(targetVolume);
+    setStatus(`Live громкость: ${formatVolumePresetLabel(targetVolume)}.`);
+  } catch (err) {
+    console.error(err);
+    const fallbackVolume = normalizeLiveVolumePreset(hostPlaybackState.volume, previousVolume);
+    setLivePlaybackVolume(fallbackVolume, { sync: false, announce: false });
+    setStatus(err && err.message ? err.message : 'Не удалось изменить live-громкость.');
+  }
+}
+
+function initVolumePresetControls() {
+  if (isHostRole()) {
+    setShowVolumePresetsEnabled(loadBooleanSetting(SETTINGS_KEYS.showVolumePresets, false), {
+      persist: false,
+      sync: false,
+    });
+  } else {
+    setShowVolumePresetsEnabled(false, { persist: false, sync: false });
+  }
+
+  if (showVolumePresetsToggle) {
+    showVolumePresetsToggle.checked = showVolumePresetsEnabled;
+    showVolumePresetsToggle.addEventListener('change', async () => {
+      const nextEnabled = Boolean(showVolumePresetsToggle.checked);
+      if (!nextEnabled && !canDisableVolumePresetsSetting()) {
+        showVolumePresetsToggle.checked = true;
+        setStatus('Сначала выключите активный пресет громкости.');
+        updateVolumePresetsUi();
+        return;
+      }
+
+      if (isHostRole()) {
+        setShowVolumePresetsEnabled(nextEnabled, { persist: true, sync: true });
+        return;
+      }
+
+      if (!isCoHostRole()) {
+        setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
+        return;
+      }
+
+      const previousEnabled = showVolumePresetsEnabled;
+      setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
+      try {
+        await requestCoHostSetVolumePresetsVisibility(nextEnabled);
+        setStatus(`Пресеты громкости ${nextEnabled ? 'включены' : 'выключены'} на live.`);
+      } catch (err) {
+        console.error(err);
+        setShowVolumePresetsEnabled(previousEnabled, { persist: false, sync: false });
+        setStatus(err && err.message ? err.message : 'Не удалось изменить режим пресетов громкости.');
+      }
+    });
+  }
+
+  for (const button of localVolumePresetButtons) {
+    button.addEventListener('click', onVolumePresetButtonClick);
+  }
+
+  if (isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
+
+  updateVolumePresetsUi();
+}
+
 function initNowPlayingControls() {
   if (!nowPlayingControlBtn) return;
   nowPlayingControlBtn.addEventListener('pointerdown', onNowPlayingControlPointerDown);
   nowPlayingControlBtn.addEventListener('click', onNowPlayingControlClick);
+  initVolumePresetControls();
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
 }

@@ -185,6 +185,62 @@ body[data-role='slave'] #hostNowPlaying {
   width: 100%;
 }
 
+.now-playing-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.now-playing-actions .now-playing-control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.volume-presets {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.volume-presets[hidden] {
+  display: none !important;
+}
+
+.volume-presets__button {
+  min-width: 42px;
+  height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 8px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.volume-presets__button:hover,
+.volume-presets__button:focus-visible {
+  outline: none;
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.volume-presets__button.is-active {
+  color: #fff;
+  border-color: var(--border-strong);
+  background: var(--primary);
+  box-shadow: 0 0 10px var(--shadow-accent);
+}
+
+body[data-role='slave'] #localVolumePresets {
+  display: none !important;
+}
+
 .now-playing__title {
   margin: 0;
   font-size: 14px;
@@ -423,6 +479,23 @@ body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__prog
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   max-width: 720px;
   margin: 0 auto;
+}
+
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sidebar-settings-toggle {
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 0 2px;
 }
 
 .settings label {
@@ -1170,6 +1243,16 @@ button.sidebar-toggle:focus-visible {
   cursor: not-allowed;
 }
 
+.settings-toggle-switch:checked {
+  border-color: var(--border-strong);
+  background: rgba(0, 0, 0, 0.34);
+  box-shadow: 0 0 8px var(--shadow-accent);
+}
+
+.settings-toggle-switch:checked::after {
+  background: #fff;
+}
+
 button.secondary:disabled {
   background: var(--disabled);
   border-color: var(--border);
@@ -1451,6 +1534,11 @@ body[data-role='co-host'] .track-card.is-host-paused {
   .now-playing-grid,
   body[data-role='slave'] .now-playing-grid {
     grid-template-columns: 1fr;
+  }
+
+  .volume-presets__button {
+    min-width: 38px;
+    padding: 0 6px;
   }
 
 }

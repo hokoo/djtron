@@ -16,6 +16,10 @@
 				<h1>djTRON</h1>
 				<p>Плеер для дискотек и музыкальных мероприятий. Загрузите аудио в папку <strong>/audio</strong>.</p>
 			</header>
+			<label class="settings-toggle-row sidebar-settings-toggle" for="showVolumePresets">
+				<span>Пресеты громкости</span>
+				<input type="checkbox" id="showVolumePresets" class="cohost-role-switch settings-toggle-switch"/>
+			</label>
 			<section class="panel sidebar-panel">
 				<div class="settings">
 					<label>
@@ -101,12 +105,19 @@
                                 </div>
                                 <div id="localNowPlaying" class="now-playing now-playing--local">
                                         <p id="nowPlayingTitle" class="now-playing__title">Ничего не играет</p>
-                                        <button id="nowPlayingControl" class="now-playing-control" type="button" disabled>
-                                                <span id="nowPlayingProgress" class="now-playing-control__progress"></span>
-                                                <span id="nowPlayingReel" class="now-playing-control__reel" aria-hidden="true"></span>
-                                                <span id="nowPlayingControlLabel" class="now-playing-control__label">▶</span>
-                                                <span id="nowPlayingTime" class="now-playing-control__time"></span>
-                                        </button>
+                                        <div class="now-playing-actions">
+                                                <button id="nowPlayingControl" class="now-playing-control" type="button" disabled>
+                                                        <span id="nowPlayingProgress" class="now-playing-control__progress"></span>
+                                                        <span id="nowPlayingReel" class="now-playing-control__reel" aria-hidden="true"></span>
+                                                        <span id="nowPlayingControlLabel" class="now-playing-control__label">▶</span>
+                                                        <span id="nowPlayingTime" class="now-playing-control__time"></span>
+                                                </button>
+                                                <div id="localVolumePresets" class="volume-presets" hidden>
+                                                        <button class="volume-presets__button" type="button" data-volume="0.1">10%</button>
+                                                        <button class="volume-presets__button" type="button" data-volume="0.3">30%</button>
+                                                        <button class="volume-presets__button" type="button" data-volume="0.5">50%</button>
+                                                </div>
+                                        </div>
                                 </div>
                         </div>
                 </div>

@@ -74,6 +74,8 @@ const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_HOST = 'host';
 const ROLE_SLAVE = 'slave';
 const ROLE_COHOST = 'co-host';
+const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
+const DEFAULT_LIVE_VOLUME = 1;
 
 let shuttingDown = false;
 let updateInProgress = false;
@@ -173,6 +175,8 @@ function getDefaultPlaybackState() {
     paused: false,
     currentTime: 0,
     duration: null,
+    volume: DEFAULT_LIVE_VOLUME,
+    showVolumePresets: false,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -338,11 +342,54 @@ function normalizePlaylistTrackIndex(value) {
   return numeric;
 }
 
+function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const normalized = Math.max(0, Math.min(1, numeric));
+
+  if (Math.abs(normalized - 1) < 0.0001) {
+    return 1;
+  }
+
+  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
+    if (Math.abs(normalized - preset) < 0.0001) {
+      return preset;
+    }
+  }
+
+  return fallback;
+}
+
+function hasActiveVolumePreset(value) {
+  const normalized = normalizeLiveVolumePreset(value, DEFAULT_LIVE_VOLUME);
+  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
+    if (Math.abs(normalized - preset) < 0.0001) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function sanitizePlaybackState(rawPlayback) {
+  if (!rawPlayback || typeof rawPlayback !== 'object') {
+    return {
+      ...getDefaultPlaybackState(),
+      updatedAt: Date.now(),
+    };
+  }
+
+  const volume = normalizeLiveVolumePreset(rawPlayback.volume, DEFAULT_LIVE_VOLUME);
+  const hasExplicitShowVolumePresets = Object.prototype.hasOwnProperty.call(rawPlayback, 'showVolumePresets');
+  let showVolumePresets = hasExplicitShowVolumePresets ? Boolean(rawPlayback.showVolumePresets) : hasActiveVolumePreset(volume);
+  if (!showVolumePresets && hasActiveVolumePreset(volume)) {
+    showVolumePresets = true;
+  }
   const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
   if (!trackFile) {
     return {
       ...getDefaultPlaybackState(),
+      volume,
+      showVolumePresets,
       updatedAt: Date.now(),
     };
   }
@@ -361,6 +408,8 @@ function sanitizePlaybackState(rawPlayback) {
     paused: Boolean(rawPlayback.paused),
     currentTime,
     duration,
+    volume,
+    showVolumePresets,
     playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
     updatedAt: Date.now(),
@@ -437,6 +486,8 @@ function serializePlaybackState(state) {
     paused: Boolean(state.paused),
     currentTime: Number.isFinite(state.currentTime) && state.currentTime >= 0 ? state.currentTime : 0,
     duration: Number.isFinite(state.duration) && state.duration > 0 ? state.duration : null,
+    volume: normalizeLiveVolumePreset(state.volume, DEFAULT_LIVE_VOLUME),
+    showVolumePresets: Boolean(state.showVolumePresets),
     playlistIndex: normalizePlaylistTrackIndex(state.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(state.playlistPosition),
   });
@@ -461,6 +512,8 @@ function buildPlaybackPayload(sourceClientId = null) {
     paused: sharedPlaybackState.paused,
     currentTime: sharedPlaybackState.currentTime,
     duration: sharedPlaybackState.duration,
+    volume: sharedPlaybackState.volume,
+    showVolumePresets: Boolean(sharedPlaybackState.showVolumePresets),
     playlistIndex: sharedPlaybackState.playlistIndex,
     playlistPosition: sharedPlaybackState.playlistPosition,
     updatedAt: sharedPlaybackState.updatedAt,
@@ -1019,6 +1072,19 @@ function sanitizePlaybackCommand(rawCommand) {
   const commandType = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
   if (commandType === 'toggle-current') {
     return { type: 'toggle-current' };
+  }
+
+  if (commandType === 'set-volume') {
+    const volume = normalizeLiveVolumePreset(rawCommand.volume, null);
+    if (volume === null) return null;
+    return { type: 'set-volume', volume };
+  }
+
+  if (commandType === 'set-volume-presets-visible') {
+    return {
+      type: 'set-volume-presets-visible',
+      showVolumePresets: Boolean(rawCommand.showVolumePresets),
+    };
   }
 
   if (commandType !== 'play-track') {
