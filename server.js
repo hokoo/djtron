@@ -64,12 +64,16 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
 const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
 const PLAYBACK_BODY_LIMIT_BYTES = 32 * 1024;
+const PLAYBACK_COMMAND_BODY_LIMIT_BYTES = 16 * 1024;
 const AUDIO_TAG_SCAN_BYTES = 256 * 1024;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const TRACK_TITLE_KEY_MAX_LENGTH = 1024;
 const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const ROLE_HOST = 'host';
+const ROLE_SLAVE = 'slave';
+const ROLE_COHOST = 'co-host';
 
 let shuttingDown = false;
 let updateInProgress = false;
@@ -493,6 +497,30 @@ function broadcastPlaybackUpdate(sourceClientId = null) {
   }
 }
 
+function broadcastAuthUsersUpdate(sourceClientId = null) {
+  const payload = buildAuthUsersPayload(sourceClientId);
+
+  for (const res of layoutSubscribers) {
+    try {
+      sendSseEvent(res, 'auth-users', payload);
+    } catch (err) {
+      layoutSubscribers.delete(res);
+    }
+  }
+}
+
+function broadcastPlaybackCommand(commandPayload) {
+  if (!commandPayload || typeof commandPayload !== 'object') return;
+
+  for (const res of layoutSubscribers) {
+    try {
+      sendSseEvent(res, 'playback-command', commandPayload);
+    } catch (err) {
+      layoutSubscribers.delete(res);
+    }
+  }
+}
+
 function keepLayoutStreamAlive() {
   for (const res of layoutSubscribers) {
     try {
@@ -611,17 +639,65 @@ function createSessionToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function sanitizeSessionRole(value) {
+  return value === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+}
+
 function sanitizeSessionRecord(token, rawSession, now) {
   if (!SESSION_TOKEN_PATTERN.test(token)) return null;
   if (!rawSession || typeof rawSession !== 'object') return null;
 
   const username = typeof rawSession.username === 'string' ? rawSession.username : '';
   const expiresAt = Number(rawSession.expiresAt);
+  const role = sanitizeSessionRole(rawSession.role);
 
   if (!USERNAME_PATTERN.test(username)) return null;
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
 
-  return { username, expiresAt };
+  return { username, expiresAt, role };
+}
+
+function collectActiveAuthUsers() {
+  const now = Date.now();
+  const groupedByUsername = new Map();
+  let hasInvalidEntries = false;
+
+  for (const [token, rawSession] of authSessions.entries()) {
+    const session = sanitizeSessionRecord(token, rawSession, now);
+    if (!session) {
+      authSessions.delete(token);
+      hasInvalidEntries = true;
+      continue;
+    }
+
+    const existing = groupedByUsername.get(session.username) || {
+      username: session.username,
+      role: ROLE_SLAVE,
+      sessionCount: 0,
+      expiresAt: 0,
+    };
+    existing.sessionCount += 1;
+    if (session.role === ROLE_COHOST) {
+      existing.role = ROLE_COHOST;
+    }
+    if (session.expiresAt > existing.expiresAt) {
+      existing.expiresAt = session.expiresAt;
+    }
+    groupedByUsername.set(session.username, existing);
+  }
+
+  if (hasInvalidEntries) {
+    persistSessions();
+  }
+
+  return Array.from(groupedByUsername.values()).sort((left, right) => left.username.localeCompare(right.username, 'ru'));
+}
+
+function buildAuthUsersPayload(sourceClientId = null) {
+  return {
+    users: collectActiveAuthUsers(),
+    sourceClientId,
+  };
 }
 
 function persistSessions() {
@@ -678,14 +754,31 @@ function loadPersistedSessions() {
   }
 }
 
+function resolveDefaultRoleForUsername(username) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) return ROLE_SLAVE;
+
+  for (const session of authSessions.values()) {
+    if (!session || session.username !== normalizedUsername) continue;
+    if (sanitizeSessionRole(session.role) === ROLE_COHOST) {
+      return ROLE_COHOST;
+    }
+  }
+
+  return ROLE_SLAVE;
+}
+
 function createSession(username) {
+  const sessionRole = resolveDefaultRoleForUsername(username);
   const token = createSessionToken();
   authSessions.set(token, {
     username,
     expiresAt: Date.now() + SESSION_TTL_MS,
+    role: sessionRole,
   });
   persistSessions();
-  return token;
+  broadcastAuthUsersUpdate();
+  return { token, role: sessionRole };
 }
 
 function getSessionByToken(token) {
@@ -695,6 +788,7 @@ function getSessionByToken(token) {
   if (session.expiresAt <= Date.now()) {
     authSessions.delete(token);
     persistSessions();
+    broadcastAuthUsersUpdate();
     return null;
   }
   return session;
@@ -704,6 +798,7 @@ function destroySession(token) {
   if (!token) return;
   if (authSessions.delete(token)) {
     persistSessions();
+    broadcastAuthUsersUpdate();
   }
 }
 
@@ -720,6 +815,7 @@ function cleanupExpiredSessions() {
 
   if (changed) {
     persistSessions();
+    broadcastAuthUsersUpdate();
   }
 }
 
@@ -822,7 +918,7 @@ function getAuthState(req) {
     return {
       authenticated: true,
       isServer: true,
-      role: 'host',
+      role: ROLE_HOST,
       username: 'server',
     };
   }
@@ -844,7 +940,7 @@ function getAuthState(req) {
   return {
     authenticated: true,
     isServer: false,
-    role: 'slave',
+    role: sanitizeSessionRole(session.role),
     username: session.username,
     token,
   };
@@ -862,6 +958,83 @@ function requireAuthorizedRequest(req, res, responseKind = 'json') {
 
   sendJson(res, 401, { error: 'Требуется авторизация' });
   return null;
+}
+
+function requireHostRequest(req, res) {
+  const auth = getAuthState(req);
+  if (!auth.authenticated) {
+    sendJson(res, 401, { error: 'Требуется авторизация' });
+    return null;
+  }
+  if (auth.isServer) return auth;
+  sendJson(res, 403, { error: 'Только хост может выполнять это действие' });
+  return null;
+}
+
+function sanitizeManagedUserRole(value) {
+  return value === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+}
+
+function setRoleForActiveUserSessions(username, role) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    return { matchedSessions: 0, changed: false };
+  }
+
+  const nextRole = sanitizeManagedUserRole(role);
+  const now = Date.now();
+  let matchedSessions = 0;
+  let changed = false;
+  let hasInvalidEntries = false;
+
+  for (const [token, rawSession] of authSessions.entries()) {
+    const session = sanitizeSessionRecord(token, rawSession, now);
+    if (!session) {
+      authSessions.delete(token);
+      hasInvalidEntries = true;
+      continue;
+    }
+
+    if (session.username !== normalizedUsername) continue;
+    matchedSessions += 1;
+    const currentRole = session.role;
+    if (currentRole === nextRole) continue;
+    rawSession.role = nextRole;
+    changed = true;
+  }
+
+  if (hasInvalidEntries || changed) {
+    persistSessions();
+  }
+  if (changed || hasInvalidEntries) {
+    broadcastAuthUsersUpdate();
+  }
+
+  return { matchedSessions, changed };
+}
+
+function sanitizePlaybackCommand(rawCommand) {
+  if (!rawCommand || typeof rawCommand !== 'object') return null;
+
+  const commandType = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
+  if (commandType === 'toggle-current') {
+    return { type: 'toggle-current' };
+  }
+
+  if (commandType !== 'play-track') {
+    return null;
+  }
+
+  const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
+  if (!file) return null;
+
+  return {
+    type: 'play-track',
+    file,
+    basePath: '/audio',
+    playlistIndex: normalizePlaylistTrackIndex(rawCommand.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(rawCommand.playlistPosition),
+  };
 }
 
 function normalizeVersion(version) {
@@ -1697,6 +1870,7 @@ function handleApiLayoutStream(req, res) {
   layoutSubscribers.add(res);
   sendSseEvent(res, 'layout', buildLayoutPayload(null));
   sendSseEvent(res, 'playback', buildPlaybackPayload(null));
+  sendSseEvent(res, 'auth-users', buildAuthUsersPayload(null));
 
   req.on('close', () => {
     layoutSubscribers.delete(res);
@@ -1715,7 +1889,7 @@ function handleAuthSession(req, res) {
 
 async function handleAuthLogin(req, res) {
   if (isServerRequest(req)) {
-    sendJson(res, 200, { authenticated: true, isServer: true, role: 'host', username: 'server' });
+    sendJson(res, 200, { authenticated: true, isServer: true, role: ROLE_HOST, username: 'server' });
     return;
   }
 
@@ -1754,9 +1928,9 @@ async function handleAuthLogin(req, res) {
       return;
     }
 
-    const token = createSession(username);
-    setSessionCookie(res, token);
-    sendJson(res, 200, { authenticated: true, isServer: false, role: 'slave', username });
+    const session = createSession(username);
+    setSessionCookie(res, session.token);
+    sendJson(res, 200, { authenticated: true, isServer: false, role: session.role, username });
   } catch (err) {
     console.error('Auth login failed', err);
     sendJson(res, 500, { error: 'Ошибка авторизации' });
@@ -1768,6 +1942,106 @@ function handleAuthLogout(req, res) {
   destroySession(cookies[SESSION_COOKIE_NAME]);
   clearSessionCookie(res);
   sendJson(res, 200, { authenticated: false });
+}
+
+function handleAuthClientsGet(req, res) {
+  const auth = requireHostRequest(req, res);
+  if (!auth) return;
+
+  sendJson(res, 200, buildAuthUsersPayload(null));
+}
+
+async function handleAuthClientsRoleUpdate(req, res) {
+  const auth = requireHostRequest(req, res);
+  if (!auth) return;
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const username = normalizeUsername(body.username);
+  if (!username) {
+    sendJson(res, 400, { error: 'Некорректный логин пользователя' });
+    return;
+  }
+
+  const nextRole = sanitizeManagedUserRole(body.role);
+  const result = setRoleForActiveUserSessions(username, nextRole);
+
+  if (result.matchedSessions < 1) {
+    sendJson(res, 404, { error: 'Пользователь не найден среди активных сессий' });
+    return;
+  }
+
+  sendJson(res, 200, {
+    users: collectActiveAuthUsers(),
+    updated: {
+      username,
+      role: nextRole,
+      changed: result.changed,
+    },
+  });
+}
+
+async function handleApiPlaybackCommand(req, res) {
+  const auth = getAuthState(req);
+  const canControlLivePlayback = Boolean(auth.isServer || auth.role === ROLE_COHOST);
+  if (!canControlLivePlayback) {
+    sendJson(res, 403, { error: 'Только хост или co-host может отправлять live-команды' });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req, PLAYBACK_COMMAND_BODY_LIMIT_BYTES);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const command = sanitizePlaybackCommand(body);
+  if (!command) {
+    sendJson(res, 400, { error: 'Некорректная команда воспроизведения' });
+    return;
+  }
+
+  const payload = {
+    ...command,
+    issuedAt: Date.now(),
+    sourceClientId: sanitizeClientId(body.clientId),
+    sourceRole: auth.isServer ? ROLE_HOST : sanitizeSessionRole(auth.role),
+    sourceUsername: auth.username,
+  };
+  broadcastPlaybackCommand(payload);
+
+  sendJson(res, 200, {
+    ok: true,
+    command: payload,
+  });
 }
 
 async function handleUpdateCheck(req, res) {
@@ -1924,6 +2198,26 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathname === '/api/auth/clients') {
+    if (req.method !== 'GET') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleAuthClientsGet(req, res);
+    return;
+  }
+
+  if (pathname === '/api/auth/clients/role') {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleAuthClientsRoleUpdate(req, res);
+    return;
+  }
+
   if (pathname.startsWith('/api/')) {
     const auth = requireAuthorizedRequest(req, res, 'json');
     if (!auth) return;
@@ -1973,6 +2267,16 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(405);
     res.end('Method Not Allowed');
+    return;
+  }
+
+  if (pathname === '/api/playback/command') {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleApiPlaybackCommand(req, res);
     return;
   }
 

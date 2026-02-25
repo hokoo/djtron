@@ -9,6 +9,8 @@ const stopFadeInput = document.getElementById('stopFadeTime');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const serverPanelEl = document.getElementById('serverPanel');
+const cohostPanelEl = document.getElementById('cohostPanel');
+const cohostUsersEl = document.getElementById('cohostUsers');
 const stopServerBtn = document.getElementById('stopServer');
 const serverActionsHintEl = document.querySelector('.server-actions__hint');
 const appVersionEl = document.getElementById('appVersion');
@@ -74,6 +76,11 @@ const TRACK_TITLE_MODE_FILE = 'file';
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
 const PLAYLIST_TYPE_FOLDER = 'folder';
+const ROLE_HOST = 'host';
+const ROLE_SLAVE = 'slave';
+const ROLE_COHOST = 'co-host';
+const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
+const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
 
 let currentAudio = null;
 let currentTrack = null; // { file, basePath, key }
@@ -117,7 +124,10 @@ let hostPlaybackSyncQueued = false;
 let hostPlaybackSyncQueuedForce = false;
 let lastHostPlaybackSyncAt = 0;
 let hostProgressRaf = null;
+let cohostProgressRaf = null;
 let hostHighlightedDescriptor = '';
+let authUsersState = [];
+let cohostRoleUpdatesInFlight = new Set();
 let touchHoldTimer = null;
 let touchHoldPointerId = null;
 let touchHoldStartX = 0;
@@ -173,6 +183,22 @@ const HOST_SERVER_HINT = 'Если нужно завершить работу, �
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
 const HOST_NOW_PLAYING_IDLE_TITLE = 'Live: ничего не играет';
 const clientId = getClientId();
+
+function isHostRole(role = currentRole) {
+  return role === ROLE_HOST;
+}
+
+function isSlaveRole(role = currentRole) {
+  return role === ROLE_SLAVE;
+}
+
+function isCoHostRole(role = currentRole) {
+  return role === ROLE_COHOST;
+}
+
+function isRemoteLiveMirrorRole(role = currentRole) {
+  return role === ROLE_SLAVE || role === ROLE_COHOST;
+}
 
 function clampVolume(value) {
   if (!Number.isFinite(value)) return 0;
@@ -1204,10 +1230,14 @@ async function loadTrackAttributes(file, basePath = '/audio') {
       if (currentTrack && currentTrack.key === key) {
         syncNowPlayingPanel();
       }
-      if (currentRole === 'slave' && hostPlaybackState && hostPlaybackState.trackFile) {
+      if (isRemoteLiveMirrorRole() && hostPlaybackState && hostPlaybackState.trackFile) {
         const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
         if (hostTrackKey === key) {
-          syncHostNowPlayingPanel();
+          if (isCoHostRole()) {
+            syncNowPlayingPanel();
+          } else {
+            syncHostNowPlayingPanel();
+          }
         }
       }
     }
@@ -1257,10 +1287,14 @@ function setTrackTitleModeForTrack(file, basePath = '/audio', mode, { persist = 
     if (currentTrack && currentTrack.key === fileKey) {
       syncNowPlayingPanel();
     }
-    if (currentRole === 'slave' && hostPlaybackState && hostPlaybackState.trackFile) {
+    if (isRemoteLiveMirrorRole() && hostPlaybackState && hostPlaybackState.trackFile) {
       const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
       if (hostTrackKey === fileKey) {
-        syncHostNowPlayingPanel();
+        if (isCoHostRole()) {
+          syncNowPlayingPanel();
+        } else {
+          syncHostNowPlayingPanel();
+        }
       }
     }
   }
@@ -1488,20 +1522,31 @@ async function login(username, password) {
 }
 
 function normalizeRole(info) {
-  if (info && info.role === 'host') return 'host';
-  if (info && info.role === 'slave') return 'slave';
-  if (info && info.isServer) return 'host';
-  return 'slave';
+  if (info && info.role === ROLE_HOST) return ROLE_HOST;
+  if (info && info.role === ROLE_COHOST) return ROLE_COHOST;
+  if (info && info.role === ROLE_SLAVE) return ROLE_SLAVE;
+  if (info && info.isServer) return ROLE_HOST;
+  return ROLE_SLAVE;
 }
 
 function applyRoleUi(role) {
-  const resolvedRole = role === 'host' ? 'host' : 'slave';
+  const resolvedRole = normalizeRole({ role });
+  const previousRole = currentRole;
   currentRole = resolvedRole;
   document.body.dataset.role = resolvedRole;
 
-  const isHost = resolvedRole === 'host';
+  const isHost = isHostRole(resolvedRole);
+  const isCoHost = isCoHostRole(resolvedRole);
+
+  if (!isCoHost) {
+    stopCoHostProgressLoop();
+  }
+
   if (serverPanelEl) {
     serverPanelEl.hidden = !isHost;
+  }
+  if (cohostPanelEl) {
+    cohostPanelEl.hidden = !isHost;
   }
 
   if (stopServerBtn) {
@@ -1513,18 +1558,33 @@ function applyRoleUi(role) {
     serverActionsHintEl.textContent = HOST_SERVER_HINT;
   }
 
+  if (isCoHost && !isCoHostRole(previousRole)) {
+    stopAndClearLocalPlayback();
+  }
+
   if (isHost) {
     stopHostProgressLoop();
     requestHostPlaybackSync(true);
   } else {
+    stopHostProgressLoop();
+    syncNowPlayingPanel();
     syncHostNowPlayingPanel();
   }
+
+  renderCohostUsers();
 }
 
 function updateCurrentUser(info) {
   const username = info && typeof info.username === 'string' ? info.username : null;
   currentUser = username;
   applyRoleUi(normalizeRole(info));
+
+  if (isHostRole()) {
+    fetchAuthUsersForHost().catch((err) => {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось загрузить список активных пользователей.');
+    });
+  }
 }
 
 async function ensureAuthorizedUser() {
@@ -1585,6 +1645,142 @@ async function ensureAuthorizedUser() {
 
     authForm.addEventListener('submit', onSubmit);
   });
+}
+
+function normalizeAuthUsersPayload(payload) {
+  const users = Array.isArray(payload && payload.users) ? payload.users : [];
+  return users
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const username = typeof entry.username === 'string' ? entry.username.trim() : '';
+      if (!username) return null;
+      const role = entry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+      const sessionCount = Number.isInteger(entry.sessionCount) && entry.sessionCount > 0 ? entry.sessionCount : 1;
+      return { username, role, sessionCount };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.username.localeCompare(right.username, 'ru'));
+}
+
+function applyIncomingAuthUsers(payload, { syncOwnRole = true } = {}) {
+  authUsersState = normalizeAuthUsersPayload(payload);
+  renderCohostUsers();
+
+  if (!syncOwnRole || !currentUser || isHostRole()) return;
+
+  const selfEntry = authUsersState.find((entry) => entry.username === currentUser);
+  const nextRole = selfEntry && selfEntry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+  if (nextRole === currentRole) return;
+
+  applyRoleUi(nextRole);
+  setStatus(nextRole === ROLE_COHOST ? 'Вам назначена роль co-host.' : 'Роль co-host снята. Вы снова slave.');
+}
+
+function renderCohostUsers() {
+  if (!cohostUsersEl) return;
+
+  if (!isHostRole()) {
+    cohostUsersEl.innerHTML = '';
+    return;
+  }
+
+  cohostUsersEl.innerHTML = '';
+  if (!authUsersState.length) {
+    const empty = document.createElement('p');
+    empty.className = 'cohost-users__empty';
+    empty.textContent = 'Нет активных пользователей.';
+    cohostUsersEl.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  authUsersState.forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'cohost-user';
+
+    const identity = document.createElement('div');
+    identity.className = 'cohost-user__identity';
+
+    const name = document.createElement('span');
+    name.className = 'cohost-user__name';
+    name.textContent = entry.username;
+
+    const meta = document.createElement('span');
+    meta.className = 'cohost-user__meta';
+    meta.textContent = entry.sessionCount > 1 ? `Сессий: ${entry.sessionCount}` : '1 сессия';
+    identity.append(name, meta);
+
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.className = 'cohost-role-switch';
+    toggle.checked = entry.role === ROLE_COHOST;
+    toggle.disabled = cohostRoleUpdatesInFlight.has(entry.username);
+    toggle.title = toggle.checked ? 'Снять роль co-host' : 'Назначить роль co-host';
+    toggle.setAttribute('aria-label', `Роль co-host для ${entry.username}`);
+    toggle.addEventListener('change', () => {
+      const nextRole = toggle.checked ? ROLE_COHOST : ROLE_SLAVE;
+      updateCoHostRole(entry.username, nextRole, toggle);
+    });
+
+    row.append(identity, toggle);
+    fragment.appendChild(row);
+  });
+
+  cohostUsersEl.appendChild(fragment);
+}
+
+async function fetchAuthUsersForHost() {
+  if (!isHostRole()) return;
+
+  const response = await fetch('/api/auth/clients');
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось загрузить список активных пользователей');
+  }
+
+  applyIncomingAuthUsers(data, { syncOwnRole: false });
+}
+
+async function updateCoHostRole(username, role, toggleInput = null) {
+  if (!isHostRole()) return;
+  const normalizedRole = role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+  const normalizedUsername = typeof username === 'string' ? username.trim() : '';
+  if (!normalizedUsername) return;
+
+  cohostRoleUpdatesInFlight.add(normalizedUsername);
+  renderCohostUsers();
+
+  try {
+    const response = await fetch('/api/auth/clients/role', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        username: normalizedUsername,
+        role: normalizedRole,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data && (data.error || data.message);
+      throw new Error(message || 'Не удалось изменить роль пользователя');
+    }
+
+    applyIncomingAuthUsers(data, { syncOwnRole: false });
+    setStatus(
+      normalizedRole === ROLE_COHOST
+        ? `Пользователь ${normalizedUsername} назначен co-host.`
+        : `Роль co-host у ${normalizedUsername} снята.`,
+    );
+  } catch (err) {
+    if (toggleInput) {
+      toggleInput.checked = normalizedRole !== ROLE_COHOST;
+    }
+    setStatus(err && err.message ? err.message : 'Не удалось обновить роль co-host.');
+  } finally {
+    cohostRoleUpdatesInFlight.delete(normalizedUsername);
+    renderCohostUsers();
+  }
 }
 
 function loadSetting(key, fallback) {
@@ -1782,7 +1978,7 @@ function clearHostTrackHighlight() {
 }
 
 function buildHostTrackHighlightDescriptor() {
-  if (currentRole !== 'slave') return 'none';
+  if (!isRemoteLiveMirrorRole()) return 'none';
   if (!hostPlaybackState || !hostPlaybackState.trackFile) return 'none';
 
   const playlistIndex = normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex);
@@ -1824,7 +2020,7 @@ function syncHostTrackHighlight(force = false) {
 function syncHostNowPlayingPanel() {
   if (!hostNowPlayingTitleEl || !hostNowPlayingControlLabelEl) return;
 
-  if (currentRole !== 'slave') {
+  if (!isSlaveRole()) {
     stopHostProgressLoop();
     setHostNowPlayingReelActive(false);
     syncHostTrackHighlight();
@@ -1868,6 +2064,20 @@ function getTrackDurationTextByKey(fileKey) {
   if (isCurrent) {
     const remaining = getCurrentTrackRemainingSeconds();
     return formatDuration(remaining, { useCeil: true });
+  }
+
+  const isCoHostCurrent =
+    isCoHostRole() && hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+      ? trackKey(hostPlaybackState.trackFile, '/audio') === fileKey
+      : false;
+  if (isCoHostCurrent) {
+    const knownDuration = getKnownDurationSeconds(fileKey);
+    const duration =
+      Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : knownDuration;
+    if (Number.isFinite(duration) && duration > 0) {
+      const remaining = Math.max(0, duration - getHostPlaybackElapsedSeconds());
+      return formatDuration(remaining, { useCeil: true });
+    }
   }
 
   return formatDuration(getKnownDurationSeconds(fileKey), { useCeil: false });
@@ -1976,8 +2186,102 @@ function keepKnownDurationsForFiles(files, basePath = '/audio') {
   }
 }
 
+function stopAndClearLocalPlayback() {
+  if (currentAudio) {
+    try {
+      currentAudio.pause();
+    } catch (err) {
+      // ignore audio pause errors during role switch
+    }
+  }
+
+  if (currentTrack) {
+    setButtonPlaying(currentTrack.key, false, currentTrack);
+    setTrackPaused(currentTrack.key, false, currentTrack);
+    resetProgress(currentTrack.key);
+  }
+
+  resetFadeState();
+  stopProgressLoop();
+  currentAudio = null;
+  currentTrack = null;
+  syncNowPlayingPanel();
+}
+
+function stopCoHostProgressLoop() {
+  if (cohostProgressRaf === null) return;
+  cancelAnimationFrame(cohostProgressRaf);
+  cohostProgressRaf = null;
+}
+
+function startCoHostProgressLoop() {
+  if (cohostProgressRaf !== null) return;
+  const tick = () => {
+    if (cohostProgressRaf === null) return;
+    syncNowPlayingPanel();
+    if (cohostProgressRaf === null) return;
+    cohostProgressRaf = requestAnimationFrame(tick);
+  };
+  cohostProgressRaf = requestAnimationFrame(tick);
+}
+
+function syncNowPlayingPanelForCoHost() {
+  if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
+
+  const hostTrackFile =
+    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' ? hostPlaybackState.trackFile.trim() : '';
+  if (!hostTrackFile) {
+    if (nowPlayingSeekActive) {
+      cleanupNowPlayingSeekInteraction();
+    }
+    nowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
+    nowPlayingControlLabelEl.textContent = '▶';
+    nowPlayingControlBtn.disabled = true;
+    setNowPlayingReelActive(false);
+    setNowPlayingProgress(0);
+    setNowPlayingTime(null);
+    stopCoHostProgressLoop();
+    return;
+  }
+
+  nowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostTrackFile)}`;
+  nowPlayingControlBtn.disabled = false;
+  nowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
+  setNowPlayingReelActive(true, hostPlaybackState.paused);
+
+  const elapsed = getHostPlaybackElapsedSeconds();
+  const duration = Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : null;
+  const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
+  const remaining = duration ? Math.max(0, duration - elapsed) : null;
+
+  setNowPlayingProgress(progressPercent);
+  setNowPlayingTime(remaining, { useCeil: true });
+
+  if (!hostPlaybackState.paused && duration && remaining > 0) {
+    startCoHostProgressLoop();
+  } else {
+    stopCoHostProgressLoop();
+  }
+}
+
 function syncNowPlayingPanel() {
   if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
+
+  if (isCoHostRole()) {
+    const hostTrackKey =
+      hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+        ? trackKey(hostPlaybackState.trackFile, '/audio')
+        : null;
+    if (activeDurationTrackKey && activeDurationTrackKey !== hostTrackKey) {
+      refreshTrackDurationLabels(activeDurationTrackKey);
+    }
+    activeDurationTrackKey = hostTrackKey;
+    syncNowPlayingPanelForCoHost();
+    if (hostTrackKey) {
+      refreshTrackDurationLabels(hostTrackKey);
+    }
+    return;
+  }
 
   const nextActiveKey = currentTrack && currentAudio ? currentTrack.key : null;
   if (activeDurationTrackKey && activeDurationTrackKey !== nextActiveKey) {
@@ -2014,7 +2318,7 @@ function getCurrentTrackDurationSeconds() {
 }
 
 function canSeekNowPlaying() {
-  if (currentRole !== 'slave') return false;
+  if (!isSlaveRole()) return false;
   if (!currentTrack || !currentAudio) return false;
   const duration = getCurrentTrackDurationSeconds();
   return Boolean(Number.isFinite(duration) && duration > 0);
@@ -2642,6 +2946,16 @@ function onZonesPanPointerDown(event) {
 }
 
 async function toggleNowPlayingPlayback() {
+  if (isCoHostRole()) {
+    try {
+      await requestCoHostToggleCurrentPlayback();
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось отправить live-команду.');
+    }
+    return;
+  }
+
   if (!currentTrack || !currentAudio) return;
 
   try {
@@ -3357,7 +3671,7 @@ function resolveAutoplayNextTrack(finishedTrack) {
 }
 
 async function tryAutoplayNextTrack(finishedTrack) {
-  if (currentRole !== 'host') return false;
+  if (!isHostRole()) return false;
 
   const nextTrack = resolveAutoplayNextTrack(finishedTrack);
   if (!nextTrack) return false;
@@ -3442,6 +3756,9 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
   hostPlaybackState = normalizedState;
 
   if (sync || changed) {
+    if (isCoHostRole()) {
+      syncNowPlayingPanel();
+    }
     syncHostNowPlayingPanel();
   }
 
@@ -3502,8 +3819,118 @@ async function pushSharedPlaybackState(snapshot) {
   applyIncomingHostPlaybackState(data, true);
 }
 
+function normalizeIncomingPlaybackCommand(rawCommand) {
+  if (!rawCommand || typeof rawCommand !== 'object') return null;
+
+  const type = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
+  if (type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
+    return {
+      type: PLAYBACK_COMMAND_TOGGLE_CURRENT,
+      sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+      sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+    };
+  }
+
+  if (type !== PLAYBACK_COMMAND_PLAY_TRACK) {
+    return null;
+  }
+
+  const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
+  if (!file) return null;
+
+  return {
+    type: PLAYBACK_COMMAND_PLAY_TRACK,
+    file,
+    basePath: '/audio',
+    playlistIndex: normalizePlaylistTrackIndex(rawCommand.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(rawCommand.playlistPosition),
+    sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+    sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+  };
+}
+
+async function sendLivePlaybackCommand(command) {
+  const response = await fetch('/api/playback/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      ...command,
+      clientId,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data && (data.error || data.message);
+    throw new Error(message || 'Не удалось отправить live-команду');
+  }
+  return normalizeIncomingPlaybackCommand(data && data.command ? data.command : command);
+}
+
+async function executeIncomingPlaybackCommand(commandPayload) {
+  if (!isHostRole()) return;
+
+  const command = normalizeIncomingPlaybackCommand(commandPayload);
+  if (!command) return;
+  if (command.sourceClientId && command.sourceClientId === clientId) return;
+
+  const sourceTag = command.sourceUsername ? ` (co-host: ${command.sourceUsername})` : '';
+  try {
+    if (command.type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
+      await toggleNowPlayingPlayback();
+      if (sourceTag) {
+        setStatus(`Live управление${sourceTag}.`);
+      }
+      return;
+    }
+
+    const button = getTrackButton(command.file, command.playlistIndex, command.playlistPosition, command.basePath);
+    if (!button) {
+      setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
+      return;
+    }
+
+    await handlePlay(command.file, button, command.basePath, {
+      playlistIndex: command.playlistIndex,
+      playlistPosition: command.playlistPosition,
+    });
+
+    if (sourceTag) {
+      setStatus(`Live управление${sourceTag}.`);
+    }
+  } catch (err) {
+    console.error('Не удалось выполнить live-команду', err);
+    setStatus('Не удалось выполнить live-команду co-host.');
+  }
+}
+
+async function requestCoHostPlayTrack(file, basePath = '/audio', playbackContext = {}) {
+  if (!isCoHostRole()) return false;
+
+  const command = {
+    type: PLAYBACK_COMMAND_PLAY_TRACK,
+    file,
+    basePath,
+    playlistIndex:
+      Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
+        ? playbackContext.playlistIndex
+        : null,
+    playlistPosition:
+      Number.isInteger(playbackContext.playlistPosition) && playbackContext.playlistPosition >= 0
+        ? playbackContext.playlistPosition
+        : null,
+  };
+  await sendLivePlaybackCommand(command);
+  return true;
+}
+
+async function requestCoHostToggleCurrentPlayback() {
+  if (!isCoHostRole()) return false;
+  await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_TOGGLE_CURRENT });
+  return true;
+}
+
 function requestHostPlaybackSync(force = false) {
-  if (currentRole !== 'host') return;
+  if (!isHostRole()) return;
 
   const now = Date.now();
   if (!force && now - lastHostPlaybackSyncAt < HOST_PLAYBACK_SYNC_INTERVAL_MS) {
@@ -3649,6 +4076,26 @@ function connectLayoutStream() {
     applyIncomingHostPlaybackState(payload, true);
   });
 
+  stream.addEventListener('auth-users', (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    applyIncomingAuthUsers(payload, { syncOwnRole: true });
+  });
+
+  stream.addEventListener('playback-command', (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    executeIncomingPlaybackCommand(payload).catch(() => {});
+  });
+
   stream.onerror = () => {
     if (layoutStream !== stream) return;
     stream.close();
@@ -3682,7 +4129,7 @@ async function initializeLayoutState() {
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
-  if (currentRole === 'host' && isServerLayoutEmpty(incomingLayout)) {
+  if (isHostRole() && isServerLayoutEmpty(incomingLayout)) {
     const legacyLayout = readLegacyLocalLayout(availableFiles);
     if (legacyLayout && !layoutsEqual(legacyLayout, nextLayout)) {
       nextLayout = legacyLayout;
@@ -3773,7 +4220,7 @@ async function renamePlaylist(playlistIndex, rawName) {
 }
 
 async function togglePlaylistAutoplay(playlistIndex) {
-  if (currentRole !== 'host') {
+  if (!isHostRole()) {
     setStatus('Автовоспроизведение может менять только хост.');
     return;
   }
@@ -3838,7 +4285,7 @@ function getLiveLockedPlaylistIndex() {
     return hostPlaybackIndex;
   }
 
-  if (currentRole === 'host' && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
+  if (isHostRole() && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
     return normalizePlaylistTrackIndex(currentTrack.playlistIndex);
   }
 
@@ -4018,7 +4465,7 @@ function renderZones() {
     autoplayButton.textContent = 'A';
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
-    const canManageAutoplay = currentRole === 'host';
+    const canManageAutoplay = isHostRole();
     autoplayButton.dataset.state = isAutoplayEnabled ? 'on' : 'off';
     autoplayButton.setAttribute('aria-pressed', isAutoplayEnabled ? 'true' : 'false');
     autoplayButton.title = canManageAutoplay
@@ -4540,6 +4987,22 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
 
   button.disabled = true;
 
+  if (isCoHostRole()) {
+    try {
+      await requestCoHostPlayTrack(file, basePath, {
+        playlistIndex: resolvedPlaylistIndex,
+        playlistPosition: resolvedPlaylistPosition,
+      });
+      setStatus(`Live-команда отправлена: ${file}`);
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось отправить live-команду.');
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+
   if (currentTrack && currentTrack.key === track.key && currentAudio && !currentAudio.paused) {
     currentAudio.pause();
     stopProgressLoop();
@@ -4661,7 +5124,7 @@ function initSidebarToggle() {
 
 async function stopServer() {
   if (!stopServerBtn) return;
-  if (currentRole !== 'host') {
+  if (!isHostRole()) {
     setStatus('Остановку сервера может выполнить только хост (live).');
     return;
   }
@@ -4919,6 +5382,7 @@ async function bootstrap() {
     stopAudioCatalogAutoRefresh();
     clearLayoutStreamConnection();
     stopHostProgressLoop();
+    stopCoHostProgressLoop();
     cleanupNowPlayingSeekInteraction();
     stopZonesPanMomentum();
     stopZonesWheelSmoothScroll();
