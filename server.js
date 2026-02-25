@@ -188,6 +188,21 @@ function resolvePortValue(envValue, configValue, fallback = DEFAULT_PORT) {
   return fallback;
 }
 
+function parseBoundedNumberConfigValue(value, fallback, { min = null, max = null } = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  if (Number.isFinite(min) && numeric < min) return fallback;
+  if (Number.isFinite(max) && numeric > max) return fallback;
+  return numeric;
+}
+
+function parseDspTransitionOutputFormat(value, fallback = 'wav') {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'mp3') return 'mp3';
+  if (normalized === 'wav') return 'wav';
+  return fallback;
+}
+
 loadEnvFile();
 const ROOT_CONFIG = loadRootConfig();
 
@@ -209,6 +224,14 @@ const UPDATE_CACHE_WINDOW_MS = githubToken ? 0 : ONE_HOUR_MS;
 const UPDATE_STATE_PATH = path.join(__dirname, 'update-state.json');
 const LAYOUT_STATE_PATH = path.join(__dirname, 'layout-state.json');
 const SESSIONS_STATE_PATH = path.join(__dirname, 'sessions-state.json');
+const DSP_CACHE_DIR = path.join(__dirname, '.cache', 'dsp');
+const DSP_TRANSITIONS_DIR = path.join(DSP_CACHE_DIR, 'transitions');
+const DSP_LOG_PATH = path.join(__dirname, 'dsp.log');
+const DSP_TEMPO_CACHE_PATH = path.join(DSP_CACHE_DIR, 'tempo-cache.json');
+const DSP_STATUS_QUEUED = 'queued';
+const DSP_STATUS_PROCESSING = 'processing';
+const DSP_STATUS_READY = 'ready';
+const DSP_STATUS_FAILED = 'failed';
 
 const execFileAsync = promisify(execFile);
 const pipelineAsync = promisify(pipeline);
@@ -222,6 +245,7 @@ const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
 const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
 const PLAYBACK_BODY_LIMIT_BYTES = 32 * 1024;
 const PLAYBACK_COMMAND_BODY_LIMIT_BYTES = 16 * 1024;
+const DSP_BODY_LIMIT_BYTES = 128 * 1024;
 const AUDIO_TAG_SCAN_BYTES = 256 * 1024;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
@@ -246,14 +270,232 @@ const RUNTIME_CONFIG_SCHEMA = Object.freeze({
   port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
   allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
   volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
+  dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
 });
 const DEFAULT_LIVE_VOLUME = 1;
+const DSP_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_enabled', 'dsp']),
+  true,
+);
+const DSP_FFMPEG_BINARY = stripWrappingQuotes(
+  String(pickConfigValue(ROOT_CONFIG, ['dsp_ffmpeg_path', 'ffmpeg_path']) || ''),
+) || 'ffmpeg';
+const DSP_FFPROBE_BINARY = stripWrappingQuotes(
+  String(pickConfigValue(ROOT_CONFIG, ['dsp_ffprobe_path', 'ffprobe_path']) || ''),
+) || 'ffprobe';
+const DSP_TRANSITION_OUTPUT_FORMAT = parseDspTransitionOutputFormat(
+  pickConfigValue(ROOT_CONFIG, ['dsp_transition_output_format', 'dsp_output_format', 'dsp_transition_format', 'dsp_format']),
+  'wav',
+);
+const DSP_TRANSITION_OUTPUT_CODEC = DSP_TRANSITION_OUTPUT_FORMAT === 'wav' ? 'pcm_s16le' : 'libmp3lame';
+const DSP_DEFAULT_TRANSITION_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_transition_seconds', 'transition_seconds']),
+  5,
+  { min: 0.2, max: 30 },
+);
+const DSP_DEFAULT_SLICE_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_slice_seconds', 'slice_seconds']),
+  15,
+  { min: 1, max: 120 },
+);
+const DSP_JOB_TIMEOUT_MS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_job_timeout_ms', 'job_timeout_ms']),
+  90 * 1000,
+  { min: 5 * 1000, max: 15 * 60 * 1000 },
+);
+const DSP_MAX_QUEUE_LENGTH = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_max_queue', 'max_queue']),
+    500,
+    { min: 10, max: 10_000 },
+  ),
+);
+const DSP_HISTORY_LIMIT = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_history_limit', 'history_limit']),
+    2000,
+    { min: 100, max: 50_000 },
+  ),
+);
+const DSP_PROBE_CACHE_MS = 60 * 1000;
+const DSP_LOG_MAX_BYTES = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_log_max_bytes', 'log_max_bytes']),
+    4 * 1024 * 1024,
+    { min: 256 * 1024, max: 64 * 1024 * 1024 },
+  ),
+);
+const DSP_TEMPO_ALIGN_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_align_enabled', 'dsp_tempo_align', 'tempo_align']),
+  true,
+);
+const DSP_TEMPO_ANALYSIS_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_analysis_seconds', 'tempo_analysis_seconds']),
+  90,
+  { min: 15, max: 240 },
+);
+const DSP_TEMPO_SAMPLE_RATE = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_sample_rate', 'tempo_sample_rate']),
+    11025,
+    { min: 4000, max: 48000 },
+  ),
+);
+const DSP_TEMPO_MIN_BPM = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_min_bpm', 'tempo_min_bpm']),
+  70,
+  { min: 40, max: 220 },
+);
+const DSP_TEMPO_MAX_BPM = Math.max(
+  DSP_TEMPO_MIN_BPM + 1,
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_max_bpm', 'tempo_max_bpm']),
+    170,
+    { min: 60, max: 260 },
+  ),
+);
+const DSP_TEMPO_MAX_ADJUST_PERCENT = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_max_adjust_percent', 'tempo_max_adjust_percent']),
+  12,
+  { min: 0, max: 40 },
+);
+const DSP_TEMPO_MIN_RATIO = Math.max(0.6, 1 - DSP_TEMPO_MAX_ADJUST_PERCENT / 100);
+const DSP_TEMPO_MAX_RATIO = Math.min(1.8, 1 + DSP_TEMPO_MAX_ADJUST_PERCENT / 100);
+const DSP_TEMPO_MIN_DELTA_RATIO = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_min_delta_ratio', 'tempo_min_delta_ratio']),
+  0.012,
+  { min: 0.001, max: 0.2 },
+);
+const DSP_TEMPO_GLIDE_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_enabled', 'dsp_tempo_glide', 'tempo_glide']),
+  true,
+);
+const DSP_TEMPO_GLIDE_SEGMENTS = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_segments', 'tempo_glide_segments']),
+    4,
+    { min: 2, max: 12 },
+  ),
+);
+const DSP_TEMPO_GLIDE_ANCHOR_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_anchor_seconds', 'tempo_glide_anchor_seconds']),
+  0.22,
+  { min: 0, max: 2 },
+);
+const DSP_AGGRESSIVE_JOIN_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_aggressive_join', 'dsp_aggressive_join_enabled', 'aggressive_join']),
+  true,
+);
+const DSP_JOIN_INTENSITY = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_join_intensity', 'join_intensity']),
+  0.78,
+  { min: 0, max: 1 },
+);
+const DSP_JOIN_MIN_TRANSITION_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_join_min_transition_seconds', 'join_min_transition_seconds']),
+  0.3,
+  { min: 0.05, max: 10 },
+);
+const DSP_TRIM_SILENCE_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_trim_silence_enabled', 'trim_silence_enabled']),
+  true,
+);
+const DSP_TRIM_SILENCE_THRESHOLD_DB = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_trim_silence_db', 'trim_silence_db']),
+  -36,
+  { min: -90, max: -8 },
+);
+const DSP_TRIM_MIN_SILENCE_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_trim_min_silence_seconds', 'trim_min_silence_seconds']),
+  0.14,
+  { min: 0.02, max: 3 },
+);
+const DSP_TRIM_MAX_SECONDS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_trim_max_seconds', 'trim_max_seconds']),
+  4.8,
+  { min: 0, max: 20 },
+);
+const DSP_NO_GAP_GUARD_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_guard', 'dsp_trim_no_gap_guard', 'trim_no_gap_guard']),
+  true,
+);
+const DSP_TRIM_GUARD_THRESHOLD_BOOST_DB = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_trim_guard_threshold_boost_db', 'trim_guard_threshold_boost_db']),
+  10,
+  { min: 0, max: 30 },
+);
+const DSP_NO_GAP_ENERGY_TRIM_ENABLED = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_trim', 'dsp_trim_energy_guard', 'trim_energy_guard']),
+  true,
+);
+const DSP_NO_GAP_ENERGY_SAMPLE_RATE = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_sample_rate', 'trim_energy_sample_rate']),
+    12000,
+    { min: 4000, max: 48000 },
+  ),
+);
+const DSP_NO_GAP_ENERGY_FRAME_MS = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_frame_ms', 'trim_energy_frame_ms']),
+  20,
+  { min: 5, max: 100 },
+);
+const DSP_NO_GAP_ENERGY_FLOOR_RATIO = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_floor_ratio', 'trim_energy_floor_ratio']),
+  0.18,
+  { min: 0.03, max: 0.9 },
+);
+const DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_mean_multiplier', 'trim_energy_mean_multiplier']),
+  1.7,
+  { min: 1, max: 6 },
+);
+const LIVE_DSP_ENTRY_COMPENSATION_MS = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, [
+      'dsp_live_entry_compensation_ms',
+      'dsp_entry_compensation_ms',
+      'live_dsp_entry_compensation_ms',
+      'entry_compensation_ms',
+    ]),
+    22,
+    { min: 0, max: 250 },
+  ),
+);
+const LIVE_DSP_EXIT_COMPENSATION_MS = Math.trunc(
+  parseBoundedNumberConfigValue(
+    pickConfigValue(ROOT_CONFIG, [
+      'dsp_live_exit_compensation_ms',
+      'dsp_exit_compensation_ms',
+      'live_dsp_exit_compensation_ms',
+      'exit_compensation_ms',
+    ]),
+    19,
+    { min: 0, max: 250 },
+  ),
+);
+const DSP_TEMPO_FRAME_SAMPLES = 1024;
+const DSP_TEMPO_HOP_SAMPLES = 512;
 
 let shuttingDown = false;
 let updateInProgress = false;
 const authSessions = new Map();
 const audioAttributesCache = new Map();
 const layoutSubscribers = new Set();
+const dspTransitions = new Map();
+const dspQueue = [];
+let dspWorkerScheduled = false;
+let dspWorkerRunning = false;
+const dspProbeState = {
+  checkedAt: 0,
+  available: null,
+  error: null,
+};
+const dspTempoCache = new Map();
+const dspSilenceTrimCache = new Map();
+const dspEnergyTrimCache = new Map();
+let dspLogWriteErrorShown = false;
 const githubCache = {
   latestRelease: { etag: null, data: null },
   releasesList: { etag: null, data: null },
@@ -337,6 +579,7 @@ function getDefaultLayoutState() {
     playlistNames: ['Плей-лист 1'],
     playlistMeta: [{ type: 'manual' }],
     playlistAutoplay: [false],
+    playlistDsp: [false],
     trackTitleModesByTrack: {},
   };
 }
@@ -416,6 +659,18 @@ function normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
   for (let index = 0; index < layoutLength; index += 1) {
     const rawValue = Array.isArray(playlistAutoplay) ? playlistAutoplay[index] : false;
     result.push(Boolean(rawValue));
+  }
+
+  return result;
+}
+
+function normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layoutLength) {
+  const normalizedAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
+  const result = [];
+
+  for (let index = 0; index < layoutLength; index += 1) {
+    const rawValue = Array.isArray(playlistDsp) ? playlistDsp[index] : false;
+    result.push(Boolean(rawValue) && Boolean(normalizedAutoplay[index]));
   }
 
   return result;
@@ -622,6 +877,7 @@ function loadPersistedLayoutState() {
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
     const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
     const sanitizedAutoplay = normalizePlaylistAutoplayFlags(parsed.playlistAutoplay, sanitizedLayout.length);
+    const sanitizedDsp = normalizePlaylistDspFlags(parsed.playlistDsp, sanitizedAutoplay, sanitizedLayout.length);
     const sanitizedTrackTitleModes = sanitizeTrackTitleModesByTrack(parsed.trackTitleModesByTrack);
 
     const version = Number(parsed.version);
@@ -634,6 +890,7 @@ function loadPersistedLayoutState() {
       playlistNames: sanitizedNames,
       playlistMeta: sanitizedMeta,
       playlistAutoplay: sanitizedAutoplay,
+      playlistDsp: sanitizedDsp,
       trackTitleModesByTrack: sanitizedTrackTitleModes,
     };
   } catch (err) {
@@ -677,6 +934,7 @@ function buildLayoutPayload(sourceClientId = null) {
     playlistNames: sharedLayoutState.playlistNames,
     playlistMeta: sharedLayoutState.playlistMeta,
     playlistAutoplay: sharedLayoutState.playlistAutoplay,
+    playlistDsp: sharedLayoutState.playlistDsp,
     trackTitleModesByTrack: sharedLayoutState.trackTitleModesByTrack,
     version: sharedLayoutState.version,
     updatedAt: sharedLayoutState.updatedAt,
@@ -1580,6 +1838,2313 @@ function safeResolve(baseDirResolved, requestPath) {
   return isInside(baseDirResolved, resolved) ? resolved : null;
 }
 
+function normalizeDspTransitionSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DSP_DEFAULT_TRANSITION_SECONDS;
+  return Math.max(0.2, Math.min(30, Math.round(numeric * 1000) / 1000));
+}
+
+function normalizeDspSliceSeconds(value, transitionSeconds = DSP_DEFAULT_TRANSITION_SECONDS) {
+  const numeric = Number(value);
+  const fallback = Math.max(DSP_DEFAULT_SLICE_SECONDS, transitionSeconds + 0.2);
+  if (!Number.isFinite(numeric)) return fallback;
+  const bounded = Math.max(transitionSeconds + 0.2, Math.min(120, numeric));
+  return Math.round(bounded * 1000) / 1000;
+}
+
+function normalizeDspTransitionInputFile(rawFile) {
+  if (typeof rawFile !== 'string') return null;
+  const normalized = normalizeAudioRelativePath(rawFile.trim());
+  if (!normalized) return null;
+
+  const absolutePath = safeResolve(AUDIO_DIR_RESOLVED, normalized);
+  if (!absolutePath) return null;
+  if (!isAudioFile(absolutePath)) return null;
+
+  return {
+    file: normalized,
+    absolutePath,
+  };
+}
+
+function buildDspTransitionId(fromFile, toFile, transitionSeconds, sliceSeconds) {
+  const hashInput = JSON.stringify({
+    v: 7,
+    fromFile,
+    toFile,
+    transitionSeconds,
+    sliceSeconds,
+    tempoAlignEnabled: DSP_TEMPO_ALIGN_ENABLED,
+    tempoMaxAdjustPercent: DSP_TEMPO_MAX_ADJUST_PERCENT,
+    tempoGlideEnabled: DSP_TEMPO_GLIDE_ENABLED,
+    tempoGlideSegments: DSP_TEMPO_GLIDE_SEGMENTS,
+    tempoGlideAnchorSeconds: DSP_TEMPO_GLIDE_ANCHOR_SECONDS,
+    tempoMinDeltaRatio: DSP_TEMPO_MIN_DELTA_RATIO,
+    aggressiveJoinEnabled: DSP_AGGRESSIVE_JOIN_ENABLED,
+    joinIntensity: DSP_JOIN_INTENSITY,
+    joinMinTransitionSeconds: DSP_JOIN_MIN_TRANSITION_SECONDS,
+    trimSilenceEnabled: DSP_TRIM_SILENCE_ENABLED,
+    trimSilenceThresholdDb: DSP_TRIM_SILENCE_THRESHOLD_DB,
+    trimMinSilenceSeconds: DSP_TRIM_MIN_SILENCE_SECONDS,
+    trimMaxSeconds: DSP_TRIM_MAX_SECONDS,
+    noGapGuardEnabled: DSP_NO_GAP_GUARD_ENABLED,
+    trimGuardThresholdBoostDb: DSP_TRIM_GUARD_THRESHOLD_BOOST_DB,
+    noGapEnergyTrimEnabled: DSP_NO_GAP_ENERGY_TRIM_ENABLED,
+    noGapEnergyFloorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+    noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
+    format: DSP_TRANSITION_OUTPUT_FORMAT,
+    codec: DSP_TRANSITION_OUTPUT_CODEC,
+  });
+  return crypto.createHash('sha1').update(hashInput).digest('hex');
+}
+
+function buildDspTransitionDescriptor(rawFrom, rawTo, options = {}) {
+  if (!DSP_ENABLED) {
+    return { error: 'DSP отключен в конфигурации (dsp_enabled=false).' };
+  }
+
+  const fromTrack = normalizeDspTransitionInputFile(rawFrom);
+  const toTrack = normalizeDspTransitionInputFile(rawTo);
+  if (!fromTrack || !toTrack) {
+    return { error: 'Некорректные пути треков для transition.' };
+  }
+
+  const transitionSeconds = normalizeDspTransitionSeconds(options.transitionSeconds);
+  const sliceSeconds = normalizeDspSliceSeconds(options.sliceSeconds, transitionSeconds);
+  const id = buildDspTransitionId(fromTrack.file, toTrack.file, transitionSeconds, sliceSeconds);
+  const outputFileName = `${id}.${DSP_TRANSITION_OUTPUT_FORMAT}`;
+  const outputPath = path.join(DSP_TRANSITIONS_DIR, outputFileName);
+
+  return {
+    id,
+    fromFile: fromTrack.file,
+    toFile: toTrack.file,
+    fromAbsolutePath: fromTrack.absolutePath,
+    toAbsolutePath: toTrack.absolutePath,
+    transitionSeconds,
+    sliceSeconds,
+    outputFileName,
+    outputPath,
+  };
+}
+
+function buildDspTransitionOutputUrl(id) {
+  return `/api/dsp/transitions/file/${id}`;
+}
+
+function buildDspOutputEncodingArgs() {
+  if (DSP_TRANSITION_OUTPUT_FORMAT === 'wav') {
+    return ['-c:a', 'pcm_s16le'];
+  }
+  return ['-c:a', 'libmp3lame', '-q:a', '2'];
+}
+
+function resolveDspTransitionOutputPathById(id) {
+  if (!id) return null;
+
+  const knownItem = dspTransitions.get(id);
+  if (knownItem && typeof knownItem.outputPath === 'string' && knownItem.outputPath) {
+    const knownPath = safeResolve(DSP_TRANSITIONS_DIR, path.basename(knownItem.outputPath));
+    if (knownPath && fs.existsSync(knownPath)) {
+      return knownPath;
+    }
+  }
+
+  const preferredPath = safeResolve(DSP_TRANSITIONS_DIR, `${id}.${DSP_TRANSITION_OUTPUT_FORMAT}`);
+  if (preferredPath && fs.existsSync(preferredPath)) {
+    return preferredPath;
+  }
+
+  const fallbackExts = DSP_TRANSITION_OUTPUT_FORMAT === 'wav' ? ['mp3'] : ['wav'];
+  for (const ext of fallbackExts) {
+    const fallbackPath = safeResolve(DSP_TRANSITIONS_DIR, `${id}.${ext}`);
+    if (fallbackPath && fs.existsSync(fallbackPath)) {
+      return fallbackPath;
+    }
+  }
+
+  return preferredPath;
+}
+
+function safeSerializeDspLogPayload(payload) {
+  const normalizedPayload =
+    payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { value: payload };
+
+  try {
+    return JSON.stringify(normalizedPayload);
+  } catch (err) {
+    return JSON.stringify({ error: 'Failed to serialize DSP log payload' });
+  }
+}
+
+function appendDspLog(eventName, payload = {}) {
+  const event = typeof eventName === 'string' && eventName.trim() ? eventName.trim() : 'event';
+  const line = `${new Date().toISOString()} ${event} ${safeSerializeDspLogPayload(payload)}\n`;
+  try {
+    fs.appendFileSync(DSP_LOG_PATH, line, 'utf8');
+  } catch (err) {
+    if (dspLogWriteErrorShown) return;
+    dspLogWriteErrorShown = true;
+    console.error('Failed to write DSP log file', err);
+  }
+}
+
+function initializeDspLogFile() {
+  try {
+    const stat = fs.statSync(DSP_LOG_PATH);
+    if (!stat.isFile()) return;
+    if (stat.size <= DSP_LOG_MAX_BYTES) return;
+
+    const backupPath = `${DSP_LOG_PATH}.prev`;
+    try {
+      fs.unlinkSync(backupPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        // keep going even if old backup cleanup fails
+      }
+    }
+    fs.renameSync(DSP_LOG_PATH, backupPath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error('Failed to initialize DSP log file', err);
+    }
+  }
+}
+
+function normalizeTempoBpmValue(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  if (numeric < 40 || numeric > 260) return null;
+  return Math.round(numeric * 1000) / 1000;
+}
+
+function normalizeTempoCacheTrackKey(trackFile) {
+  const normalized = normalizeAudioRelativePath(trackFile || '');
+  return normalized || null;
+}
+
+function loadDspTempoCache() {
+  try {
+    if (!fs.existsSync(DSP_TEMPO_CACHE_PATH)) return;
+    const raw = fs.readFileSync(DSP_TEMPO_CACHE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+
+    for (const [rawTrackFile, rawEntry] of Object.entries(parsed)) {
+      const trackFile = normalizeTempoCacheTrackKey(rawTrackFile);
+      if (!trackFile) continue;
+      if (!rawEntry || typeof rawEntry !== 'object') continue;
+
+      const bpm = normalizeTempoBpmValue(rawEntry.bpm);
+      const mtimeMs = Number(rawEntry.mtimeMs);
+      const size = Number(rawEntry.size);
+      if (!bpm || !Number.isFinite(mtimeMs) || !Number.isFinite(size)) continue;
+
+      const source = typeof rawEntry.source === 'string' && rawEntry.source ? rawEntry.source : 'analysis';
+      dspTempoCache.set(trackFile, {
+        bpm,
+        mtimeMs,
+        size,
+        source,
+        updatedAt: Number.isFinite(Number(rawEntry.updatedAt)) ? Number(rawEntry.updatedAt) : Date.now(),
+      });
+    }
+  } catch (err) {
+    console.error('Failed to load DSP tempo cache', err);
+  }
+}
+
+function persistDspTempoCache() {
+  try {
+    if (!dspTempoCache.size) return;
+    const payload = {};
+    for (const [trackFile, entry] of dspTempoCache.entries()) {
+      if (!trackFile || !entry || typeof entry !== 'object') continue;
+      const bpm = normalizeTempoBpmValue(entry.bpm);
+      if (!bpm) continue;
+      payload[trackFile] = {
+        bpm,
+        mtimeMs: Number(entry.mtimeMs) || 0,
+        size: Number(entry.size) || 0,
+        source: typeof entry.source === 'string' && entry.source ? entry.source : 'analysis',
+        updatedAt: Number(entry.updatedAt) || Date.now(),
+      };
+    }
+    fs.mkdirSync(DSP_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(DSP_TEMPO_CACHE_PATH, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist DSP tempo cache', err);
+  }
+}
+
+function parseBpmCandidate(rawValue) {
+  if (rawValue === null || rawValue === undefined) return null;
+  const value = String(rawValue).trim();
+  if (!value) return null;
+  const match = value.match(/(\d+(?:[.,]\d+)?)/);
+  if (!match) return null;
+  const numeric = Number(match[1].replace(',', '.'));
+  return normalizeTempoBpmValue(numeric);
+}
+
+function parseBpmFromTrackFileName(trackFile) {
+  if (typeof trackFile !== 'string' || !trackFile.trim()) return null;
+  const fileName = path.basename(trackFile);
+  const match = fileName.match(/(?:^|[^0-9])(\d{2,3}(?:[.,]\d+)?)\s*bpm\b/i);
+  if (!match) return null;
+  return parseBpmCandidate(match[1]);
+}
+
+function collectTagBpmCandidates(tags, target) {
+  if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return;
+  for (const [rawKey, rawValue] of Object.entries(tags)) {
+    const key = String(rawKey || '').trim().toLowerCase();
+    if (!key) continue;
+    if (key !== 'bpm' && key !== 'tbpm' && key !== 'tempo') continue;
+    const bpm = parseBpmCandidate(rawValue);
+    if (bpm) {
+      target.push(bpm);
+    }
+  }
+}
+
+function parseBpmFromFfprobePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const candidates = [];
+  if (payload.format && payload.format.tags) {
+    collectTagBpmCandidates(payload.format.tags, candidates);
+  }
+
+  if (Array.isArray(payload.streams)) {
+    for (const stream of payload.streams) {
+      if (!stream || typeof stream !== 'object' || !stream.tags) continue;
+      collectTagBpmCandidates(stream.tags, candidates);
+    }
+  }
+
+  if (!candidates.length) return null;
+  candidates.sort((left, right) => left - right);
+  return candidates[Math.floor(candidates.length / 2)] || null;
+}
+
+async function probeTrackTempoBpmFromMetadata(absolutePath) {
+  try {
+    const { stdout } = await execFileAsync(
+      DSP_FFPROBE_BINARY,
+      [
+        '-v',
+        'error',
+        '-print_format',
+        'json',
+        '-show_entries',
+        'format_tags=BPM:format_tags=TBPM:format_tags=TEMPO:stream_tags=BPM:stream_tags=TBPM:stream_tags=TEMPO',
+        absolutePath,
+      ],
+      {
+        windowsHide: true,
+        timeout: 10 * 1000,
+        maxBuffer: 2 * 1024 * 1024,
+      },
+    );
+    const parsed = JSON.parse(stdout);
+    return parseBpmFromFfprobePayload(parsed);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function decodeTrackPcmForTempoAnalysis(absolutePath) {
+  const analysisDuration = Math.max(15, Math.round(DSP_TEMPO_ANALYSIS_SECONDS));
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-t',
+    String(analysisDuration),
+    '-i',
+    absolutePath,
+    '-ac',
+    '1',
+    '-ar',
+    String(DSP_TEMPO_SAMPLE_RATE),
+    '-f',
+    's16le',
+    '-',
+  ];
+  const { stdout } = await execFileAsync(DSP_FFMPEG_BINARY, args, {
+    windowsHide: true,
+    timeout: Math.max(45 * 1000, DSP_JOB_TIMEOUT_MS),
+    maxBuffer: 96 * 1024 * 1024,
+    encoding: 'buffer',
+  });
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout || '');
+}
+
+function estimateTempoBpmFromPcmBuffer(rawPcm, sampleRate, minBpm, maxBpm) {
+  if (!Buffer.isBuffer(rawPcm) || rawPcm.length < 4096) return null;
+  if (!Number.isFinite(sampleRate) || sampleRate < 2000) return null;
+
+  const sampleCount = Math.floor(rawPcm.length / 2);
+  if (sampleCount < DSP_TEMPO_FRAME_SAMPLES * 4) return null;
+
+  const envelope = [];
+  for (let start = 0; start + DSP_TEMPO_FRAME_SAMPLES <= sampleCount; start += DSP_TEMPO_HOP_SAMPLES) {
+    let sum = 0;
+    for (let offset = 0; offset < DSP_TEMPO_FRAME_SAMPLES; offset += 1) {
+      const index = (start + offset) * 2;
+      sum += Math.abs(rawPcm.readInt16LE(index));
+    }
+    envelope.push(sum / DSP_TEMPO_FRAME_SAMPLES);
+  }
+
+  if (envelope.length < 32) return null;
+
+  let mean = 0;
+  for (const value of envelope) {
+    mean += value;
+  }
+  mean /= envelope.length;
+
+  const onset = new Float64Array(envelope.length);
+  for (let index = 0; index < envelope.length; index += 1) {
+    const centered = Math.max(0, envelope[index] - mean);
+    onset[index] = centered;
+  }
+
+  for (let index = onset.length - 1; index >= 1; index -= 1) {
+    onset[index] = Math.max(0, onset[index] - onset[index - 1]);
+  }
+  onset[0] = 0;
+
+  const frameRate = sampleRate / DSP_TEMPO_HOP_SAMPLES;
+  const resolvedMinBpm = Number.isFinite(minBpm) ? minBpm : 70;
+  const resolvedMaxBpm = Number.isFinite(maxBpm) ? maxBpm : 170;
+  const minLag = Math.max(1, Math.round((60 / resolvedMaxBpm) * frameRate));
+  const maxLag = Math.min(onset.length - 2, Math.round((60 / resolvedMinBpm) * frameRate));
+  if (maxLag <= minLag) return null;
+
+  let bestLag = 0;
+  let bestScore = 0;
+
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    let score = 0;
+    for (let index = lag; index < onset.length; index += 1) {
+      score += onset[index] * onset[index - lag];
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestLag = lag;
+    }
+  }
+
+  if (bestLag <= 0 || bestScore <= 0) return null;
+  let bpm = (60 * frameRate) / bestLag;
+
+  while (bpm < resolvedMinBpm && bpm * 2 <= resolvedMaxBpm) bpm *= 2;
+  while (bpm > resolvedMaxBpm && bpm / 2 >= resolvedMinBpm) bpm /= 2;
+
+  return normalizeTempoBpmValue(bpm);
+}
+
+async function detectTrackTempoBpm(trackFile, absolutePath, trackStat) {
+  const normalizedTrackFile = normalizeTempoCacheTrackKey(trackFile);
+  if (!normalizedTrackFile) return null;
+  if (!trackStat || !Number.isFinite(trackStat.mtimeMs) || !Number.isFinite(trackStat.size)) return null;
+
+  const cached = dspTempoCache.get(normalizedTrackFile);
+  if (
+    cached &&
+    Number.isFinite(cached.mtimeMs) &&
+    Number.isFinite(cached.size) &&
+    cached.mtimeMs === trackStat.mtimeMs &&
+    cached.size === trackStat.size &&
+    normalizeTempoBpmValue(cached.bpm)
+  ) {
+    return { bpm: normalizeTempoBpmValue(cached.bpm), source: 'cache' };
+  }
+
+  let bpm = await probeTrackTempoBpmFromMetadata(absolutePath);
+  let source = 'metadata';
+
+  if (!bpm) {
+    try {
+      const rawPcm = await decodeTrackPcmForTempoAnalysis(absolutePath);
+      bpm = estimateTempoBpmFromPcmBuffer(rawPcm, DSP_TEMPO_SAMPLE_RATE, DSP_TEMPO_MIN_BPM, DSP_TEMPO_MAX_BPM);
+      source = 'analysis';
+    } catch (err) {
+      bpm = null;
+    }
+  }
+
+  if (!bpm) {
+    bpm = parseBpmFromTrackFileName(trackFile);
+    source = bpm ? 'filename' : source;
+  }
+
+  if (!bpm) return null;
+
+  const normalizedBpm = normalizeTempoBpmValue(bpm);
+  if (!normalizedBpm) return null;
+
+  dspTempoCache.set(normalizedTrackFile, {
+    bpm: normalizedBpm,
+    mtimeMs: trackStat.mtimeMs,
+    size: trackStat.size,
+    source,
+    updatedAt: Date.now(),
+  });
+  persistDspTempoCache();
+
+  return { bpm: normalizedBpm, source };
+}
+
+function formatFfmpegFilterNumber(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '1';
+  return numeric.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function interpolateNumber(startValue, endValue, progress) {
+  const safeStart = Number.isFinite(startValue) ? startValue : 0;
+  const safeEnd = Number.isFinite(endValue) ? endValue : safeStart;
+  const safeProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+  return safeStart + (safeEnd - safeStart) * safeProgress;
+}
+
+function buildTempoAlignedTargetFilter({
+  inputLabel,
+  outputLabel,
+  trimStartSeconds,
+  trimEndSeconds,
+  tempoRatio,
+}) {
+  const safeInputLabel = typeof inputLabel === 'string' && inputLabel ? inputLabel : '1:a';
+  const safeOutputLabel = typeof outputLabel === 'string' && outputLabel ? outputLabel : 'a1';
+  const safeTrimStart = Number.isFinite(trimStartSeconds) ? Math.max(0, trimStartSeconds) : 0;
+  const safeTrimEnd = Number.isFinite(trimEndSeconds) ? Math.max(safeTrimStart + 0.05, trimEndSeconds) : safeTrimStart + 0.05;
+  const tempoValue = Number.isFinite(tempoRatio) && tempoRatio > 0 ? tempoRatio : 1;
+  const baseChain =
+    `[${safeInputLabel}]atrim=start=${formatFfmpegFilterNumber(safeTrimStart)}:end=${formatFfmpegFilterNumber(safeTrimEnd)},` +
+    `asetpts=PTS-STARTPTS`;
+
+  if (Math.abs(tempoValue - 1) < DSP_TEMPO_MIN_DELTA_RATIO) {
+    return {
+      filter: `${baseChain}[${safeOutputLabel}]`,
+      glideApplied: false,
+      glideSegments: null,
+      glideStartRatio: 1,
+      glideEndRatio: 1,
+    };
+  }
+
+  const safeGlideSegments = Math.max(2, Math.min(12, DSP_TEMPO_GLIDE_SEGMENTS));
+  const sourceDurationSeconds = Math.max(0, safeTrimEnd - safeTrimStart);
+  const ratioStart = tempoValue;
+  const ratioEnd = 1;
+
+  // Keep an untouched anchor tail so transition end matches the original track timing.
+  const maxAnchorByDuration = Math.max(0, sourceDurationSeconds - 0.08);
+  const anchorSeconds = Math.max(0, Math.min(DSP_TEMPO_GLIDE_ANCHOR_SECONDS, maxAnchorByDuration));
+  const hasAnchorTail = anchorSeconds >= 0.06;
+  const glideSourceStart = safeTrimStart;
+  const glideSourceEnd = hasAnchorTail ? safeTrimEnd - anchorSeconds : safeTrimEnd;
+  const glideDurationSeconds = Math.max(0, glideSourceEnd - glideSourceStart);
+  const minSegmentSeconds = 0.35;
+  const maxSegmentsByDuration = Math.max(1, Math.floor(glideDurationSeconds / minSegmentSeconds));
+  const glideSegments = Math.max(2, Math.min(safeGlideSegments, maxSegmentsByDuration));
+  const canApplyGlide =
+    DSP_TEMPO_GLIDE_ENABLED &&
+    glideSegments >= 2 &&
+    glideDurationSeconds >= minSegmentSeconds * 1.1;
+
+  if (!canApplyGlide) {
+    return {
+      filter: `${baseChain},rubberband=tempo=${formatFfmpegFilterNumber(tempoValue)}[${safeOutputLabel}]`,
+      glideApplied: false,
+      glideSegments: null,
+      glideStartRatio: tempoValue,
+      glideEndRatio: 1,
+    };
+  }
+
+  const segmentFilters = [];
+  const segmentInputs = [];
+  let writtenSegments = 0;
+  let rubberbandSegments = 0;
+
+  for (let segmentIndex = 0; segmentIndex < glideSegments; segmentIndex += 1) {
+    const segmentStart = glideSourceStart + (glideDurationSeconds * segmentIndex) / glideSegments;
+    const rawSegmentEnd = glideSourceStart + (glideDurationSeconds * (segmentIndex + 1)) / glideSegments;
+    const segmentEnd = segmentIndex === glideSegments - 1 ? glideSourceEnd : Math.min(glideSourceEnd, rawSegmentEnd);
+    if (!Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd)) continue;
+    if (segmentEnd - segmentStart < 0.03) continue;
+
+    const progress = glideSegments > 1 ? segmentIndex / (glideSegments - 1) : 1;
+    const segmentRatio = interpolateNumber(ratioStart, ratioEnd, progress);
+    const needsRubberband = Math.abs(segmentRatio - 1) >= DSP_TEMPO_MIN_DELTA_RATIO;
+    if (needsRubberband) rubberbandSegments += 1;
+    const segmentLabel = `a1g${writtenSegments}`;
+    const rubberbandChain = needsRubberband
+      ? `,rubberband=tempo=${formatFfmpegFilterNumber(segmentRatio)}`
+      : '';
+    segmentFilters.push(
+      `[${safeInputLabel}]atrim=start=${formatFfmpegFilterNumber(segmentStart)}:end=${formatFfmpegFilterNumber(segmentEnd)},` +
+        `asetpts=PTS-STARTPTS${rubberbandChain}[${segmentLabel}]`,
+    );
+    segmentInputs.push(`[${segmentLabel}]`);
+    writtenSegments += 1;
+  }
+
+  if (hasAnchorTail) {
+    const anchorStart = glideSourceEnd;
+    const anchorEnd = safeTrimEnd;
+    if (anchorEnd - anchorStart >= 0.03) {
+      const anchorLabel = `a1g${writtenSegments}`;
+      segmentFilters.push(
+        `[${safeInputLabel}]atrim=start=${formatFfmpegFilterNumber(anchorStart)}:end=${formatFfmpegFilterNumber(anchorEnd)},` +
+          `asetpts=PTS-STARTPTS[${anchorLabel}]`,
+      );
+      segmentInputs.push(`[${anchorLabel}]`);
+      writtenSegments += 1;
+    }
+  }
+
+  if (writtenSegments < 2 || rubberbandSegments < 1) {
+    return {
+      filter: `${baseChain},rubberband=tempo=${formatFfmpegFilterNumber(tempoValue)}[${safeOutputLabel}]`,
+      glideApplied: false,
+      glideSegments: null,
+      glideStartRatio: tempoValue,
+      glideEndRatio: 1,
+    };
+  }
+
+  segmentFilters.push(`${segmentInputs.join('')}concat=n=${writtenSegments}:v=0:a=1[${safeOutputLabel}]`);
+  return {
+    filter: segmentFilters.join(';'),
+    glideApplied: rubberbandSegments > 0,
+    glideSegments: writtenSegments,
+    glideStartRatio: ratioStart,
+    glideEndRatio: ratioEnd,
+  };
+}
+
+function parseSilencedetectIntervals(stderr) {
+  if (typeof stderr !== 'string' || !stderr.trim()) return [];
+
+  const lines = stderr.split(/\r?\n/);
+  const intervals = [];
+  let pendingStart = null;
+
+  const startPattern = /silence_start:\s*([0-9.+-eE]+)/;
+  const endPattern = /silence_end:\s*([0-9.+-eE]+)\s*\|\s*silence_duration:\s*([0-9.+-eE]+)/;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const startMatch = line.match(startPattern);
+    if (startMatch) {
+      const startValue = Number(startMatch[1]);
+      pendingStart = Number.isFinite(startValue) ? Math.max(0, startValue) : null;
+      continue;
+    }
+
+    const endMatch = line.match(endPattern);
+    if (!endMatch) continue;
+
+    const endValue = Number(endMatch[1]);
+    const durationValue = Number(endMatch[2]);
+    if (!Number.isFinite(endValue) || endValue < 0) {
+      pendingStart = null;
+      continue;
+    }
+
+    let startValue = pendingStart;
+    if (!Number.isFinite(startValue) || startValue < 0) {
+      if (Number.isFinite(durationValue) && durationValue >= 0) {
+        startValue = Math.max(0, endValue - durationValue);
+      } else {
+        startValue = 0;
+      }
+    }
+
+    const safeEnd = Math.max(startValue, endValue);
+    intervals.push({
+      start: startValue,
+      end: safeEnd,
+      duration: safeEnd - startValue,
+    });
+    pendingStart = null;
+  }
+
+  if (Number.isFinite(pendingStart) && pendingStart >= 0) {
+    intervals.push({
+      start: pendingStart,
+      end: null,
+      duration: null,
+    });
+  }
+
+  intervals.sort((left, right) => {
+    const leftStart = Number.isFinite(left.start) ? left.start : Number.POSITIVE_INFINITY;
+    const rightStart = Number.isFinite(right.start) ? right.start : Number.POSITIVE_INFINITY;
+    return leftStart - rightStart;
+  });
+  return intervals;
+}
+
+function detectLeadingSilenceSecondsFromIntervals(intervals, sliceSeconds) {
+  if (!Array.isArray(intervals) || !intervals.length) return 0;
+  const safeSlice = Number.isFinite(sliceSeconds) && sliceSeconds > 0 ? sliceSeconds : 0;
+  if (safeSlice <= 0) return 0;
+
+  const epsilon = 0.05;
+  for (const interval of intervals) {
+    if (!interval || !Number.isFinite(interval.start)) continue;
+    if (interval.start > epsilon) break;
+
+    const intervalEnd =
+      Number.isFinite(interval.end) && interval.end >= interval.start ? interval.end : safeSlice;
+    return Math.max(0, Math.min(safeSlice, intervalEnd));
+  }
+  return 0;
+}
+
+function detectTrailingSilenceSecondsFromIntervals(intervals, sliceSeconds) {
+  if (!Array.isArray(intervals) || !intervals.length) return 0;
+  const safeSlice = Number.isFinite(sliceSeconds) && sliceSeconds > 0 ? sliceSeconds : 0;
+  if (safeSlice <= 0) return 0;
+
+  const epsilon = 0.05;
+  for (let index = intervals.length - 1; index >= 0; index -= 1) {
+    const interval = intervals[index];
+    if (!interval || !Number.isFinite(interval.start)) continue;
+    const intervalEnd =
+      Number.isFinite(interval.end) && interval.end >= interval.start ? interval.end : safeSlice;
+    if (intervalEnd + epsilon < safeSlice) continue;
+    return Math.max(0, Math.min(safeSlice, safeSlice - interval.start));
+  }
+  return 0;
+}
+
+function buildDspTrimCacheKey({
+  trackFile,
+  trackStat,
+  mode,
+  sliceSeconds,
+  silenceThresholdDb,
+  minSilenceSeconds,
+}) {
+  const normalizedTrackFile = normalizeAudioRelativePath(trackFile || '');
+  if (!normalizedTrackFile) return null;
+  if (!trackStat || !Number.isFinite(trackStat.mtimeMs) || !Number.isFinite(trackStat.size)) return null;
+
+  return [
+    normalizedTrackFile,
+    mode === 'tail' ? 'tail' : 'head',
+    Number(trackStat.mtimeMs).toFixed(3),
+    Number(trackStat.size).toFixed(0),
+    formatFfmpegFilterNumber(sliceSeconds),
+    formatFfmpegFilterNumber(silenceThresholdDb),
+    formatFfmpegFilterNumber(minSilenceSeconds),
+  ].join('|');
+}
+
+async function detectSegmentSilenceSeconds({
+  absolutePath,
+  mode,
+  sliceSeconds,
+  silenceThresholdDb,
+  minSilenceSeconds,
+}) {
+  const safeSliceSeconds = Number.isFinite(sliceSeconds) && sliceSeconds > 0 ? sliceSeconds : null;
+  if (!safeSliceSeconds) return 0;
+  const safeThresholdDb = Number.isFinite(silenceThresholdDb) ? silenceThresholdDb : DSP_TRIM_SILENCE_THRESHOLD_DB;
+  const safeMinSilence = Number.isFinite(minSilenceSeconds) ? minSilenceSeconds : DSP_TRIM_MIN_SILENCE_SECONDS;
+  const normalizedMode = mode === 'tail' ? 'tail' : 'head';
+
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'info',
+    '-nostats',
+    '-y',
+  ];
+
+  if (normalizedMode === 'tail') {
+    args.push('-sseof', `-${safeSliceSeconds}`);
+  }
+
+  args.push(
+    '-i',
+    absolutePath,
+  );
+
+  if (normalizedMode === 'head') {
+    args.push('-t', String(safeSliceSeconds));
+  }
+
+  args.push(
+    '-af',
+    `silencedetect=n=${formatFfmpegFilterNumber(safeThresholdDb)}dB:d=${formatFfmpegFilterNumber(safeMinSilence)}`,
+    '-f',
+    'null',
+    '-',
+  );
+
+  try {
+    const { stderr } = await execFileAsync(DSP_FFMPEG_BINARY, args, {
+      windowsHide: true,
+      timeout: Math.min(DSP_JOB_TIMEOUT_MS, 35 * 1000),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const intervals = parseSilencedetectIntervals(stderr || '');
+    if (!intervals.length) return 0;
+
+    return normalizedMode === 'tail'
+      ? detectTrailingSilenceSecondsFromIntervals(intervals, safeSliceSeconds)
+      : detectLeadingSilenceSecondsFromIntervals(intervals, safeSliceSeconds);
+  } catch (err) {
+    return 0;
+  }
+}
+
+async function computeDspTrimSeconds({
+  trackFile,
+  absolutePath,
+  trackStat,
+  mode,
+  sliceSeconds,
+  silenceThresholdDb,
+  minSilenceSeconds,
+  maxTrimSeconds,
+  maxAllowedTrimSeconds,
+}) {
+  const safeMaxTrim = Number.isFinite(maxTrimSeconds) ? Math.max(0, maxTrimSeconds) : 0;
+  const safeMaxAllowed = Number.isFinite(maxAllowedTrimSeconds) ? Math.max(0, maxAllowedTrimSeconds) : 0;
+  if (safeMaxTrim <= 0 || safeMaxAllowed <= 0) {
+    return { trimSeconds: 0, rawSeconds: 0, source: 'disabled' };
+  }
+
+  const cacheKey = buildDspTrimCacheKey({
+    trackFile,
+    trackStat,
+    mode,
+    sliceSeconds,
+    silenceThresholdDb,
+    minSilenceSeconds,
+  });
+
+  let rawSeconds = 0;
+  let source = 'analysis';
+
+  if (cacheKey && dspSilenceTrimCache.has(cacheKey)) {
+    const cachedValue = Number(dspSilenceTrimCache.get(cacheKey));
+    rawSeconds = Number.isFinite(cachedValue) ? Math.max(0, cachedValue) : 0;
+    source = 'cache';
+  } else {
+    rawSeconds = await detectSegmentSilenceSeconds({
+      absolutePath,
+      mode,
+      sliceSeconds,
+      silenceThresholdDb,
+      minSilenceSeconds,
+    });
+    if (cacheKey) {
+      dspSilenceTrimCache.set(cacheKey, rawSeconds);
+      if (dspSilenceTrimCache.size > 15_000) {
+        const firstKey = dspSilenceTrimCache.keys().next().value;
+        if (firstKey) dspSilenceTrimCache.delete(firstKey);
+      }
+    }
+  }
+
+  const trimmed = Math.min(rawSeconds, safeMaxTrim, safeMaxAllowed);
+  const normalizedTrim = trimmed >= 0.03 ? Math.round(trimmed * 1000) / 1000 : 0;
+  return {
+    trimSeconds: normalizedTrim,
+    rawSeconds: Math.round(rawSeconds * 1000) / 1000,
+    source,
+  };
+}
+
+async function decodeSegmentPcmForBoundaryAnalysis({
+  absolutePath,
+  mode,
+  sliceSeconds,
+  sampleRate,
+}) {
+  const safeSliceSeconds = Number.isFinite(sliceSeconds) && sliceSeconds > 0 ? sliceSeconds : null;
+  if (!safeSliceSeconds) return Buffer.alloc(0);
+  const safeSampleRate = Number.isFinite(sampleRate) && sampleRate >= 4000 ? Math.trunc(sampleRate) : DSP_NO_GAP_ENERGY_SAMPLE_RATE;
+  const normalizedMode = mode === 'tail' ? 'tail' : 'head';
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+  ];
+
+  if (normalizedMode === 'tail') {
+    args.push('-sseof', `-${safeSliceSeconds}`);
+  }
+
+  args.push('-i', absolutePath);
+  if (normalizedMode === 'head') {
+    args.push('-t', String(safeSliceSeconds));
+  }
+
+  args.push(
+    '-ac',
+    '1',
+    '-ar',
+    String(safeSampleRate),
+    '-f',
+    's16le',
+    '-',
+  );
+
+  try {
+    const { stdout } = await execFileAsync(DSP_FFMPEG_BINARY, args, {
+      windowsHide: true,
+      timeout: Math.min(DSP_JOB_TIMEOUT_MS, 45 * 1000),
+      maxBuffer: 96 * 1024 * 1024,
+      encoding: 'buffer',
+    });
+    return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout || '');
+  } catch (err) {
+    return Buffer.alloc(0);
+  }
+}
+
+function percentileFromSortedArray(sortedValues, percentile) {
+  if (!Array.isArray(sortedValues) || !sortedValues.length) return 0;
+  const safePercentile = Number.isFinite(percentile) ? Math.max(0, Math.min(1, percentile)) : 0;
+  const position = Math.round((sortedValues.length - 1) * safePercentile);
+  return sortedValues[position] || 0;
+}
+
+function estimateEnergyBoundaryTrimFromPcm({
+  rawPcm,
+  sampleRate,
+  mode,
+  sliceSeconds,
+  frameMs,
+  floorRatio,
+  meanMultiplier,
+}) {
+  if (!Buffer.isBuffer(rawPcm) || rawPcm.length < 2048) return 0;
+  const safeSampleRate = Number.isFinite(sampleRate) ? sampleRate : DSP_NO_GAP_ENERGY_SAMPLE_RATE;
+  const safeSliceSeconds = Number.isFinite(sliceSeconds) && sliceSeconds > 0 ? sliceSeconds : 0;
+  if (safeSampleRate < 4000 || safeSliceSeconds <= 0) return 0;
+
+  const sampleCount = Math.floor(rawPcm.length / 2);
+  const samplesPerFrame = Math.max(64, Math.round(safeSampleRate * Math.max(0.005, frameMs / 1000)));
+  const frameCount = Math.floor(sampleCount / samplesPerFrame);
+  if (frameCount < 6) return 0;
+
+  const energies = new Array(frameCount).fill(0);
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    const frameStartSample = frameIndex * samplesPerFrame;
+    let sumSquares = 0;
+    for (let offset = 0; offset < samplesPerFrame; offset += 1) {
+      const sampleIndex = (frameStartSample + offset) * 2;
+      const sampleValue = rawPcm.readInt16LE(sampleIndex) / 32768;
+      sumSquares += sampleValue * sampleValue;
+    }
+    energies[frameIndex] = Math.sqrt(sumSquares / samplesPerFrame);
+  }
+
+  const smoothed = new Array(frameCount).fill(0);
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    const left = frameIndex > 0 ? energies[frameIndex - 1] : energies[frameIndex];
+    const center = energies[frameIndex];
+    const right = frameIndex + 1 < frameCount ? energies[frameIndex + 1] : energies[frameIndex];
+    smoothed[frameIndex] = (left + center + right) / 3;
+  }
+
+  const sorted = smoothed.slice().sort((left, right) => left - right);
+  const maxEnergy = sorted[sorted.length - 1] || 0;
+  if (!Number.isFinite(maxEnergy) || maxEnergy <= 0) return 0;
+
+  const p90 = percentileFromSortedArray(sorted, 0.9);
+  const p75 = percentileFromSortedArray(sorted, 0.75);
+  let meanEnergy = 0;
+  for (const value of smoothed) {
+    meanEnergy += value;
+  }
+  meanEnergy /= smoothed.length;
+
+  const signalReference = Math.max(maxEnergy * 0.65, p90, p75);
+  const thresholdByPeak = signalReference * Math.max(0.03, Math.min(0.95, floorRatio));
+  const thresholdByMean = meanEnergy * Math.max(1, meanMultiplier);
+  let threshold = Math.max(thresholdByPeak, thresholdByMean);
+  threshold = Math.min(threshold, maxEnergy * 0.92);
+  threshold = Math.max(threshold, maxEnergy * 0.04);
+
+  const normalizedMode = mode === 'tail' ? 'tail' : 'head';
+  const frameDurationSeconds = samplesPerFrame / safeSampleRate;
+  if (!Number.isFinite(frameDurationSeconds) || frameDurationSeconds <= 0) return 0;
+
+  if (normalizedMode === 'head') {
+    let firstActiveFrameIndex = -1;
+    for (let frameIndex = 0; frameIndex < smoothed.length; frameIndex += 1) {
+      if (smoothed[frameIndex] >= threshold) {
+        firstActiveFrameIndex = frameIndex;
+        break;
+      }
+    }
+    if (firstActiveFrameIndex <= 0) return 0;
+    return Math.max(0, Math.min(safeSliceSeconds, firstActiveFrameIndex * frameDurationSeconds));
+  }
+
+  let lastActiveFrameIndex = -1;
+  for (let frameIndex = smoothed.length - 1; frameIndex >= 0; frameIndex -= 1) {
+    if (smoothed[frameIndex] >= threshold) {
+      lastActiveFrameIndex = frameIndex;
+      break;
+    }
+  }
+  if (lastActiveFrameIndex < 0 || lastActiveFrameIndex >= smoothed.length - 1) return 0;
+
+  const lastActiveEndSeconds = (lastActiveFrameIndex + 1) * frameDurationSeconds;
+  const trimSeconds = Math.max(0, safeSliceSeconds - lastActiveEndSeconds);
+  return Math.max(0, Math.min(safeSliceSeconds, trimSeconds));
+}
+
+function buildDspEnergyTrimCacheKey({
+  trackFile,
+  trackStat,
+  mode,
+  sliceSeconds,
+  sampleRate,
+  frameMs,
+  floorRatio,
+  meanMultiplier,
+}) {
+  const normalizedTrackFile = normalizeAudioRelativePath(trackFile || '');
+  if (!normalizedTrackFile) return null;
+  if (!trackStat || !Number.isFinite(trackStat.mtimeMs) || !Number.isFinite(trackStat.size)) return null;
+
+  return [
+    normalizedTrackFile,
+    mode === 'tail' ? 'tail' : 'head',
+    Number(trackStat.mtimeMs).toFixed(3),
+    Number(trackStat.size).toFixed(0),
+    formatFfmpegFilterNumber(sliceSeconds),
+    String(Math.trunc(sampleRate)),
+    formatFfmpegFilterNumber(frameMs),
+    formatFfmpegFilterNumber(floorRatio),
+    formatFfmpegFilterNumber(meanMultiplier),
+  ].join('|');
+}
+
+async function computeDspEnergyTrimSeconds({
+  trackFile,
+  absolutePath,
+  trackStat,
+  mode,
+  sliceSeconds,
+  sampleRate,
+  frameMs,
+  floorRatio,
+  meanMultiplier,
+  maxTrimSeconds,
+  maxAllowedTrimSeconds,
+}) {
+  const safeMaxTrim = Number.isFinite(maxTrimSeconds) ? Math.max(0, maxTrimSeconds) : 0;
+  const safeMaxAllowed = Number.isFinite(maxAllowedTrimSeconds) ? Math.max(0, maxAllowedTrimSeconds) : 0;
+  if (safeMaxTrim <= 0 || safeMaxAllowed <= 0) {
+    return { trimSeconds: 0, rawSeconds: 0, source: 'disabled' };
+  }
+
+  const safeSampleRate = Number.isFinite(sampleRate) && sampleRate >= 4000
+    ? Math.trunc(sampleRate)
+    : DSP_NO_GAP_ENERGY_SAMPLE_RATE;
+  const safeFrameMs = Number.isFinite(frameMs) ? Math.max(5, Math.min(100, frameMs)) : DSP_NO_GAP_ENERGY_FRAME_MS;
+  const safeFloorRatio = Number.isFinite(floorRatio) ? Math.max(0.03, Math.min(0.95, floorRatio)) : DSP_NO_GAP_ENERGY_FLOOR_RATIO;
+  const safeMeanMultiplier = Number.isFinite(meanMultiplier)
+    ? Math.max(1, Math.min(6, meanMultiplier))
+    : DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER;
+
+  const cacheKey = buildDspEnergyTrimCacheKey({
+    trackFile,
+    trackStat,
+    mode,
+    sliceSeconds,
+    sampleRate: safeSampleRate,
+    frameMs: safeFrameMs,
+    floorRatio: safeFloorRatio,
+    meanMultiplier: safeMeanMultiplier,
+  });
+
+  let rawSeconds = 0;
+  let source = 'analysis';
+
+  if (cacheKey && dspEnergyTrimCache.has(cacheKey)) {
+    const cachedValue = Number(dspEnergyTrimCache.get(cacheKey));
+    rawSeconds = Number.isFinite(cachedValue) ? Math.max(0, cachedValue) : 0;
+    source = 'cache';
+  } else {
+    const rawPcm = await decodeSegmentPcmForBoundaryAnalysis({
+      absolutePath,
+      mode,
+      sliceSeconds,
+      sampleRate: safeSampleRate,
+    });
+    rawSeconds = estimateEnergyBoundaryTrimFromPcm({
+      rawPcm,
+      sampleRate: safeSampleRate,
+      mode,
+      sliceSeconds,
+      frameMs: safeFrameMs,
+      floorRatio: safeFloorRatio,
+      meanMultiplier: safeMeanMultiplier,
+    });
+    if (cacheKey) {
+      dspEnergyTrimCache.set(cacheKey, rawSeconds);
+      if (dspEnergyTrimCache.size > 15_000) {
+        const firstKey = dspEnergyTrimCache.keys().next().value;
+        if (firstKey) dspEnergyTrimCache.delete(firstKey);
+      }
+    }
+  }
+
+  const trimmed = Math.min(rawSeconds, safeMaxTrim, safeMaxAllowed);
+  const normalizedTrim = trimmed >= 0.03 ? Math.round(trimmed * 1000) / 1000 : 0;
+  return {
+    trimSeconds: normalizedTrim,
+    rawSeconds: Math.round(rawSeconds * 1000) / 1000,
+    source,
+  };
+}
+
+function buildDspQueueSummary() {
+  let processing = 0;
+  let ready = 0;
+  let failed = 0;
+
+  for (const item of dspTransitions.values()) {
+    if (item.status === DSP_STATUS_PROCESSING) processing += 1;
+    if (item.status === DSP_STATUS_READY) ready += 1;
+    if (item.status === DSP_STATUS_FAILED) failed += 1;
+  }
+
+  return {
+    enabled: DSP_ENABLED,
+    ffmpegBinary: DSP_FFMPEG_BINARY,
+    ffprobeBinary: DSP_FFPROBE_BINARY,
+    ffmpegAvailable: dspProbeState.available,
+    ffmpegError: dspProbeState.error,
+    wingetCommand: 'winget install "FFmpeg (Essentials Build)"',
+    logFile: path.basename(DSP_LOG_PATH),
+    transitionOutputFormat: DSP_TRANSITION_OUTPUT_FORMAT,
+    transitionOutputCodec: DSP_TRANSITION_OUTPUT_CODEC,
+    tempoAlignEnabled: DSP_TEMPO_ALIGN_ENABLED,
+    tempoMaxAdjustPercent: DSP_TEMPO_MAX_ADJUST_PERCENT,
+    tempoGlideEnabled: DSP_TEMPO_GLIDE_ENABLED,
+    tempoGlideSegments: DSP_TEMPO_GLIDE_SEGMENTS,
+    tempoGlideAnchorSeconds: DSP_TEMPO_GLIDE_ANCHOR_SECONDS,
+    aggressiveJoinEnabled: DSP_AGGRESSIVE_JOIN_ENABLED,
+    joinIntensity: DSP_JOIN_INTENSITY,
+    trimSilenceEnabled: DSP_TRIM_SILENCE_ENABLED,
+    trimSilenceDb: DSP_TRIM_SILENCE_THRESHOLD_DB,
+    trimMaxSeconds: DSP_TRIM_MAX_SECONDS,
+    noGapGuardEnabled: DSP_NO_GAP_GUARD_ENABLED,
+    trimGuardThresholdBoostDb: DSP_TRIM_GUARD_THRESHOLD_BOOST_DB,
+    noGapEnergyTrimEnabled: DSP_NO_GAP_ENERGY_TRIM_ENABLED,
+    noGapEnergyFloorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+    pending: dspQueue.length,
+    processing,
+    ready,
+    failed,
+    total: dspTransitions.size,
+  };
+}
+
+function serializeDspTransition(item) {
+  if (!item || typeof item !== 'object') return null;
+  return {
+    id: item.id,
+    fromFile: item.fromFile,
+    toFile: item.toFile,
+    status: item.status,
+    transitionSeconds: item.transitionSeconds,
+    sliceSeconds: item.sliceSeconds,
+    attempts: item.attempts || 0,
+    error: item.error || null,
+    outputUrl: item.status === DSP_STATUS_READY ? buildDspTransitionOutputUrl(item.id) : null,
+    outputFileName: item.status === DSP_STATUS_READY ? item.outputFileName : null,
+    outputSizeBytes: Number.isFinite(item.outputSizeBytes) ? item.outputSizeBytes : null,
+    sourceMtimeMs: Number.isFinite(item.sourceMtimeMs) ? item.sourceMtimeMs : null,
+    tempoAlignment:
+      item.tempoAlignment && typeof item.tempoAlignment === 'object'
+        ? {
+            enabled: Boolean(item.tempoAlignment.enabled),
+            applied: Boolean(item.tempoAlignment.applied),
+            ratio: Number.isFinite(item.tempoAlignment.ratio) ? item.tempoAlignment.ratio : null,
+            fromBpm: Number.isFinite(item.tempoAlignment.fromBpm) ? item.tempoAlignment.fromBpm : null,
+            toBpm: Number.isFinite(item.tempoAlignment.toBpm) ? item.tempoAlignment.toBpm : null,
+            fromSource: typeof item.tempoAlignment.fromSource === 'string' ? item.tempoAlignment.fromSource : null,
+            toSource: typeof item.tempoAlignment.toSource === 'string' ? item.tempoAlignment.toSource : null,
+            glideEnabled: Boolean(item.tempoAlignment.glideEnabled),
+            glideApplied: Boolean(item.tempoAlignment.glideApplied),
+            glideSegments: Number.isFinite(item.tempoAlignment.glideSegments)
+              ? item.tempoAlignment.glideSegments
+              : null,
+            glideStartRatio: Number.isFinite(item.tempoAlignment.glideStartRatio)
+              ? item.tempoAlignment.glideStartRatio
+              : null,
+            glideEndRatio: Number.isFinite(item.tempoAlignment.glideEndRatio)
+              ? item.tempoAlignment.glideEndRatio
+              : null,
+            reason: typeof item.tempoAlignment.reason === 'string' ? item.tempoAlignment.reason : null,
+          }
+        : null,
+    aggressiveJoin:
+      item.aggressiveJoin && typeof item.aggressiveJoin === 'object'
+        ? {
+            enabled: Boolean(item.aggressiveJoin.enabled),
+            applied: Boolean(item.aggressiveJoin.applied),
+            intensity: Number.isFinite(item.aggressiveJoin.intensity) ? item.aggressiveJoin.intensity : null,
+            effectiveTransitionSeconds: Number.isFinite(item.aggressiveJoin.effectiveTransitionSeconds)
+              ? item.aggressiveJoin.effectiveTransitionSeconds
+              : null,
+            sourceTailTrimSeconds: Number.isFinite(item.aggressiveJoin.sourceTailTrimSeconds)
+              ? item.aggressiveJoin.sourceTailTrimSeconds
+              : null,
+            targetHeadTrimSeconds: Number.isFinite(item.aggressiveJoin.targetHeadTrimSeconds)
+              ? item.aggressiveJoin.targetHeadTrimSeconds
+              : null,
+            sourceTrimSource: typeof item.aggressiveJoin.sourceTrimSource === 'string'
+              ? item.aggressiveJoin.sourceTrimSource
+              : null,
+            targetTrimSource: typeof item.aggressiveJoin.targetTrimSource === 'string'
+              ? item.aggressiveJoin.targetTrimSource
+              : null,
+            sourceRawTailSilenceSeconds: Number.isFinite(item.aggressiveJoin.sourceRawTailSilenceSeconds)
+              ? item.aggressiveJoin.sourceRawTailSilenceSeconds
+              : null,
+            targetRawHeadSilenceSeconds: Number.isFinite(item.aggressiveJoin.targetRawHeadSilenceSeconds)
+              ? item.aggressiveJoin.targetRawHeadSilenceSeconds
+              : null,
+            curveOut: typeof item.aggressiveJoin.curveOut === 'string' ? item.aggressiveJoin.curveOut : null,
+            curveIn: typeof item.aggressiveJoin.curveIn === 'string' ? item.aggressiveJoin.curveIn : null,
+            noGapGuardEnabled: Boolean(item.aggressiveJoin.noGapGuardEnabled),
+            noGapGuardApplied: Boolean(item.aggressiveJoin.noGapGuardApplied),
+            guardThresholdDb: Number.isFinite(item.aggressiveJoin.guardThresholdDb)
+              ? item.aggressiveJoin.guardThresholdDb
+              : null,
+            noGapEnergyTrimEnabled: Boolean(item.aggressiveJoin.noGapEnergyTrimEnabled),
+            noGapEnergyTrimApplied: Boolean(item.aggressiveJoin.noGapEnergyTrimApplied),
+            energyFloorRatio: Number.isFinite(item.aggressiveJoin.energyFloorRatio)
+              ? item.aggressiveJoin.energyFloorRatio
+              : null,
+            reason: typeof item.aggressiveJoin.reason === 'string' ? item.aggressiveJoin.reason : null,
+          }
+        : null,
+    createdAt: Number.isFinite(item.createdAt) ? item.createdAt : null,
+    updatedAt: Number.isFinite(item.updatedAt) ? item.updatedAt : null,
+    lastRequestedAt: Number.isFinite(item.lastRequestedAt) ? item.lastRequestedAt : null,
+  };
+}
+
+function trimDspHistory() {
+  if (dspTransitions.size <= DSP_HISTORY_LIMIT) return;
+
+  const candidates = Array.from(dspTransitions.values())
+    .filter((item) => item && !item.inQueue && item.status !== DSP_STATUS_PROCESSING)
+    .sort((left, right) => {
+      const leftUpdated = Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
+      const rightUpdated = Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
+      return leftUpdated - rightUpdated;
+    });
+
+  while (dspTransitions.size > DSP_HISTORY_LIMIT && candidates.length > 0) {
+    const victim = candidates.shift();
+    if (!victim || !victim.id) continue;
+    dspTransitions.delete(victim.id);
+  }
+}
+
+function queueDspTransition(item, priority = 'normal') {
+  if (!item || typeof item !== 'object') return false;
+  if (item.status === DSP_STATUS_PROCESSING || item.inQueue) return false;
+  if (dspQueue.length >= DSP_MAX_QUEUE_LENGTH) return false;
+
+  item.status = DSP_STATUS_QUEUED;
+  item.inQueue = true;
+  item.updatedAt = Date.now();
+
+  if (priority === 'high') {
+    dspQueue.unshift(item);
+  } else {
+    dspQueue.push(item);
+  }
+  return true;
+}
+
+function toDspErrorMessage(err, fallback) {
+  const fromStderrLines =
+    err && typeof err.stderr === 'string' ? err.stderr.trim().split(/\r?\n/).filter(Boolean) : [];
+  const fromStderr = fromStderrLines.length ? fromStderrLines[fromStderrLines.length - 1] : '';
+  const fromMessage = err && typeof err.message === 'string' ? err.message.trim() : '';
+  const resolved = fromStderr || fromMessage || fallback || 'Unknown DSP error';
+  return resolved.slice(0, 400);
+}
+
+function markDspTransitionReady(item, outputStat, sourceMtimeMs) {
+  item.status = DSP_STATUS_READY;
+  item.inQueue = false;
+  item.error = null;
+  item.updatedAt = Date.now();
+  item.outputSizeBytes = outputStat && Number.isFinite(outputStat.size) ? outputStat.size : null;
+  item.sourceMtimeMs = Number.isFinite(sourceMtimeMs) ? sourceMtimeMs : null;
+}
+
+function markDspTransitionFailed(item, errorMessage) {
+  item.status = DSP_STATUS_FAILED;
+  item.inQueue = false;
+  item.error = errorMessage || 'DSP transition failed';
+  item.updatedAt = Date.now();
+}
+
+async function ensureFfmpegAvailable() {
+  if (!DSP_ENABLED) {
+    dspProbeState.available = false;
+    dspProbeState.error = 'DSP disabled';
+    dspProbeState.checkedAt = Date.now();
+    return false;
+  }
+
+  const now = Date.now();
+  if (now - dspProbeState.checkedAt < DSP_PROBE_CACHE_MS && dspProbeState.available !== null) {
+    return dspProbeState.available;
+  }
+
+  const previousAvailable = dspProbeState.available;
+  const previousError = dspProbeState.error;
+
+  try {
+    await execFileAsync(DSP_FFMPEG_BINARY, ['-version'], {
+      windowsHide: true,
+      timeout: 5000,
+      maxBuffer: 512 * 1024,
+    });
+    dspProbeState.checkedAt = now;
+    dspProbeState.available = true;
+    dspProbeState.error = null;
+    if (previousAvailable !== true || previousError) {
+      appendDspLog('ffmpeg.ready', {
+        binary: DSP_FFMPEG_BINARY,
+      });
+    }
+    return true;
+  } catch (err) {
+    dspProbeState.checkedAt = now;
+    dspProbeState.available = false;
+    dspProbeState.error = toDspErrorMessage(err, `Не удалось запустить ${DSP_FFMPEG_BINARY}.`);
+    if (previousAvailable !== false || previousError !== dspProbeState.error) {
+      appendDspLog('ffmpeg.error', {
+        binary: DSP_FFMPEG_BINARY,
+        error: dspProbeState.error,
+      });
+    }
+    return false;
+  }
+}
+
+async function processDspTransition(item) {
+  if (!item || typeof item !== 'object') return;
+  const startedAt = Date.now();
+
+  item.inQueue = false;
+  item.status = DSP_STATUS_PROCESSING;
+  item.updatedAt = Date.now();
+  item.attempts = (item.attempts || 0) + 1;
+  appendDspLog('transition.start', {
+    id: item.id,
+    from: item.fromFile,
+    to: item.toFile,
+    source: item.source || 'unknown',
+    attempt: item.attempts,
+  });
+
+  let fromStat;
+  let toStat;
+  try {
+    [fromStat, toStat] = await Promise.all([
+      fs.promises.stat(item.fromAbsolutePath),
+      fs.promises.stat(item.toAbsolutePath),
+    ]);
+  } catch (err) {
+    markDspTransitionFailed(item, 'Один из исходных треков не найден на диске.');
+    appendDspLog('transition.failed', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      error: item.error,
+    });
+    return;
+  }
+
+  if (!fromStat.isFile() || !toStat.isFile()) {
+    markDspTransitionFailed(item, 'Один из исходных треков недоступен.');
+    appendDspLog('transition.failed', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      error: item.error,
+    });
+    return;
+  }
+
+  const sourceMtimeMs = Math.max(fromStat.mtimeMs, toStat.mtimeMs);
+  try {
+    const outputStat = await fs.promises.stat(item.outputPath);
+    if (outputStat.isFile() && outputStat.size > 0 && outputStat.mtimeMs >= sourceMtimeMs) {
+      markDspTransitionReady(item, outputStat, sourceMtimeMs);
+      appendDspLog('transition.ready', {
+        id: item.id,
+        from: item.fromFile,
+        to: item.toFile,
+        source: item.source || 'unknown',
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: true,
+        outputSizeBytes: outputStat.size,
+        tempoAlignment: item.tempoAlignment || null,
+        aggressiveJoin: item.aggressiveJoin || null,
+      });
+      return;
+    }
+  } catch (err) {
+    // cache miss
+  }
+
+  const ffmpegAvailable = await ensureFfmpegAvailable();
+  if (!ffmpegAvailable) {
+    markDspTransitionFailed(item, dspProbeState.error || 'ffmpeg недоступен.');
+    appendDspLog('transition.failed', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      error: item.error,
+    });
+    return;
+  }
+
+  try {
+    await fs.promises.mkdir(DSP_TRANSITIONS_DIR, { recursive: true });
+  } catch (err) {
+    markDspTransitionFailed(item, 'Не удалось создать каталог DSP-кэша.');
+    appendDspLog('transition.failed', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      error: item.error,
+    });
+    return;
+  }
+
+  const tempoAlignment = {
+    enabled: DSP_TEMPO_ALIGN_ENABLED,
+    applied: false,
+    ratio: 1,
+    fromBpm: null,
+    toBpm: null,
+    fromSource: null,
+    toSource: null,
+    glideEnabled: DSP_TEMPO_GLIDE_ENABLED,
+    glideApplied: false,
+    glideSegments: null,
+    glideStartRatio: null,
+    glideEndRatio: 1,
+    reason: DSP_TEMPO_ALIGN_ENABLED ? 'pending' : 'disabled',
+  };
+
+  if (DSP_TEMPO_ALIGN_ENABLED) {
+    try {
+      const [fromTempoInfo, toTempoInfo] = await Promise.all([
+        detectTrackTempoBpm(item.fromFile, item.fromAbsolutePath, fromStat),
+        detectTrackTempoBpm(item.toFile, item.toAbsolutePath, toStat),
+      ]);
+
+      if (fromTempoInfo && Number.isFinite(fromTempoInfo.bpm)) {
+        tempoAlignment.fromBpm = fromTempoInfo.bpm;
+        tempoAlignment.fromSource = fromTempoInfo.source || null;
+      }
+      if (toTempoInfo && Number.isFinite(toTempoInfo.bpm)) {
+        tempoAlignment.toBpm = toTempoInfo.bpm;
+        tempoAlignment.toSource = toTempoInfo.source || null;
+      }
+
+      if (!tempoAlignment.fromBpm && !tempoAlignment.toBpm) {
+        tempoAlignment.reason = 'missing-bpm-both';
+      } else if (!tempoAlignment.fromBpm) {
+        tempoAlignment.reason = 'missing-from-bpm';
+      } else if (!tempoAlignment.toBpm) {
+        tempoAlignment.reason = 'missing-to-bpm';
+      } else {
+        const rawRatio = tempoAlignment.fromBpm / tempoAlignment.toBpm;
+        if (!Number.isFinite(rawRatio) || rawRatio <= 0) {
+          tempoAlignment.reason = 'invalid-ratio';
+        } else {
+          const clampedRatio = Math.max(DSP_TEMPO_MIN_RATIO, Math.min(DSP_TEMPO_MAX_RATIO, rawRatio));
+          const normalizedRatio = Math.round(clampedRatio * 10000) / 10000;
+          tempoAlignment.ratio = normalizedRatio;
+
+          if (Math.abs(normalizedRatio - 1) >= DSP_TEMPO_MIN_DELTA_RATIO) {
+            tempoAlignment.applied = true;
+            tempoAlignment.reason = clampedRatio !== rawRatio ? 'applied-clamped' : 'applied';
+          } else {
+            tempoAlignment.reason = 'delta-too-small';
+          }
+        }
+      }
+    } catch (err) {
+      tempoAlignment.reason = 'analysis-error';
+    }
+  }
+
+  item.tempoAlignment = tempoAlignment;
+  const tempoRatio = tempoAlignment.applied && Number.isFinite(tempoAlignment.ratio) && tempoAlignment.ratio > 0
+    ? tempoAlignment.ratio
+    : 1;
+
+  const aggressiveJoin = {
+    enabled: DSP_AGGRESSIVE_JOIN_ENABLED,
+    applied: false,
+    intensity: DSP_JOIN_INTENSITY,
+    effectiveTransitionSeconds: item.transitionSeconds,
+    sourceTailTrimSeconds: 0,
+    targetHeadTrimSeconds: 0,
+    sourceTrimSource: 'disabled',
+    targetTrimSource: 'disabled',
+    sourceRawTailSilenceSeconds: 0,
+    targetRawHeadSilenceSeconds: 0,
+    curveOut: 'tri',
+    curveIn: 'tri',
+    noGapGuardEnabled: DSP_NO_GAP_GUARD_ENABLED,
+    noGapGuardApplied: false,
+    guardThresholdDb: null,
+    noGapEnergyTrimEnabled: DSP_NO_GAP_ENERGY_TRIM_ENABLED,
+    noGapEnergyTrimApplied: false,
+    energyFloorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+    reason: DSP_AGGRESSIVE_JOIN_ENABLED ? 'pending' : 'disabled',
+  };
+
+  let effectiveTransitionSeconds = item.transitionSeconds;
+  let sourceTailTrimSeconds = 0;
+  let targetHeadTrimSeconds = 0;
+  let sourceTrimSource = 'disabled';
+  let targetTrimSource = 'disabled';
+  let sourceRawTailSilenceSeconds = 0;
+  let targetRawHeadSilenceSeconds = 0;
+  let crossfadeCurveOut = 'tri';
+  let crossfadeCurveIn = 'tri';
+  let noGapGuardApplied = false;
+  let guardThresholdDb = null;
+  let noGapEnergyTrimApplied = false;
+
+  if (DSP_AGGRESSIVE_JOIN_ENABLED) {
+    const intensityFactor = 1 - DSP_JOIN_INTENSITY * 0.45;
+    const normalizedFactor = Math.max(0.35, Math.min(1, intensityFactor));
+    const minTransitionFloor = Math.min(DSP_JOIN_MIN_TRANSITION_SECONDS, item.transitionSeconds);
+    const scaledTransition = Math.round(item.transitionSeconds * normalizedFactor * 1000) / 1000;
+    effectiveTransitionSeconds = Math.max(
+      minTransitionFloor,
+      Math.min(item.transitionSeconds, scaledTransition),
+    );
+    // Keep crossfade energy stable to avoid perceived "holes" at the splice point.
+    crossfadeCurveOut = DSP_JOIN_INTENSITY >= 0.55 ? 'qsin' : 'tri';
+    crossfadeCurveIn = DSP_JOIN_INTENSITY >= 0.55 ? 'qsin' : 'tri';
+
+    if (DSP_TRIM_SILENCE_ENABLED) {
+      const minSliceOutSeconds = effectiveTransitionSeconds + 0.2;
+      const maxSourceTailTrimByLength = Math.max(0, item.sliceSeconds - minSliceOutSeconds);
+      const shortestTargetTempoRatio = tempoAlignment.applied
+        ? (DSP_TEMPO_GLIDE_ENABLED ? Math.max(1, tempoRatio) : tempoRatio)
+        : 1;
+      const minTargetInputSeconds = minSliceOutSeconds * shortestTargetTempoRatio;
+      const maxTargetHeadTrimByLength = Math.max(0, item.sliceSeconds - minTargetInputSeconds);
+
+      const [sourceTrimResult, targetTrimResult] = await Promise.all([
+        computeDspTrimSeconds({
+          trackFile: item.fromFile,
+          absolutePath: item.fromAbsolutePath,
+          trackStat: fromStat,
+          mode: 'tail',
+          sliceSeconds: item.sliceSeconds,
+          silenceThresholdDb: DSP_TRIM_SILENCE_THRESHOLD_DB,
+          minSilenceSeconds: DSP_TRIM_MIN_SILENCE_SECONDS,
+          maxTrimSeconds: DSP_TRIM_MAX_SECONDS,
+          maxAllowedTrimSeconds: maxSourceTailTrimByLength,
+        }),
+        computeDspTrimSeconds({
+          trackFile: item.toFile,
+          absolutePath: item.toAbsolutePath,
+          trackStat: toStat,
+          mode: 'head',
+          sliceSeconds: item.sliceSeconds,
+          silenceThresholdDb: DSP_TRIM_SILENCE_THRESHOLD_DB,
+          minSilenceSeconds: DSP_TRIM_MIN_SILENCE_SECONDS,
+          maxTrimSeconds: DSP_TRIM_MAX_SECONDS,
+          maxAllowedTrimSeconds: maxTargetHeadTrimByLength,
+        }),
+      ]);
+
+      sourceTailTrimSeconds = sourceTrimResult.trimSeconds;
+      targetHeadTrimSeconds = targetTrimResult.trimSeconds;
+      sourceTrimSource = sourceTrimResult.source;
+      targetTrimSource = targetTrimResult.source;
+      sourceRawTailSilenceSeconds = sourceTrimResult.rawSeconds;
+      targetRawHeadSilenceSeconds = targetTrimResult.rawSeconds;
+
+      if (DSP_NO_GAP_GUARD_ENABLED) {
+        // Guard pass: lift silence threshold and remove trim cap to avoid dead-air between beat anchors.
+        const boostedThresholdDb = Math.min(
+          -8,
+          DSP_TRIM_SILENCE_THRESHOLD_DB + DSP_TRIM_GUARD_THRESHOLD_BOOST_DB,
+        );
+        guardThresholdDb = Math.max(DSP_TRIM_SILENCE_THRESHOLD_DB, boostedThresholdDb);
+        const guardMinSilenceSeconds = Math.max(
+          0.03,
+          Math.min(DSP_TRIM_MIN_SILENCE_SECONDS, DSP_TRIM_MIN_SILENCE_SECONDS * 0.7),
+        );
+
+        const [sourceGuardTrimResult, targetGuardTrimResult] = await Promise.all([
+          computeDspTrimSeconds({
+            trackFile: item.fromFile,
+            absolutePath: item.fromAbsolutePath,
+            trackStat: fromStat,
+            mode: 'tail',
+            sliceSeconds: item.sliceSeconds,
+            silenceThresholdDb: guardThresholdDb,
+            minSilenceSeconds: guardMinSilenceSeconds,
+            maxTrimSeconds: maxSourceTailTrimByLength,
+            maxAllowedTrimSeconds: maxSourceTailTrimByLength,
+          }),
+          computeDspTrimSeconds({
+            trackFile: item.toFile,
+            absolutePath: item.toAbsolutePath,
+            trackStat: toStat,
+            mode: 'head',
+            sliceSeconds: item.sliceSeconds,
+            silenceThresholdDb: guardThresholdDb,
+            minSilenceSeconds: guardMinSilenceSeconds,
+            maxTrimSeconds: maxTargetHeadTrimByLength,
+            maxAllowedTrimSeconds: maxTargetHeadTrimByLength,
+          }),
+        ]);
+
+        if (sourceGuardTrimResult.trimSeconds > sourceTailTrimSeconds + 0.02) {
+          sourceTailTrimSeconds = sourceGuardTrimResult.trimSeconds;
+          sourceTrimSource = sourceGuardTrimResult.source ? `${sourceGuardTrimResult.source}+guard` : 'guard';
+          noGapGuardApplied = true;
+        }
+        if (targetGuardTrimResult.trimSeconds > targetHeadTrimSeconds + 0.02) {
+          targetHeadTrimSeconds = targetGuardTrimResult.trimSeconds;
+          targetTrimSource = targetGuardTrimResult.source ? `${targetGuardTrimResult.source}+guard` : 'guard';
+          noGapGuardApplied = true;
+        }
+
+        sourceRawTailSilenceSeconds = Math.max(sourceRawTailSilenceSeconds, sourceGuardTrimResult.rawSeconds);
+        targetRawHeadSilenceSeconds = Math.max(targetRawHeadSilenceSeconds, targetGuardTrimResult.rawSeconds);
+      }
+
+      if (DSP_NO_GAP_ENERGY_TRIM_ENABLED) {
+        const [sourceEnergyTrimResult, targetEnergyTrimResult] = await Promise.all([
+          computeDspEnergyTrimSeconds({
+            trackFile: item.fromFile,
+            absolutePath: item.fromAbsolutePath,
+            trackStat: fromStat,
+            mode: 'tail',
+            sliceSeconds: item.sliceSeconds,
+            sampleRate: DSP_NO_GAP_ENERGY_SAMPLE_RATE,
+            frameMs: DSP_NO_GAP_ENERGY_FRAME_MS,
+            floorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+            meanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
+            maxTrimSeconds: maxSourceTailTrimByLength,
+            maxAllowedTrimSeconds: maxSourceTailTrimByLength,
+          }),
+          computeDspEnergyTrimSeconds({
+            trackFile: item.toFile,
+            absolutePath: item.toAbsolutePath,
+            trackStat: toStat,
+            mode: 'head',
+            sliceSeconds: item.sliceSeconds,
+            sampleRate: DSP_NO_GAP_ENERGY_SAMPLE_RATE,
+            frameMs: DSP_NO_GAP_ENERGY_FRAME_MS,
+            floorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+            meanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
+            maxTrimSeconds: maxTargetHeadTrimByLength,
+            maxAllowedTrimSeconds: maxTargetHeadTrimByLength,
+          }),
+        ]);
+
+        if (sourceEnergyTrimResult.trimSeconds > sourceTailTrimSeconds + 0.02) {
+          sourceTailTrimSeconds = sourceEnergyTrimResult.trimSeconds;
+          sourceTrimSource = sourceEnergyTrimResult.source
+            ? `${sourceEnergyTrimResult.source}+energy`
+            : 'energy';
+          noGapEnergyTrimApplied = true;
+        }
+        if (targetEnergyTrimResult.trimSeconds > targetHeadTrimSeconds + 0.02) {
+          targetHeadTrimSeconds = targetEnergyTrimResult.trimSeconds;
+          targetTrimSource = targetEnergyTrimResult.source
+            ? `${targetEnergyTrimResult.source}+energy`
+            : 'energy';
+          noGapEnergyTrimApplied = true;
+        }
+
+        sourceRawTailSilenceSeconds = Math.max(sourceRawTailSilenceSeconds, sourceEnergyTrimResult.rawSeconds);
+        targetRawHeadSilenceSeconds = Math.max(targetRawHeadSilenceSeconds, targetEnergyTrimResult.rawSeconds);
+      }
+
+      aggressiveJoin.reason = noGapEnergyTrimApplied
+        ? 'trim-energy-applied'
+        : noGapGuardApplied
+          ? 'trim-guard-applied'
+          : sourceTailTrimSeconds > 0 || targetHeadTrimSeconds > 0
+            ? 'trim-applied'
+            : 'trim-not-needed';
+    } else {
+      sourceTrimSource = 'trim-disabled';
+      targetTrimSource = 'trim-disabled';
+      aggressiveJoin.reason = 'trim-disabled';
+    }
+
+    aggressiveJoin.applied =
+      sourceTailTrimSeconds > 0 ||
+      targetHeadTrimSeconds > 0 ||
+      Math.abs(effectiveTransitionSeconds - item.transitionSeconds) >= 0.001 ||
+      crossfadeCurveOut !== 'tri' ||
+      crossfadeCurveIn !== 'tri';
+  }
+
+  aggressiveJoin.effectiveTransitionSeconds = effectiveTransitionSeconds;
+  aggressiveJoin.sourceTailTrimSeconds = sourceTailTrimSeconds;
+  aggressiveJoin.targetHeadTrimSeconds = targetHeadTrimSeconds;
+  aggressiveJoin.sourceTrimSource = sourceTrimSource;
+  aggressiveJoin.targetTrimSource = targetTrimSource;
+  aggressiveJoin.sourceRawTailSilenceSeconds = sourceRawTailSilenceSeconds;
+  aggressiveJoin.targetRawHeadSilenceSeconds = targetRawHeadSilenceSeconds;
+  aggressiveJoin.curveOut = crossfadeCurveOut;
+  aggressiveJoin.curveIn = crossfadeCurveIn;
+  aggressiveJoin.noGapGuardApplied = noGapGuardApplied;
+  aggressiveJoin.guardThresholdDb = guardThresholdDb;
+  aggressiveJoin.noGapEnergyTrimApplied = noGapEnergyTrimApplied;
+  item.aggressiveJoin = aggressiveJoin;
+
+  const tempOutputPath = `${item.outputPath}.${Date.now()}.tmp.${DSP_TRANSITION_OUTPUT_FORMAT}`;
+  const sourceTrimEndSeconds = Math.max(0.05, item.sliceSeconds - sourceTailTrimSeconds);
+  const targetTrimStartSeconds = Math.max(0, targetHeadTrimSeconds);
+  const sourceTrimEndText = formatFfmpegFilterNumber(sourceTrimEndSeconds);
+  const effectiveTransitionText = formatFfmpegFilterNumber(effectiveTransitionSeconds);
+  const targetTempoFilterDescriptor = buildTempoAlignedTargetFilter({
+    inputLabel: '1:a',
+    outputLabel: 'a1',
+    trimStartSeconds: targetTrimStartSeconds,
+    trimEndSeconds: item.sliceSeconds,
+    tempoRatio: tempoAlignment.applied ? tempoRatio : 1,
+  });
+
+  tempoAlignment.glideApplied = Boolean(tempoAlignment.applied && targetTempoFilterDescriptor.glideApplied);
+  tempoAlignment.glideSegments = tempoAlignment.glideApplied
+    ? targetTempoFilterDescriptor.glideSegments
+    : null;
+  tempoAlignment.glideStartRatio = tempoAlignment.applied
+    ? targetTempoFilterDescriptor.glideStartRatio
+    : null;
+  tempoAlignment.glideEndRatio = tempoAlignment.applied
+    ? targetTempoFilterDescriptor.glideEndRatio
+    : 1;
+  if (tempoAlignment.glideApplied) {
+    tempoAlignment.reason = tempoAlignment.reason === 'applied-clamped' ? 'applied-glide-clamped' : 'applied-glide';
+  }
+
+  const filter = [
+    `[0:a]atrim=start=0:end=${sourceTrimEndText},asetpts=PTS-STARTPTS[a0]`,
+    targetTempoFilterDescriptor.filter,
+    `[a0][a1]acrossfade=d=${effectiveTransitionText}:c1=${crossfadeCurveOut}:c2=${crossfadeCurveIn}`,
+  ].join(';');
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-sseof',
+    `-${item.sliceSeconds}`,
+    '-i',
+    item.fromAbsolutePath,
+    '-t',
+    `${item.sliceSeconds}`,
+    '-i',
+    item.toAbsolutePath,
+    '-filter_complex',
+    filter,
+    ...buildDspOutputEncodingArgs(),
+    tempOutputPath,
+  ];
+
+  try {
+    await execFileAsync(DSP_FFMPEG_BINARY, args, {
+      windowsHide: true,
+      timeout: DSP_JOB_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    await fs.promises.rename(tempOutputPath, item.outputPath);
+    const outputStat = await fs.promises.stat(item.outputPath);
+    if (!outputStat.isFile() || outputStat.size < 1) {
+      markDspTransitionFailed(item, 'DSP output file is empty.');
+      appendDspLog('transition.failed', {
+        id: item.id,
+        from: item.fromFile,
+        to: item.toFile,
+        source: item.source || 'unknown',
+        elapsedMs: Date.now() - startedAt,
+        error: item.error,
+      });
+      return;
+    }
+    markDspTransitionReady(item, outputStat, sourceMtimeMs);
+    appendDspLog('transition.ready', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      cacheHit: false,
+      outputSizeBytes: outputStat.size,
+      tempoAlignment: tempoAlignment,
+      aggressiveJoin: aggressiveJoin,
+    });
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tempOutputPath);
+    } catch (unlinkErr) {
+      // ignore cleanup failures
+    }
+    markDspTransitionFailed(item, toDspErrorMessage(err, 'Не удалось собрать DSP transition.'));
+    appendDspLog('transition.failed', {
+      id: item.id,
+      from: item.fromFile,
+      to: item.toFile,
+      source: item.source || 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      error: item.error,
+      tempoAlignment: tempoAlignment,
+      aggressiveJoin: aggressiveJoin,
+    });
+  }
+}
+
+async function processDspQueue() {
+  if (dspWorkerRunning) return;
+  dspWorkerRunning = true;
+
+  try {
+    while (dspQueue.length > 0) {
+      const next = dspQueue.shift();
+      if (!next || typeof next !== 'object') continue;
+      await processDspTransition(next);
+    }
+  } finally {
+    dspWorkerRunning = false;
+    dspWorkerScheduled = false;
+    trimDspHistory();
+    if (dspQueue.length > 0) {
+      scheduleDspWorker();
+    }
+  }
+}
+
+function scheduleDspWorker() {
+  if (!DSP_ENABLED) return;
+  if (dspWorkerScheduled || dspWorkerRunning) return;
+  dspWorkerScheduled = true;
+  setImmediate(() => {
+    processDspQueue().catch((err) => {
+      console.error('DSP queue worker failed', err);
+      dspWorkerRunning = false;
+      dspWorkerScheduled = false;
+    });
+  });
+}
+
+function enqueueDspTransition(fromFile, toFile, options = {}) {
+  const descriptor = buildDspTransitionDescriptor(fromFile, toFile, options);
+  if (descriptor.error) {
+    return {
+      ok: false,
+      created: false,
+      enqueued: false,
+      error: descriptor.error,
+      item: null,
+    };
+  }
+
+  const now = Date.now();
+  const existing = dspTransitions.get(descriptor.id);
+  const force = Boolean(options.force);
+  const priority = options.priority === 'high' ? 'high' : 'normal';
+  const sourceLabel = typeof options.source === 'string' && options.source ? options.source.slice(0, 64) : 'api';
+
+  if (existing) {
+    existing.lastRequestedAt = now;
+    existing.source = sourceLabel;
+
+    if (force && existing.status !== DSP_STATUS_PROCESSING) {
+      existing.error = null;
+      existing.status = DSP_STATUS_QUEUED;
+      const enqueued = queueDspTransition(existing, priority);
+      if (enqueued) {
+        scheduleDspWorker();
+      } else if (dspQueue.length >= DSP_MAX_QUEUE_LENGTH) {
+        markDspTransitionFailed(existing, 'DSP queue is full. Increase dsp_max_queue.');
+      }
+      appendDspLog('transition.enqueue', {
+        id: existing.id,
+        from: existing.fromFile,
+        to: existing.toFile,
+        source: existing.source || 'unknown',
+        created: false,
+        force,
+        priority,
+        enqueued,
+        status: existing.status,
+      });
+
+      return {
+        ok: true,
+        created: false,
+        enqueued,
+        error: enqueued ? null : existing.error || 'Не удалось поставить задачу в очередь.',
+        item: existing,
+      };
+    }
+
+    if (existing.status === DSP_STATUS_READY && !fs.existsSync(existing.outputPath)) {
+      const enqueued = queueDspTransition(existing, priority);
+      if (enqueued) scheduleDspWorker();
+      appendDspLog('transition.enqueue', {
+        id: existing.id,
+        from: existing.fromFile,
+        to: existing.toFile,
+        source: existing.source || 'unknown',
+        created: false,
+        force,
+        priority,
+        enqueued,
+        status: existing.status,
+      });
+      return {
+        ok: true,
+        created: false,
+        enqueued,
+        error: enqueued ? null : 'Не удалось восстановить задачу из кэша.',
+        item: existing,
+      };
+    }
+    appendDspLog('transition.enqueue', {
+      id: existing.id,
+      from: existing.fromFile,
+      to: existing.toFile,
+      source: existing.source || 'unknown',
+      created: false,
+      force,
+      priority,
+      enqueued: false,
+      status: existing.status,
+    });
+
+    return {
+      ok: true,
+      created: false,
+      enqueued: false,
+      error: null,
+      item: existing,
+    };
+  }
+
+  const item = {
+    id: descriptor.id,
+    fromFile: descriptor.fromFile,
+    toFile: descriptor.toFile,
+    fromAbsolutePath: descriptor.fromAbsolutePath,
+    toAbsolutePath: descriptor.toAbsolutePath,
+    transitionSeconds: descriptor.transitionSeconds,
+    sliceSeconds: descriptor.sliceSeconds,
+    outputFileName: descriptor.outputFileName,
+    outputPath: descriptor.outputPath,
+    status: DSP_STATUS_QUEUED,
+    inQueue: false,
+    attempts: 0,
+    error: null,
+    tempoAlignment: null,
+    aggressiveJoin: null,
+    outputSizeBytes: null,
+    sourceMtimeMs: null,
+    createdAt: now,
+    updatedAt: now,
+    lastRequestedAt: now,
+    source: sourceLabel,
+  };
+
+  dspTransitions.set(item.id, item);
+  const enqueued = queueDspTransition(item, priority);
+  if (enqueued) {
+    scheduleDspWorker();
+  } else if (dspQueue.length >= DSP_MAX_QUEUE_LENGTH) {
+    markDspTransitionFailed(item, 'DSP queue is full. Increase dsp_max_queue.');
+  }
+  appendDspLog('transition.enqueue', {
+    id: item.id,
+    from: item.fromFile,
+    to: item.toFile,
+    source: item.source || 'unknown',
+    created: true,
+    force,
+    priority,
+    enqueued,
+    status: item.status,
+  });
+  trimDspHistory();
+
+  return {
+    ok: true,
+    created: true,
+    enqueued,
+    error: enqueued ? null : item.error || 'Не удалось поставить задачу в очередь.',
+    item,
+  };
+}
+
+function collectAdjacentLayoutTransitions(layout, playlistDspFlags = null) {
+  if (!Array.isArray(layout)) return [];
+
+  const seen = new Set();
+  const transitions = [];
+
+  layout.forEach((playlist, playlistIndex) => {
+    if (Array.isArray(playlistDspFlags) && !Boolean(playlistDspFlags[playlistIndex])) return;
+    if (!Array.isArray(playlist) || playlist.length < 2) return;
+
+    for (let index = 0; index < playlist.length - 1; index += 1) {
+      const fromRaw = typeof playlist[index] === 'string' ? playlist[index].trim() : '';
+      const toRaw = typeof playlist[index + 1] === 'string' ? playlist[index + 1].trim() : '';
+      if (!fromRaw || !toRaw) continue;
+
+      const fromFile = normalizeAudioRelativePath(fromRaw);
+      const toFile = normalizeAudioRelativePath(toRaw);
+      if (!fromFile || !toFile) continue;
+
+      const dedupeKey = `${fromFile}\n${toFile}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      transitions.push({ fromFile, toFile });
+    }
+  });
+
+  return transitions;
+}
+
+function scheduleDspTransitionsFromLayout(layout, options = {}) {
+  const transitions = collectAdjacentLayoutTransitions(layout, options.playlistDspFlags);
+  if (!transitions.length) {
+    return { total: 0, accepted: 0, created: 0, enqueued: 0, failed: 0 };
+  }
+
+  let accepted = 0;
+  let created = 0;
+  let enqueued = 0;
+  let failed = 0;
+
+  transitions.forEach((entry) => {
+    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
+      transitionSeconds: options.transitionSeconds,
+      sliceSeconds: options.sliceSeconds,
+      force: Boolean(options.force),
+      source: options.source || 'layout',
+      priority: options.priority || 'normal',
+    });
+    if (!result.ok) {
+      failed += 1;
+      return;
+    }
+    accepted += 1;
+    if (result.created) created += 1;
+    if (result.enqueued) enqueued += 1;
+  });
+
+  return {
+    total: transitions.length,
+    accepted,
+    created,
+    enqueued,
+    failed,
+  };
+}
+
+function getDspTransitionByPair(fromFile, toFile, options = {}) {
+  const descriptor = buildDspTransitionDescriptor(fromFile, toFile, options);
+  if (descriptor.error) {
+    return { ok: false, error: descriptor.error, item: null, descriptor: null };
+  }
+
+  const existing = dspTransitions.get(descriptor.id);
+  if (!existing) {
+    return { ok: true, error: null, item: null, descriptor };
+  }
+
+  return { ok: true, error: null, item: existing, descriptor };
+}
+
+async function handleApiDspTransitionsGet(req, res, requestUrl) {
+  if (DSP_ENABLED) {
+    await ensureFfmpegAvailable();
+  }
+
+  const fromFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('from') : null;
+  const toFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('to') : null;
+  const limitRaw = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('limit') : null;
+  const limitParsed = Number.parseInt(limitRaw, 10);
+  const limit = Number.isInteger(limitParsed) ? Math.max(1, Math.min(limitParsed, 500)) : 100;
+
+  if ((fromFile && !toFile) || (!fromFile && toFile)) {
+    sendJson(res, 400, { error: 'Параметры from и to нужно передавать вместе.' });
+    return;
+  }
+
+  if (fromFile && toFile) {
+    const lookup = getDspTransitionByPair(fromFile, toFile, {});
+    if (!lookup.ok) {
+      sendJson(res, 400, { error: lookup.error || 'Некорректный запрос transition.' });
+      return;
+    }
+
+    let inferredReadyTransition = null;
+    if (!lookup.item && lookup.descriptor && fs.existsSync(lookup.descriptor.outputPath)) {
+      inferredReadyTransition = {
+        id: lookup.descriptor.id,
+        fromFile: lookup.descriptor.fromFile,
+        toFile: lookup.descriptor.toFile,
+        status: DSP_STATUS_READY,
+        transitionSeconds: lookup.descriptor.transitionSeconds,
+        sliceSeconds: lookup.descriptor.sliceSeconds,
+        attempts: 0,
+        error: null,
+        outputUrl: buildDspTransitionOutputUrl(lookup.descriptor.id),
+        outputFileName: lookup.descriptor.outputFileName,
+        outputSizeBytes: null,
+        sourceMtimeMs: null,
+        createdAt: null,
+        updatedAt: null,
+        lastRequestedAt: null,
+      };
+    }
+
+    const transition =
+      lookup.item ||
+      inferredReadyTransition ||
+      (lookup.descriptor
+        ? {
+            id: lookup.descriptor.id,
+            fromFile: lookup.descriptor.fromFile,
+            toFile: lookup.descriptor.toFile,
+            status: 'missing',
+            transitionSeconds: lookup.descriptor.transitionSeconds,
+            sliceSeconds: lookup.descriptor.sliceSeconds,
+            attempts: 0,
+            error: null,
+            outputUrl: null,
+            outputFileName: null,
+            outputSizeBytes: null,
+            sourceMtimeMs: null,
+            createdAt: null,
+            updatedAt: null,
+            lastRequestedAt: null,
+          }
+        : null);
+
+    sendJson(res, 200, {
+      transition: lookup.item ? serializeDspTransition(lookup.item) : transition,
+      queue: buildDspQueueSummary(),
+    });
+    return;
+  }
+
+  const transitions = Array.from(dspTransitions.values())
+    .sort((left, right) => {
+      const leftUpdated = Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
+      const rightUpdated = Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
+      return rightUpdated - leftUpdated;
+    })
+    .slice(0, limit)
+    .map((item) => serializeDspTransition(item))
+    .filter(Boolean);
+
+  sendJson(res, 200, {
+    transitions,
+    queue: buildDspQueueSummary(),
+  });
+}
+
+async function handleApiDspTransitionsPost(req, res) {
+  const auth = getAuthState(req);
+  if (!auth.isServer) {
+    sendJson(res, 403, { error: 'Только хост может запускать DSP-подготовку.' });
+    return;
+  }
+  if (!DSP_ENABLED) {
+    sendJson(res, 503, { error: 'DSP отключен в extra.conf (dsp_enabled=false).' });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req, DSP_BODY_LIMIT_BYTES);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const force = Boolean(body.force);
+  const transitionSeconds = body.transitionSeconds;
+  const sliceSeconds = body.sliceSeconds;
+  const priority = body.priority === 'high' ? 'high' : 'normal';
+  const sourceLabel = typeof body.source === 'string' && body.source.trim() ? body.source.trim().slice(0, 64) : 'api';
+  const requestTransitions = [];
+
+  if (typeof body.from === 'string' || typeof body.to === 'string') {
+    if (typeof body.from !== 'string' || typeof body.to !== 'string') {
+      sendJson(res, 400, { error: 'Для одиночного transition нужны оба поля: from и to.' });
+      return;
+    }
+    requestTransitions.push({ fromFile: body.from, toFile: body.to });
+  }
+
+  if (Array.isArray(body.transitions)) {
+    for (const entry of body.transitions) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (typeof entry.from !== 'string' || typeof entry.to !== 'string') continue;
+      requestTransitions.push({ fromFile: entry.from, toFile: entry.to });
+      if (requestTransitions.length >= 2000) break;
+    }
+  }
+
+  const includeLayout = Boolean(body.fromLayout) || requestTransitions.length === 0;
+  if (includeLayout) {
+    const layoutTransitions = collectAdjacentLayoutTransitions(sharedLayoutState.layout, sharedLayoutState.playlistDsp);
+    layoutTransitions.forEach((entry) => requestTransitions.push(entry));
+  }
+
+  if (!requestTransitions.length) {
+    sendJson(res, 400, { error: 'Не переданы transition-пары для обработки.' });
+    return;
+  }
+
+  const dedupe = new Set();
+  const accepted = [];
+  requestTransitions.forEach((entry) => {
+    const fromFile = typeof entry.fromFile === 'string' ? entry.fromFile.trim() : '';
+    const toFile = typeof entry.toFile === 'string' ? entry.toFile.trim() : '';
+    if (!fromFile || !toFile) return;
+    const key = `${fromFile}\n${toFile}`;
+    if (dedupe.has(key)) return;
+    dedupe.add(key);
+    accepted.push({ fromFile, toFile });
+  });
+
+  let created = 0;
+  let enqueued = 0;
+  let failed = 0;
+  const transitions = [];
+
+  accepted.forEach((entry) => {
+    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
+      force,
+      transitionSeconds,
+      sliceSeconds,
+      source: sourceLabel,
+      priority,
+    });
+    if (!result.ok || !result.item) {
+      failed += 1;
+      return;
+    }
+    if (result.created) created += 1;
+    if (result.enqueued) enqueued += 1;
+    transitions.push(serializeDspTransition(result.item));
+  });
+
+  sendJson(res, 200, {
+    request: {
+      totalPairs: requestTransitions.length,
+      uniquePairs: accepted.length,
+      force,
+      priority,
+      source: sourceLabel,
+      fromLayout: includeLayout,
+    },
+    summary: {
+      created,
+      enqueued,
+      failed,
+    },
+    queue: buildDspQueueSummary(),
+    transitions: transitions.slice(0, 200),
+  });
+  appendDspLog('transition.request', {
+    source: sourceLabel,
+    force,
+    priority,
+    fromLayout: includeLayout,
+    totalPairs: requestTransitions.length,
+    uniquePairs: accepted.length,
+    created,
+    enqueued,
+    failed,
+  });
+}
+
+function handleApiDspTransitionFile(req, res, pathname) {
+  const prefix = '/api/dsp/transitions/file/';
+  const id = pathname.startsWith(prefix) ? pathname.slice(prefix.length).trim() : '';
+  if (!/^[a-f0-9]{40}$/.test(id)) {
+    sendJson(res, 400, { error: 'Некорректный transition id' });
+    return;
+  }
+
+  const filePath = resolveDspTransitionOutputPathById(id);
+  if (!filePath) {
+    sendJson(res, 403, { error: 'Forbidden' });
+    return;
+  }
+
+  serveAudioWithRange(req, res, filePath, getContentType(filePath));
+}
+
 function serveFile(req, res, filePath, contentType) {
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) {
@@ -2041,6 +4606,8 @@ function handleApiConfig(req, res) {
     port: PORT,
     allowContextMenu: ALLOW_CONTEXT_MENU,
     volumePresets: serializeVolumePresetPercentValues(LIVE_VOLUME_PRESET_VALUES),
+    dspEntryCompensationMs: LIVE_DSP_ENTRY_COMPENSATION_MS,
+    dspExitCompensationMs: LIVE_DSP_EXIT_COMPENSATION_MS,
   };
 
   sendJson(res, 200, {
@@ -2097,6 +4664,15 @@ async function handleApiLayoutUpdate(req, res) {
   const nextPlaylistAutoplay = auth.isServer
     ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
     : normalizePlaylistAutoplayFlags(sharedLayoutState.playlistAutoplay, nextLayout.length);
+  const nextPlaylistDsp = auth.isServer
+    ? normalizePlaylistDspFlags(
+        body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
+          ? body.playlistDsp
+          : sharedLayoutState.playlistDsp,
+        nextPlaylistAutoplay,
+        nextLayout.length,
+      )
+    : normalizePlaylistDspFlags(sharedLayoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
   const nextTrackTitleModesByTrack = sanitizeTrackTitleModesByTrack(
     body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
       ? body.trackTitleModesByTrack
@@ -2109,6 +4685,7 @@ async function handleApiLayoutUpdate(req, res) {
     JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames) ||
     JSON.stringify(nextPlaylistMeta) !== JSON.stringify(sharedLayoutState.playlistMeta) ||
     JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay) ||
+    JSON.stringify(nextPlaylistDsp) !== JSON.stringify(sharedLayoutState.playlistDsp) ||
     JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(sharedLayoutState.trackTitleModesByTrack);
 
   if (hasChanged) {
@@ -2117,12 +4694,19 @@ async function handleApiLayoutUpdate(req, res) {
       playlistNames: nextPlaylistNames,
       playlistMeta: nextPlaylistMeta,
       playlistAutoplay: nextPlaylistAutoplay,
+      playlistDsp: nextPlaylistDsp,
       trackTitleModesByTrack: nextTrackTitleModesByTrack,
       version: sharedLayoutState.version + 1,
       updatedAt: Date.now(),
     };
     persistLayoutState(sharedLayoutState);
     broadcastLayoutUpdate(sourceClientId);
+    scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+      source: 'layout-update',
+      priority: 'normal',
+      force: false,
+      playlistDspFlags: sharedLayoutState.playlistDsp,
+    });
   }
 
   sendJson(res, 200, buildLayoutPayload(sourceClientId));
@@ -2682,6 +5266,32 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathname === '/api/dsp/transitions') {
+    if (req.method === 'GET') {
+      handleApiDspTransitionsGet(req, res, requestUrl);
+      return;
+    }
+
+    if (req.method === 'POST') {
+      handleApiDspTransitionsPost(req, res);
+      return;
+    }
+
+    res.writeHead(405);
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  if (pathname.startsWith('/api/dsp/transitions/file/')) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleApiDspTransitionFile(req, res, pathname);
+    return;
+  }
+
   if (pathname === '/api/config') {
     if (req.method !== 'GET') {
       res.writeHead(405);
@@ -2742,6 +5352,46 @@ const server = http.createServer((req, res) => {
 
   handlePublic(req, res, pathname);
 });
+
+if (DSP_ENABLED) {
+  loadDspTempoCache();
+  initializeDspLogFile();
+  appendDspLog('dsp.startup', {
+    enabled: DSP_ENABLED,
+    ffmpegBinary: DSP_FFMPEG_BINARY,
+    ffprobeBinary: DSP_FFPROBE_BINARY,
+    transitionOutputFormat: DSP_TRANSITION_OUTPUT_FORMAT,
+    transitionOutputCodec: DSP_TRANSITION_OUTPUT_CODEC,
+    transitionSeconds: DSP_DEFAULT_TRANSITION_SECONDS,
+    sliceSeconds: DSP_DEFAULT_SLICE_SECONDS,
+    queueLimit: DSP_MAX_QUEUE_LENGTH,
+    tempoAlignEnabled: DSP_TEMPO_ALIGN_ENABLED,
+    tempoMaxAdjustPercent: DSP_TEMPO_MAX_ADJUST_PERCENT,
+    tempoGlideEnabled: DSP_TEMPO_GLIDE_ENABLED,
+    tempoGlideSegments: DSP_TEMPO_GLIDE_SEGMENTS,
+    tempoGlideAnchorSeconds: DSP_TEMPO_GLIDE_ANCHOR_SECONDS,
+    aggressiveJoinEnabled: DSP_AGGRESSIVE_JOIN_ENABLED,
+    joinIntensity: DSP_JOIN_INTENSITY,
+    trimSilenceEnabled: DSP_TRIM_SILENCE_ENABLED,
+    trimSilenceDb: DSP_TRIM_SILENCE_THRESHOLD_DB,
+    trimMinSilenceSeconds: DSP_TRIM_MIN_SILENCE_SECONDS,
+    trimMaxSeconds: DSP_TRIM_MAX_SECONDS,
+    noGapGuardEnabled: DSP_NO_GAP_GUARD_ENABLED,
+    trimGuardThresholdBoostDb: DSP_TRIM_GUARD_THRESHOLD_BOOST_DB,
+    noGapEnergyTrimEnabled: DSP_NO_GAP_ENERGY_TRIM_ENABLED,
+    noGapEnergySampleRate: DSP_NO_GAP_ENERGY_SAMPLE_RATE,
+    noGapEnergyFrameMs: DSP_NO_GAP_ENERGY_FRAME_MS,
+    noGapEnergyFloorRatio: DSP_NO_GAP_ENERGY_FLOOR_RATIO,
+    noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
+    tempoCacheItems: dspTempoCache.size,
+  });
+  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+    source: 'startup',
+    priority: 'normal',
+    force: false,
+    playlistDspFlags: sharedLayoutState.playlistDsp,
+  });
+}
 
 server.listen(PORT, () => {
   console.log(`Server is running at http://localhost:${PORT}`);

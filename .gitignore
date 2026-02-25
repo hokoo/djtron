@@ -15,3 +15,10 @@ users/*
 
 # Local runtime config
 extra.conf
+
+# Local DSP cache
+.cache/
+
+# Local DSP runtime logs
+dsp.log
+dsp.log.prev
