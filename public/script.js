@@ -4170,6 +4170,7 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
     }
     syncHostNowPlayingPanel();
   }
+  syncPlaylistHeaderActiveState();
 
   return changed;
 }
@@ -4920,6 +4921,13 @@ function buildPlaylistCoverage(layoutState) {
 }
 
 function getLiveLockedPlaylistIndex() {
+  if (isHostRole() && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
+    const currentPlaylistIndex = normalizePlaylistTrackIndex(currentTrack.playlistIndex);
+    if (currentPlaylistIndex !== null) {
+      return currentPlaylistIndex;
+    }
+  }
+
   const hostPlaybackIndex =
     hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
       ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
@@ -4929,11 +4937,27 @@ function getLiveLockedPlaylistIndex() {
     return hostPlaybackIndex;
   }
 
-  if (isHostRole() && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
-    return normalizePlaylistTrackIndex(currentTrack.playlistIndex);
-  }
-
   return null;
+}
+
+function syncPlaylistHeaderActiveState() {
+  if (!zonesContainer) return;
+
+  const activePlaylistIndex = getLiveLockedPlaylistIndex();
+  const zones = zonesContainer.querySelectorAll('.zone');
+  zones.forEach((zone) => {
+    if (!(zone instanceof HTMLElement)) return;
+    const playlistIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return;
+
+    const deleteButton = zone.querySelector('.playlist-delete-btn');
+    const activeReel = zone.querySelector('.playlist-active-reel');
+    if (!(deleteButton instanceof HTMLElement) || !(activeReel instanceof HTMLElement)) return;
+
+    const isActive = activePlaylistIndex !== null && activePlaylistIndex === playlistIndex;
+    deleteButton.style.display = isActive ? 'none' : 'inline-flex';
+    activeReel.style.display = isActive ? 'inline-flex' : 'none';
+  });
 }
 
 function getPlaylistDeleteEligibility(playlistIndex) {
@@ -5127,7 +5151,7 @@ function renderZones() {
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'playlist-delete-btn';
-    deleteButton.textContent = 'Удалить';
+    deleteButton.setAttribute('aria-label', 'Удалить плей-лист');
     const deleteEligibility = getPlaylistDeleteEligibility(playlistIndex);
     deleteButton.title = deleteEligibility.canDelete
       ? 'Удалить плей-лист'
@@ -5141,7 +5165,13 @@ function renderZones() {
       deletePlaylist(playlistIndex);
     });
 
-    headerMeta.append(autoplayButton, count, deleteButton);
+    const activeReel = document.createElement('span');
+    activeReel.className = 'playlist-active-reel';
+    activeReel.title = 'Активный плей-лист';
+    activeReel.setAttribute('aria-hidden', 'true');
+    activeReel.style.display = 'none';
+
+    headerMeta.append(autoplayButton, count, deleteButton, activeReel);
     header.append(titleWrap, headerMeta);
 
     const body = document.createElement('div');
@@ -5166,6 +5196,7 @@ function renderZones() {
     zonesContainer.appendChild(zone);
   });
 
+  syncPlaylistHeaderActiveState();
   syncCurrentTrackState();
 }
 
@@ -5175,6 +5206,7 @@ function syncCurrentTrackState() {
     setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
     setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
   }
+  syncPlaylistHeaderActiveState();
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
 }
