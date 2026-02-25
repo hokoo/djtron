@@ -10,9 +10,11 @@ const showVolumePresetsToggle = document.getElementById('showVolumePresets');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const serverPanelEl = document.getElementById('serverPanel');
+const clientSessionPanelEl = document.getElementById('clientSessionPanel');
 const cohostPanelEl = document.getElementById('cohostPanel');
 const cohostUsersEl = document.getElementById('cohostUsers');
 const stopServerBtn = document.getElementById('stopServer');
+const clientLogoutBtn = document.getElementById('clientLogout');
 const serverActionsHintEl = document.querySelector('.server-actions__hint');
 const appVersionEl = document.getElementById('appVersion');
 const updateInfoEl = document.getElementById('updateInfo');
@@ -140,6 +142,8 @@ let cohostProgressRaf = null;
 let hostHighlightedDescriptor = '';
 let authUsersState = [];
 let cohostRoleUpdatesInFlight = new Set();
+let cohostDisconnectUpdatesInFlight = new Set();
+let authRecoveryInProgress = false;
 let touchHoldTimer = null;
 let touchHoldPointerId = null;
 let touchHoldStartX = 0;
@@ -1675,6 +1679,9 @@ function applyRoleUi(role) {
   if (serverPanelEl) {
     serverPanelEl.hidden = !isHost;
   }
+  if (clientSessionPanelEl) {
+    clientSessionPanelEl.hidden = isHost;
+  }
   if (cohostPanelEl) {
     cohostPanelEl.hidden = !isHost;
   }
@@ -1682,6 +1689,10 @@ function applyRoleUi(role) {
   if (stopServerBtn) {
     stopServerBtn.hidden = !isHost;
     stopServerBtn.disabled = !isHost;
+  }
+  if (clientLogoutBtn) {
+    clientLogoutBtn.hidden = isHost;
+    clientLogoutBtn.disabled = isHost;
   }
 
   if (serverActionsHintEl) {
@@ -1778,6 +1789,32 @@ async function ensureAuthorizedUser() {
   });
 }
 
+function recoverFromRemoteSessionTermination(message = 'Сессия завершена. Войдите снова.') {
+  if (authRecoveryInProgress) return;
+  authRecoveryInProgress = true;
+
+  clearLayoutStreamConnection();
+  stopHostProgressLoop();
+  stopCoHostProgressLoop();
+  stopAndClearLocalPlayback();
+  currentUser = null;
+  authUsersState = [];
+  applyRoleUi(ROLE_SLAVE);
+  setStatus(message);
+
+  ensureAuthorizedUser()
+    .then((authorized) => {
+      if (!authorized) return;
+      connectLayoutStream();
+    })
+    .catch((err) => {
+      console.error(err);
+    })
+    .finally(() => {
+      authRecoveryInProgress = false;
+    });
+}
+
 function normalizeAuthUsersPayload(payload) {
   const users = Array.isArray(payload && payload.users) ? payload.users : [];
   return users
@@ -1800,6 +1837,11 @@ function applyIncomingAuthUsers(payload, { syncOwnRole = true } = {}) {
   if (!syncOwnRole || !currentUser || isHostRole()) return;
 
   const selfEntry = authUsersState.find((entry) => entry.username === currentUser);
+  if (!selfEntry) {
+    recoverFromRemoteSessionTermination('Хост завершил вашу сессию. Войдите снова.');
+    return;
+  }
+
   const nextRole = selfEntry && selfEntry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
   if (nextRole === currentRole) return;
 
@@ -1826,8 +1868,14 @@ function renderCohostUsers() {
 
   const fragment = document.createDocumentFragment();
   authUsersState.forEach((entry) => {
+    const isRoleUpdatePending = cohostRoleUpdatesInFlight.has(entry.username);
+    const isDisconnectPending = cohostDisconnectUpdatesInFlight.has(entry.username);
+
     const row = document.createElement('div');
     row.className = 'cohost-user';
+    if (isDisconnectPending) {
+      row.classList.add('is-disconnect-pending');
+    }
 
     const identity = document.createElement('div');
     identity.className = 'cohost-user__identity';
@@ -1841,11 +1889,25 @@ function renderCohostUsers() {
     meta.textContent = entry.sessionCount > 1 ? `Сессий: ${entry.sessionCount}` : '1 сессия';
     identity.append(name, meta);
 
+    const actions = document.createElement('div');
+    actions.className = 'cohost-user__actions';
+
+    const disconnectBtn = document.createElement('button');
+    disconnectBtn.type = 'button';
+    disconnectBtn.className = 'cohost-disconnect-btn';
+    disconnectBtn.textContent = '⨯';
+    disconnectBtn.title = 'Отключить все сессии пользователя';
+    disconnectBtn.setAttribute('aria-label', `Отключить пользователя ${entry.username}`);
+    disconnectBtn.disabled = isRoleUpdatePending || isDisconnectPending;
+    disconnectBtn.addEventListener('click', () => {
+      disconnectClientSessions(entry.username);
+    });
+
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
     toggle.className = 'cohost-role-switch';
     toggle.checked = entry.role === ROLE_COHOST;
-    toggle.disabled = cohostRoleUpdatesInFlight.has(entry.username);
+    toggle.disabled = isRoleUpdatePending || isDisconnectPending;
     toggle.title = toggle.checked ? 'Снять роль co-host' : 'Назначить роль co-host';
     toggle.setAttribute('aria-label', `Роль co-host для ${entry.username}`);
     toggle.addEventListener('change', () => {
@@ -1853,7 +1915,8 @@ function renderCohostUsers() {
       updateCoHostRole(entry.username, nextRole, toggle);
     });
 
-    row.append(identity, toggle);
+    actions.append(disconnectBtn, toggle);
+    row.append(identity, actions);
     fragment.appendChild(row);
   });
 
@@ -1910,6 +1973,56 @@ async function updateCoHostRole(username, role, toggleInput = null) {
     setStatus(err && err.message ? err.message : 'Не удалось обновить роль co-host.');
   } finally {
     cohostRoleUpdatesInFlight.delete(normalizedUsername);
+    renderCohostUsers();
+  }
+}
+
+async function disconnectClientSessions(username) {
+  if (!isHostRole()) return;
+
+  const normalizedUsername = typeof username === 'string' ? username.trim() : '';
+  if (!normalizedUsername) return;
+
+  const confirmed = window.confirm(`Отключить ${normalizedUsername}? Будут завершены все его сессии.`);
+  if (!confirmed) {
+    setStatus('Отключение клиента отменено.');
+    return;
+  }
+
+  cohostDisconnectUpdatesInFlight.add(normalizedUsername);
+  renderCohostUsers();
+
+  try {
+    const response = await fetch('/api/auth/clients/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        username: normalizedUsername,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data && (data.error || data.message);
+      throw new Error(message || 'Не удалось отключить пользователя');
+    }
+
+    applyIncomingAuthUsers(data, { syncOwnRole: false });
+    const removedSessions =
+      data &&
+      data.disconnected &&
+      Number.isInteger(data.disconnected.removedSessions) &&
+      data.disconnected.removedSessions > 0
+        ? data.disconnected.removedSessions
+        : null;
+    setStatus(
+      removedSessions
+        ? `Пользователь ${normalizedUsername} отключен (${removedSessions} сесс.).`
+        : `Пользователь ${normalizedUsername} отключен.`,
+    );
+  } catch (err) {
+    setStatus(err && err.message ? err.message : 'Не удалось отключить пользователя.');
+  } finally {
+    cohostDisconnectUpdatesInFlight.delete(normalizedUsername);
     renderCohostUsers();
   }
 }
@@ -5377,11 +5490,66 @@ async function stopServer({ requireConfirmation = true } = {}) {
   }
 }
 
+async function logoutClient({ requireConfirmation = true } = {}) {
+  if (isHostRole()) return;
+  if (!clientLogoutBtn) return;
+
+  if (requireConfirmation) {
+    const confirmed = window.confirm('Отключиться от сервера? Понадобится повторный вход.');
+    if (!confirmed) {
+      setStatus('Отключение отменено.');
+      return;
+    }
+  }
+
+  clientLogoutBtn.disabled = true;
+  setStatus('Отключаемся...');
+
+  try {
+    const res = await fetch('/api/auth/logout', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const message = data && (data.error || data.message);
+      throw new Error(message || 'Не удалось отключиться');
+    }
+
+    clearLayoutStreamConnection();
+    stopHostProgressLoop();
+    stopCoHostProgressLoop();
+    stopAndClearLocalPlayback();
+
+    currentUser = null;
+    authUsersState = [];
+    applyRoleUi(ROLE_SLAVE);
+    setStatus('Вы отключены. Войдите снова.');
+
+    ensureAuthorizedUser()
+      .then((authorized) => {
+        if (!authorized) return;
+        connectLayoutStream();
+      })
+      .catch((err) => {
+        console.error(err);
+      });
+  } catch (err) {
+    console.error(err);
+    setStatus(err && err.message ? err.message : 'Не удалось отключиться.');
+    clientLogoutBtn.disabled = false;
+  }
+}
+
 function initServerControls() {
-  if (!stopServerBtn) return;
-  stopServerBtn.addEventListener('click', () => {
-    stopServer({ requireConfirmation: true });
-  });
+  if (stopServerBtn) {
+    stopServerBtn.addEventListener('click', () => {
+      stopServer({ requireConfirmation: true });
+    });
+  }
+
+  if (clientLogoutBtn) {
+    clientLogoutBtn.addEventListener('click', () => {
+      logoutClient({ requireConfirmation: true });
+    });
+  }
 }
 
 function initPlaylistControls() {

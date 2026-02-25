@@ -1066,6 +1066,37 @@ function setRoleForActiveUserSessions(username, role) {
   return { matchedSessions, changed };
 }
 
+function disconnectActiveUserSessions(username) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    return { removedSessions: 0 };
+  }
+
+  const now = Date.now();
+  let removedSessions = 0;
+  let hasInvalidEntries = false;
+
+  for (const [token, rawSession] of authSessions.entries()) {
+    const session = sanitizeSessionRecord(token, rawSession, now);
+    if (!session) {
+      authSessions.delete(token);
+      hasInvalidEntries = true;
+      continue;
+    }
+
+    if (session.username !== normalizedUsername) continue;
+    authSessions.delete(token);
+    removedSessions += 1;
+  }
+
+  if (removedSessions > 0 || hasInvalidEntries) {
+    persistSessions();
+    broadcastAuthUsersUpdate();
+  }
+
+  return { removedSessions };
+}
+
 function sanitizePlaybackCommand(rawCommand) {
   if (!rawCommand || typeof rawCommand !== 'object') return null;
 
@@ -2063,6 +2094,49 @@ async function handleAuthClientsRoleUpdate(req, res) {
   });
 }
 
+async function handleAuthClientsDisconnect(req, res) {
+  const auth = requireHostRequest(req, res);
+  if (!auth) return;
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    if (err.message === 'BODY_TOO_LARGE') {
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      return;
+    }
+
+    if (err.message === 'INVALID_JSON') {
+      sendJson(res, 400, { error: 'Неверный формат JSON' });
+      return;
+    }
+
+    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    return;
+  }
+
+  const username = normalizeUsername(body.username);
+  if (!username) {
+    sendJson(res, 400, { error: 'Некорректный логин пользователя' });
+    return;
+  }
+
+  const result = disconnectActiveUserSessions(username);
+  if (result.removedSessions < 1) {
+    sendJson(res, 404, { error: 'Пользователь не найден среди активных сессий' });
+    return;
+  }
+
+  sendJson(res, 200, {
+    users: collectActiveAuthUsers(),
+    disconnected: {
+      username,
+      removedSessions: result.removedSessions,
+    },
+  });
+}
+
 async function handleApiPlaybackCommand(req, res) {
   const auth = getAuthState(req);
   const canControlLivePlayback = Boolean(auth.isServer || auth.role === ROLE_COHOST);
@@ -2281,6 +2355,16 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleAuthClientsRoleUpdate(req, res);
+    return;
+  }
+
+  if (pathname === '/api/auth/clients/disconnect') {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleAuthClientsDisconnect(req, res);
     return;
   }
 
