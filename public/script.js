@@ -172,7 +172,7 @@ const zonesWheelTargets = new Map();
 let zonesWheelSmoothRaf = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
-const HOST_NOW_PLAYING_IDLE_TITLE = 'Хост: ничего не играет';
+const HOST_NOW_PLAYING_IDLE_TITLE = 'Live: ничего не играет';
 const clientId = getClientId();
 
 function clampVolume(value) {
@@ -1839,7 +1839,7 @@ function syncHostNowPlayingPanel() {
     return;
   }
 
-  hostNowPlayingTitleEl.textContent = `Хост: ${trackDisplayName(hostPlaybackState.trackFile)}`;
+  hostNowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostPlaybackState.trackFile)}`;
   hostNowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
   setHostNowPlayingReelActive(true, hostPlaybackState.paused);
 
