@@ -391,15 +391,15 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   box-shadow: none;
 }
 
-body[data-role='slave'] #nowPlayingControl.is-seeking {
+#nowPlayingControl.is-seeking {
   cursor: ew-resize;
 }
 
-body[data-role='slave'] #nowPlayingControl {
+#nowPlayingControl[data-live-seek-enabled='true'] {
   touch-action: none;
 }
 
-body[data-role='slave'] #nowPlayingControl.is-seeking .now-playing-control__progress {
+#nowPlayingControl.is-seeking .now-playing-control__progress {
   transition: none;
 }
 

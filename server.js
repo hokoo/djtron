@@ -177,6 +177,7 @@ function getDefaultPlaybackState() {
     duration: null,
     volume: DEFAULT_LIVE_VOLUME,
     showVolumePresets: false,
+    allowLiveSeek: false,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -370,6 +371,14 @@ function hasActiveVolumePreset(value) {
   return false;
 }
 
+function normalizePlaybackSeekRatio(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  if (numeric <= 0) return 0;
+  if (numeric >= 1) return 1;
+  return numeric;
+}
+
 function sanitizePlaybackState(rawPlayback) {
   if (!rawPlayback || typeof rawPlayback !== 'object') {
     return {
@@ -384,12 +393,14 @@ function sanitizePlaybackState(rawPlayback) {
   if (!showVolumePresets && hasActiveVolumePreset(volume)) {
     showVolumePresets = true;
   }
+  const allowLiveSeek = Boolean(rawPlayback.allowLiveSeek);
   const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
   if (!trackFile) {
     return {
       ...getDefaultPlaybackState(),
       volume,
       showVolumePresets,
+      allowLiveSeek,
       updatedAt: Date.now(),
     };
   }
@@ -410,6 +421,7 @@ function sanitizePlaybackState(rawPlayback) {
     duration,
     volume,
     showVolumePresets,
+    allowLiveSeek,
     playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
     updatedAt: Date.now(),
@@ -488,6 +500,7 @@ function serializePlaybackState(state) {
     duration: Number.isFinite(state.duration) && state.duration > 0 ? state.duration : null,
     volume: normalizeLiveVolumePreset(state.volume, DEFAULT_LIVE_VOLUME),
     showVolumePresets: Boolean(state.showVolumePresets),
+    allowLiveSeek: Boolean(state.allowLiveSeek),
     playlistIndex: normalizePlaylistTrackIndex(state.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(state.playlistPosition),
   });
@@ -514,6 +527,7 @@ function buildPlaybackPayload(sourceClientId = null) {
     duration: sharedPlaybackState.duration,
     volume: sharedPlaybackState.volume,
     showVolumePresets: Boolean(sharedPlaybackState.showVolumePresets),
+    allowLiveSeek: Boolean(sharedPlaybackState.allowLiveSeek),
     playlistIndex: sharedPlaybackState.playlistIndex,
     playlistPosition: sharedPlaybackState.playlistPosition,
     updatedAt: sharedPlaybackState.updatedAt,
@@ -1115,6 +1129,23 @@ function sanitizePlaybackCommand(rawCommand) {
     return {
       type: 'set-volume-presets-visible',
       showVolumePresets: Boolean(rawCommand.showVolumePresets),
+    };
+  }
+
+  if (commandType === 'set-live-seek-enabled') {
+    return {
+      type: 'set-live-seek-enabled',
+      allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
+    };
+  }
+
+  if (commandType === 'seek-current') {
+    const positionRatio = normalizePlaybackSeekRatio(rawCommand.positionRatio);
+    if (positionRatio === null) return null;
+    return {
+      type: 'seek-current',
+      positionRatio,
+      finalize: Boolean(rawCommand.finalize),
     };
   }
 
@@ -2166,6 +2197,11 @@ async function handleApiPlaybackCommand(req, res) {
   const command = sanitizePlaybackCommand(body);
   if (!command) {
     sendJson(res, 400, { error: 'Некорректная команда воспроизведения' });
+    return;
+  }
+
+  if (command.type === 'set-live-seek-enabled' && !auth.isServer) {
+    sendJson(res, 403, { error: 'Только хост может менять настройку live seek' });
     return;
   }
 

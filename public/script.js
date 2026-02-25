@@ -7,6 +7,8 @@ const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
 const stopFadeInput = document.getElementById('stopFadeTime');
 const showVolumePresetsToggle = document.getElementById('showVolumePresets');
+const liveSeekEnabledToggle = document.getElementById('liveSeekEnabled');
+const liveSeekToggleRow = liveSeekEnabledToggle ? liveSeekEnabledToggle.closest('.settings-toggle-row') : null;
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const serverPanelEl = document.getElementById('serverPanel');
@@ -53,6 +55,7 @@ const SETTINGS_KEYS = {
   sidebarOpen: 'player:sidebarOpen',
   allowPrerelease: 'player:allowPrerelease',
   showVolumePresets: 'player:showVolumePresets',
+  liveSeekEnabled: 'player:liveSeekEnabled',
   trackTitleModesByTrack: 'player:trackTitleModesByTrack',
 };
 const LAYOUT_STORAGE_KEY = 'player:playlists';
@@ -73,6 +76,8 @@ const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
 const NOW_PLAYING_REEL_BASE_SPIN_SECONDS = 1.8;
 const NOW_PLAYING_REEL_FAST_SPIN_SECONDS = 0.24;
 const NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC = 1600;
+const COHOST_SEEK_COMMAND_INTERVAL_MS = 40;
+const HOST_LIVE_SEEK_SYNC_INTERVAL_MS = 40;
 const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
 const ZONES_PAN_TOUCH_GAIN = 2.4;
 const ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS = 0.16;
@@ -91,6 +96,8 @@ const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
 const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
 const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
 const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible';
+const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
+const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
 const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
 const DEFAULT_LIVE_VOLUME = 1;
 
@@ -128,6 +135,7 @@ let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
 let showVolumePresetsEnabled = false;
+let liveSeekEnabled = false;
 let livePlaybackVolume = DEFAULT_LIVE_VOLUME;
 let layoutVersion = 0;
 let layoutStream = null;
@@ -137,6 +145,7 @@ let hostPlaybackSyncInFlight = false;
 let hostPlaybackSyncQueued = false;
 let hostPlaybackSyncQueuedForce = false;
 let lastHostPlaybackSyncAt = 0;
+let lastHostLiveSeekSyncAt = 0;
 let hostProgressRaf = null;
 let cohostProgressRaf = null;
 let hostHighlightedDescriptor = '';
@@ -172,6 +181,11 @@ let nowPlayingSeekSuppressClickUntil = 0;
 let nowPlayingSeekLastX = 0;
 let nowPlayingSeekLastAt = 0;
 let nowPlayingSeekSmoothedSpeed = 0;
+let cohostSeekCommandTimer = null;
+let cohostSeekCommandInFlight = false;
+let cohostSeekPendingRatio = null;
+let cohostSeekPendingFinalize = false;
+let cohostSeekLastSentAt = 0;
 let zonesPanActive = false;
 let zonesPanMoved = false;
 let zonesPanPointerId = null;
@@ -256,6 +270,14 @@ function canDisableVolumePresetsSetting(volume = livePlaybackVolume) {
   return getActiveVolumePresetValue(volume) === null;
 }
 
+function normalizePlaybackSeekRatio(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  if (numeric <= 0) return 0;
+  if (numeric >= 1) return 1;
+  return numeric;
+}
+
 function applyLiveVolumeToCurrentAudio() {
   if (!currentAudio) return;
   currentAudio.volume = clampVolume(livePlaybackVolume);
@@ -312,6 +334,58 @@ function setShowVolumePresetsEnabled(
 
   if (announce) {
     setStatus(normalized ? 'Пресеты громкости включены.' : 'Пресеты громкости выключены.');
+  }
+
+  return changed;
+}
+
+function updateLiveSeekUi() {
+  const isHost = isHostRole();
+  if (liveSeekToggleRow) {
+    liveSeekToggleRow.style.display = isHost ? 'flex' : 'none';
+  }
+
+  if (liveSeekEnabledToggle) {
+    liveSeekEnabledToggle.checked = liveSeekEnabled;
+    liveSeekEnabledToggle.disabled = !isHost;
+  }
+
+  if (nowPlayingControlBtn) {
+    const canTouchSeek =
+      isSlaveRole() ||
+      ((isHostRole() || isCoHostRole()) && liveSeekEnabled);
+    nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
+  }
+}
+
+function setLiveSeekEnabled(
+  enabled,
+  { persist = false, sync = false, announce = false } = {},
+) {
+  const normalized = Boolean(enabled);
+  const changed = normalized !== liveSeekEnabled;
+  liveSeekEnabled = normalized;
+
+  if (!normalized && nowPlayingSeekActive) {
+    cleanupNowPlayingSeekInteraction();
+  }
+
+  if (!normalized) {
+    clearQueuedCoHostSeekCommands();
+  }
+
+  if (persist) {
+    saveSetting(SETTINGS_KEYS.liveSeekEnabled, normalized ? 'true' : 'false');
+  }
+
+  updateLiveSeekUi();
+
+  if (sync && changed && isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
+
+  if (announce) {
+    setStatus(normalized ? 'Live seek включен.' : 'Live seek выключен.');
   }
 
   return changed;
@@ -1501,6 +1575,7 @@ function getDefaultHostPlaybackState() {
     duration: null,
     volume: DEFAULT_LIVE_VOLUME,
     showVolumePresets: false,
+    allowLiveSeek: false,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -1674,6 +1749,7 @@ function applyRoleUi(role) {
 
   if (!isCoHost) {
     stopCoHostProgressLoop();
+    clearQueuedCoHostSeekCommands();
   }
 
   if (serverPanelEl) {
@@ -1714,6 +1790,7 @@ function applyRoleUi(role) {
 
   renderCohostUsers();
   updateVolumePresetsUi();
+  updateLiveSeekUi();
 }
 
 function updateCurrentUser(info) {
@@ -2124,6 +2201,7 @@ function sanitizeIncomingHostPlaybackState(rawState) {
     showVolumePresets = true;
   }
   base.showVolumePresets = showVolumePresets;
+  base.allowLiveSeek = Boolean(rawState.allowLiveSeek);
 
   const rawTrackFile = typeof rawState.trackFile === 'string' ? rawState.trackFile.trim() : '';
   if (!rawTrackFile) {
@@ -2150,6 +2228,7 @@ function sanitizeIncomingHostPlaybackState(rawState) {
     duration,
     volume: base.volume,
     showVolumePresets: base.showVolumePresets,
+    allowLiveSeek: base.allowLiveSeek,
     playlistIndex: normalizePlaylistTrackIndex(rawState.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(rawState.playlistPosition),
     updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
@@ -2166,6 +2245,7 @@ function serializeHostPlaybackState(state) {
     duration: normalized.duration,
     volume: normalized.volume,
     showVolumePresets: normalized.showVolumePresets,
+    allowLiveSeek: normalized.allowLiveSeek,
     playlistIndex: normalized.playlistIndex,
     playlistPosition: normalized.playlistPosition,
     updatedAt: normalized.updatedAt,
@@ -2575,11 +2655,39 @@ function getCurrentTrackDurationSeconds() {
   return getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
 }
 
+function getHostPlaybackDurationSeconds() {
+  const duration = Number(hostPlaybackState && hostPlaybackState.duration);
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  return duration;
+}
+
 function canSeekNowPlaying() {
-  if (!isSlaveRole()) return false;
-  if (!currentTrack || !currentAudio) return false;
-  const duration = getCurrentTrackDurationSeconds();
-  return Boolean(Number.isFinite(duration) && duration > 0);
+  if (isSlaveRole()) {
+    if (!currentTrack || !currentAudio) return false;
+    const duration = getCurrentTrackDurationSeconds();
+    return Boolean(Number.isFinite(duration) && duration > 0);
+  }
+
+  if (isHostRole()) {
+    if (!liveSeekEnabled) return false;
+    if (!currentTrack || !currentAudio) return false;
+    const duration = getCurrentTrackDurationSeconds();
+    return Boolean(Number.isFinite(duration) && duration > 0);
+  }
+
+  if (isCoHostRole()) {
+    if (!liveSeekEnabled) return false;
+    const hasHostTrack = Boolean(
+      hostPlaybackState &&
+        typeof hostPlaybackState.trackFile === 'string' &&
+        hostPlaybackState.trackFile.trim(),
+    );
+    if (!hasHostTrack) return false;
+    const duration = getHostPlaybackDurationSeconds();
+    return Boolean(Number.isFinite(duration) && duration > 0);
+  }
+
+  return false;
 }
 
 function resolveNowPlayingSeekRatioFromClientX(clientX) {
@@ -2633,10 +2741,27 @@ function updateNowPlayingReelScrubSpeed(clientX, timestampMs) {
   setNowPlayingReelScrubSpeed(nowPlayingSeekSmoothedSpeed);
 }
 
-function applyNowPlayingSeekFromClientX(clientX) {
-  if (!canSeekNowPlaying() || !currentTrack || !currentAudio) return false;
+function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
+  if (!canSeekNowPlaying()) return false;
   const ratio = resolveNowPlayingSeekRatioFromClientX(clientX);
   if (ratio === null) return false;
+
+  if (isCoHostRole()) {
+    const duration = getHostPlaybackDurationSeconds();
+    if (!Number.isFinite(duration) || duration <= 0) return false;
+    const nextTime = Math.max(0, Math.min(duration, ratio * duration));
+
+    hostPlaybackState = {
+      ...hostPlaybackState,
+      currentTime: nextTime,
+      updatedAt: Date.now(),
+    };
+    syncNowPlayingPanel();
+    queueCoHostSeekCurrentPlayback(ratio, { immediate: Boolean(finalize), finalize: Boolean(finalize) });
+    return true;
+  }
+
+  if (!currentTrack || !currentAudio) return false;
 
   const duration = getCurrentTrackDurationSeconds();
   if (!Number.isFinite(duration) || duration <= 0) return false;
@@ -2658,6 +2783,9 @@ function applyNowPlayingSeekFromClientX(clientX) {
 
   updateProgress(currentTrack.key, nextTime, duration);
   syncNowPlayingPanel();
+  if (isHostRole()) {
+    requestHostLiveSeekSync({ finalize: Boolean(finalize) });
+  }
   return true;
 }
 
@@ -2702,7 +2830,7 @@ function onNowPlayingSeekPointerMove(event) {
     event.clientX,
     Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now(),
   );
-  applyNowPlayingSeekFromClientX(event.clientX);
+  applyNowPlayingSeekFromClientX(event.clientX, { finalize: false });
 }
 
 function onNowPlayingSeekPointerUp(event) {
@@ -2710,12 +2838,12 @@ function onNowPlayingSeekPointerUp(event) {
 
   if (nowPlayingSeekMoved) {
     event.preventDefault();
-    applyNowPlayingSeekFromClientX(event.clientX);
+    applyNowPlayingSeekFromClientX(event.clientX, { finalize: true });
     nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
   } else if (
     event.pointerType === 'touch' &&
     !isNowPlayingToggleZone(event.clientX, event.clientY) &&
-    applyNowPlayingSeekFromClientX(event.clientX)
+    applyNowPlayingSeekFromClientX(event.clientX, { finalize: true })
   ) {
     // Touch tap outside the center toggle zone seeks immediately.
     nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
@@ -4014,6 +4142,7 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
   hostPlaybackState = normalizedState;
   setLivePlaybackVolume(normalizedState.volume, { sync: false, announce: false });
   setShowVolumePresetsEnabled(normalizedState.showVolumePresets, { persist: isHostRole(), sync: false });
+  setLiveSeekEnabled(normalizedState.allowLiveSeek, { persist: isHostRole(), sync: false });
 
   if (sync || changed) {
     if (isCoHostRole()) {
@@ -4034,6 +4163,7 @@ function buildLocalPlaybackSnapshot() {
       duration: null,
       volume: getEffectiveLiveVolume(),
       showVolumePresets: showVolumePresetsEnabled,
+      allowLiveSeek: liveSeekEnabled,
       playlistIndex: null,
       playlistPosition: null,
     };
@@ -4050,6 +4180,7 @@ function buildLocalPlaybackSnapshot() {
     duration: Number.isFinite(resolvedDuration) && resolvedDuration > 0 ? resolvedDuration : null,
     volume: getEffectiveLiveVolume(),
     showVolumePresets: showVolumePresetsEnabled,
+    allowLiveSeek: liveSeekEnabled,
     playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
   };
@@ -4111,6 +4242,28 @@ function normalizeIncomingPlaybackCommand(rawCommand) {
     return {
       type: PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE,
       showVolumePresets: Boolean(rawCommand.showVolumePresets),
+      sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+      sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+    };
+  }
+
+  if (type === PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED) {
+    return {
+      type: PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED,
+      allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
+      sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
+      sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
+    };
+  }
+
+  if (type === PLAYBACK_COMMAND_SEEK_CURRENT) {
+    const positionRatio = normalizePlaybackSeekRatio(rawCommand.positionRatio);
+    if (positionRatio === null) return null;
+
+    return {
+      type: PLAYBACK_COMMAND_SEEK_CURRENT,
+      positionRatio,
+      finalize: Boolean(rawCommand.finalize),
       sourceClientId: typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null,
       sourceUsername: typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null,
     };
@@ -4189,6 +4342,48 @@ async function executeIncomingPlaybackCommand(commandPayload) {
       return;
     }
 
+    if (command.type === PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED) {
+      setLiveSeekEnabled(command.allowLiveSeek, { persist: true, sync: true });
+      if (sourceTag) {
+        setStatus(`Live управление${sourceTag}: seek ${command.allowLiveSeek ? 'включен' : 'выключен'}.`);
+      }
+      return;
+    }
+
+    if (command.type === PLAYBACK_COMMAND_SEEK_CURRENT) {
+      if (!liveSeekEnabled || !currentTrack || !currentAudio) {
+        return;
+      }
+      const duration = getCurrentTrackDurationSeconds();
+      if (!Number.isFinite(duration) || duration <= 0) {
+        return;
+      }
+      const ratio = normalizePlaybackSeekRatio(command.positionRatio);
+      if (ratio === null) {
+        return;
+      }
+      const nextTime = Math.max(0, Math.min(duration, ratio * duration));
+
+      try {
+        if (typeof currentAudio.fastSeek === 'function') {
+          currentAudio.fastSeek(nextTime);
+        } else {
+          currentAudio.currentTime = nextTime;
+        }
+      } catch (err) {
+        try {
+          currentAudio.currentTime = nextTime;
+        } catch (fallbackErr) {
+          return;
+        }
+      }
+
+      updateProgress(currentTrack.key, nextTime, duration);
+      syncNowPlayingPanel();
+      requestHostLiveSeekSync({ finalize: Boolean(command.finalize) });
+      return;
+    }
+
     const button = getTrackButton(command.file, command.playlistIndex, command.playlistPosition, command.basePath);
     if (!button) {
       setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
@@ -4250,6 +4445,112 @@ async function requestCoHostSetVolumePresetsVisibility(showVolumePresets) {
     showVolumePresets: Boolean(showVolumePresets),
   });
   return true;
+}
+
+async function requestCoHostSetLiveSeekEnabled(allowLiveSeek) {
+  if (!isCoHostRole()) return false;
+  await sendLivePlaybackCommand({
+    type: PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED,
+    allowLiveSeek: Boolean(allowLiveSeek),
+  });
+  return true;
+}
+
+async function requestCoHostSeekCurrentPlayback(positionRatio, { finalize = false } = {}) {
+  if (!isCoHostRole()) return false;
+  const normalizedRatio = normalizePlaybackSeekRatio(positionRatio);
+  if (normalizedRatio === null) return false;
+  await sendLivePlaybackCommand({
+    type: PLAYBACK_COMMAND_SEEK_CURRENT,
+    positionRatio: normalizedRatio,
+    finalize: Boolean(finalize),
+  });
+  return true;
+}
+
+function scheduleCoHostSeekFlush(delayMs = 0) {
+  if (cohostSeekCommandTimer !== null) return;
+  cohostSeekCommandTimer = setTimeout(() => {
+    cohostSeekCommandTimer = null;
+    flushQueuedCoHostSeekCommands().catch(() => {});
+  }, Math.max(0, delayMs));
+}
+
+function clearQueuedCoHostSeekCommands() {
+  if (cohostSeekCommandTimer !== null) {
+    clearTimeout(cohostSeekCommandTimer);
+    cohostSeekCommandTimer = null;
+  }
+  cohostSeekPendingRatio = null;
+  cohostSeekPendingFinalize = false;
+  cohostSeekCommandInFlight = false;
+  cohostSeekLastSentAt = 0;
+}
+
+async function flushQueuedCoHostSeekCommands() {
+  if (!isCoHostRole()) {
+    clearQueuedCoHostSeekCommands();
+    return;
+  }
+  if (cohostSeekCommandInFlight) return;
+  if (cohostSeekPendingRatio === null) return;
+
+  const ratioToSend = cohostSeekPendingRatio;
+  const shouldFinalize = cohostSeekPendingFinalize;
+  cohostSeekPendingRatio = null;
+  cohostSeekPendingFinalize = false;
+  cohostSeekCommandInFlight = true;
+
+  try {
+    await requestCoHostSeekCurrentPlayback(ratioToSend, { finalize: shouldFinalize });
+    cohostSeekLastSentAt = Date.now();
+  } catch (err) {
+    console.error(err);
+  } finally {
+    cohostSeekCommandInFlight = false;
+
+    if (cohostSeekPendingRatio !== null && isCoHostRole()) {
+      const elapsed = Date.now() - cohostSeekLastSentAt;
+      const delay = cohostSeekPendingFinalize ? 0 : Math.max(0, COHOST_SEEK_COMMAND_INTERVAL_MS - elapsed);
+      scheduleCoHostSeekFlush(delay);
+    }
+  }
+}
+
+function queueCoHostSeekCurrentPlayback(positionRatio, { immediate = false, finalize = false } = {}) {
+  if (!isCoHostRole()) return false;
+  const normalizedRatio = normalizePlaybackSeekRatio(positionRatio);
+  if (normalizedRatio === null) return false;
+
+  cohostSeekPendingRatio = normalizedRatio;
+  cohostSeekPendingFinalize = cohostSeekPendingFinalize || Boolean(finalize);
+
+  if (immediate) {
+    if (cohostSeekCommandTimer !== null) {
+      clearTimeout(cohostSeekCommandTimer);
+      cohostSeekCommandTimer = null;
+    }
+    flushQueuedCoHostSeekCommands().catch(() => {});
+    return true;
+  }
+
+  if (cohostSeekCommandInFlight) return true;
+
+  const elapsed = Date.now() - cohostSeekLastSentAt;
+  const delay = Math.max(0, COHOST_SEEK_COMMAND_INTERVAL_MS - elapsed);
+  scheduleCoHostSeekFlush(delay);
+  return true;
+}
+
+function requestHostLiveSeekSync({ finalize = false } = {}) {
+  if (!isHostRole()) return;
+
+  const now = Date.now();
+  if (!finalize && now - lastHostLiveSeekSyncAt < HOST_LIVE_SEEK_SYNC_INTERVAL_MS) {
+    return;
+  }
+  lastHostLiveSeekSyncAt = now;
+  requestHostPlaybackSync(true);
 }
 
 function requestHostPlaybackSync(force = false) {
@@ -5651,10 +5952,39 @@ function initVolumePresetControls() {
   updateVolumePresetsUi();
 }
 
+function initLiveSeekControls() {
+  if (isHostRole()) {
+    setLiveSeekEnabled(loadBooleanSetting(SETTINGS_KEYS.liveSeekEnabled, false), {
+      persist: false,
+      sync: false,
+    });
+  } else {
+    setLiveSeekEnabled(false, { persist: false, sync: false });
+  }
+
+  if (liveSeekEnabledToggle) {
+    liveSeekEnabledToggle.checked = liveSeekEnabled;
+    liveSeekEnabledToggle.addEventListener('change', async () => {
+      const nextEnabled = Boolean(liveSeekEnabledToggle.checked);
+
+      if (!isHostRole()) {
+        setLiveSeekEnabled(hostPlaybackState.allowLiveSeek, { persist: false, sync: false });
+        setStatus('Только хост может менять настройку live seek.');
+        return;
+      }
+
+      setLiveSeekEnabled(nextEnabled, { persist: true, sync: true, announce: true });
+    });
+  }
+
+  updateLiveSeekUi();
+}
+
 function initNowPlayingControls() {
   if (!nowPlayingControlBtn) return;
   nowPlayingControlBtn.addEventListener('pointerdown', onNowPlayingControlPointerDown);
   nowPlayingControlBtn.addEventListener('click', onNowPlayingControlClick);
+  initLiveSeekControls();
   initVolumePresetControls();
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
@@ -5856,6 +6186,7 @@ async function bootstrap() {
     clearLayoutStreamConnection();
     stopHostProgressLoop();
     stopCoHostProgressLoop();
+    clearQueuedCoHostSeekCommands();
     cleanupNowPlayingSeekInteraction();
     stopZonesPanMomentum();
     stopZonesWheelSmoothScroll();
