@@ -593,6 +593,9 @@ function getDefaultPlaybackState() {
     volume: DEFAULT_LIVE_VOLUME,
     showVolumePresets: false,
     allowLiveSeek: false,
+    overlaySeconds: 0,
+    nextDspSliceSeconds: 0,
+    nextDspSourceSeconds: 0,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -814,6 +817,17 @@ function sanitizePlaybackState(rawPlayback) {
     showVolumePresets = true;
   }
   const allowLiveSeek = Boolean(rawPlayback.allowLiveSeek);
+  const overlaySeconds = parseBoundedNumberConfigValue(rawPlayback.overlaySeconds, 0, { min: 0, max: 120 });
+  const nextDspSliceSeconds = parseBoundedNumberConfigValue(rawPlayback.nextDspSliceSeconds, 0, { min: 0, max: 120 });
+  let nextDspSourceSeconds = parseBoundedNumberConfigValue(rawPlayback.nextDspSourceSeconds, 0, {
+    min: 0,
+    max: 120,
+  });
+  if (nextDspSliceSeconds <= 0) {
+    nextDspSourceSeconds = 0;
+  } else if (nextDspSourceSeconds > nextDspSliceSeconds) {
+    nextDspSourceSeconds = nextDspSliceSeconds;
+  }
   const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
   if (!trackFile) {
     return {
@@ -821,6 +835,9 @@ function sanitizePlaybackState(rawPlayback) {
       volume,
       showVolumePresets,
       allowLiveSeek,
+      overlaySeconds,
+      nextDspSliceSeconds: 0,
+      nextDspSourceSeconds: 0,
       updatedAt: Date.now(),
     };
   }
@@ -842,6 +859,9 @@ function sanitizePlaybackState(rawPlayback) {
     volume,
     showVolumePresets,
     allowLiveSeek,
+    overlaySeconds,
+    nextDspSliceSeconds,
+    nextDspSourceSeconds,
     playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
     updatedAt: Date.now(),
@@ -923,6 +943,9 @@ function serializePlaybackState(state) {
     volume: normalizeLiveVolumePreset(state.volume, DEFAULT_LIVE_VOLUME),
     showVolumePresets: Boolean(state.showVolumePresets),
     allowLiveSeek: Boolean(state.allowLiveSeek),
+    overlaySeconds: parseBoundedNumberConfigValue(state.overlaySeconds, 0, { min: 0, max: 120 }),
+    nextDspSliceSeconds: parseBoundedNumberConfigValue(state.nextDspSliceSeconds, 0, { min: 0, max: 120 }),
+    nextDspSourceSeconds: parseBoundedNumberConfigValue(state.nextDspSourceSeconds, 0, { min: 0, max: 120 }),
     playlistIndex: normalizePlaylistTrackIndex(state.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(state.playlistPosition),
   });
@@ -951,6 +974,15 @@ function buildPlaybackPayload(sourceClientId = null) {
     volume: sharedPlaybackState.volume,
     showVolumePresets: Boolean(sharedPlaybackState.showVolumePresets),
     allowLiveSeek: Boolean(sharedPlaybackState.allowLiveSeek),
+    overlaySeconds: parseBoundedNumberConfigValue(sharedPlaybackState.overlaySeconds, 0, { min: 0, max: 120 }),
+    nextDspSliceSeconds: parseBoundedNumberConfigValue(sharedPlaybackState.nextDspSliceSeconds, 0, {
+      min: 0,
+      max: 120,
+    }),
+    nextDspSourceSeconds: parseBoundedNumberConfigValue(sharedPlaybackState.nextDspSourceSeconds, 0, {
+      min: 0,
+      max: 120,
+    }),
     playlistIndex: sharedPlaybackState.playlistIndex,
     playlistPosition: sharedPlaybackState.playlistPosition,
     updatedAt: sharedPlaybackState.updatedAt,
