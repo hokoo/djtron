@@ -12,3 +12,6 @@ sessions-state.json
 # Keep local credentials out of git
 users/*
 !users/README.md
+
+# Local runtime config
+extra.conf

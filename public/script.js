@@ -44,7 +44,7 @@ const nowPlayingProgressEl = document.getElementById('nowPlayingProgress');
 const nowPlayingTimeEl = document.getElementById('nowPlayingTime');
 const nowPlayingReelEl = document.getElementById('nowPlayingReel');
 const localVolumePresetsEl = document.getElementById('localVolumePresets');
-const localVolumePresetButtons = localVolumePresetsEl
+let localVolumePresetButtons = localVolumePresetsEl
   ? Array.from(localVolumePresetsEl.querySelectorAll('.volume-presets__button'))
   : [];
 const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
@@ -69,6 +69,18 @@ const SETTINGS_KEYS = {
 const LAYOUT_STORAGE_KEY = 'player:playlists';
 const LEGACY_LAYOUT_KEY = 'player:zones';
 const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
+const RUNTIME_LOCAL_OVERRIDE_KEYS = {
+  allowContextMenu: ['djtron:config:allowContextMenu', 'djtron:allowContextMenu'],
+  volumePresets: ['djtron:config:volumePresets', 'djtron:volumePresets'],
+};
+const RUNTIME_OVERRIDE_SCOPE_NONE = 'none';
+const RUNTIME_OVERRIDE_SCOPE_CLIENT = 'client';
+const RUNTIME_OVERRIDE_SCOPE_HOST = 'host';
+const DEFAULT_RUNTIME_CONFIG_SCHEMA = Object.freeze({
+  port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
+  volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
+});
 const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
@@ -106,7 +118,8 @@ const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
 const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible';
 const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
 const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
-const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
+const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
+let LIVE_VOLUME_PRESET_VALUES = DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
 const DEFAULT_LIVE_VOLUME = 1;
 const AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS = 0.04;
 const AUTOPLAY_OVERLAY_STATE_IDLE = 'idle';
@@ -166,6 +179,18 @@ let authUsersState = [];
 let cohostRoleUpdatesInFlight = new Set();
 let cohostDisconnectUpdatesInFlight = new Set();
 let authRecoveryInProgress = false;
+let runtimeAllowContextMenu = false;
+let contextMenuGuardAttached = false;
+let runtimeServerConfig = {
+  port: null,
+  allowContextMenu: false,
+  volumePresets: DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice(),
+  schema: {
+    port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
+    volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
+  },
+};
 let touchHoldTimer = null;
 let touchHoldPointerId = null;
 let touchHoldStartX = 0;
@@ -257,12 +282,7 @@ function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
   if (Math.abs(normalized - 1) < 0.0001) {
     return 1;
   }
-  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
-    if (Math.abs(normalized - preset) < 0.0001) {
-      return preset;
-    }
-  }
-  return fallback;
+  return normalized;
 }
 
 function getActiveVolumePresetValue(volume = livePlaybackVolume) {
@@ -289,6 +309,248 @@ function normalizePlaybackSeekRatio(value) {
   if (numeric <= 0) return 0;
   if (numeric >= 1) return 1;
   return numeric;
+}
+
+function readStoredValueByKeys(keys) {
+  if (!Array.isArray(keys)) return null;
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key) continue;
+    const value = localStorage.getItem(key);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function parseBooleanConfigValue(value, fallback = null) {
+  if (typeof value === 'boolean') return value;
+  if (value === null || value === undefined) return fallback;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
+  const source = Array.isArray(values) ? values : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (const rawValue of source) {
+    const percentValue = Number(rawValue);
+    if (!Number.isFinite(percentValue)) continue;
+    if (percentValue < 1 || percentValue >= 100) continue;
+
+    const rounded = Math.round((percentValue / 100) * 1000) / 1000;
+    const dedupeKey = rounded.toFixed(3);
+    if (seen.has(dedupeKey)) continue;
+
+    seen.add(dedupeKey);
+    normalized.push(rounded);
+    if (normalized.length >= 8) break;
+  }
+
+  if (normalized.length) return normalized;
+  if (Array.isArray(fallback)) return fallback.slice();
+  return DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
+}
+
+function parseVolumePresetsConfigValue(value, fallback = null) {
+  const fallbackArray = Array.isArray(fallback) ? fallback : null;
+
+  if (Array.isArray(value)) {
+    const normalized = normalizeVolumePresetValues(value, []);
+    if (normalized.length) return normalized;
+    return fallbackArray ? fallbackArray.slice() : null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const normalized = normalizeVolumePresetValues([value], []);
+    if (normalized.length) return normalized;
+    return fallbackArray ? fallbackArray.slice() : null;
+  }
+
+  if (typeof value !== 'string') return fallbackArray ? fallbackArray.slice() : null;
+  const trimmed = value.trim();
+  if (!trimmed) return fallbackArray ? fallbackArray.slice() : null;
+
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        const normalized = normalizeVolumePresetValues(parsed, []);
+        if (normalized.length) return normalized;
+        return fallbackArray ? fallbackArray.slice() : null;
+      }
+    } catch (err) {
+      // fallback to token parsing
+    }
+  }
+
+  const tokens = trimmed.split(/[,\s;|]+/).filter(Boolean);
+  if (!tokens.length) return fallbackArray ? fallbackArray.slice() : null;
+  const normalized = normalizeVolumePresetValues(tokens, []);
+  if (normalized.length) return normalized;
+  return fallbackArray ? fallbackArray.slice() : null;
+}
+
+function parsePortCandidate(value, fallback = null) {
+  if (value === null || value === undefined) return fallback;
+  const numeric = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 65535) return fallback;
+  return numeric;
+}
+
+function getDefaultRuntimeConfigSchema() {
+  return {
+    port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
+    volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
+  };
+}
+
+function sanitizeRuntimeOverrideScope(value, fallback = RUNTIME_OVERRIDE_SCOPE_NONE) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (
+    normalized === RUNTIME_OVERRIDE_SCOPE_NONE ||
+    normalized === RUNTIME_OVERRIDE_SCOPE_CLIENT ||
+    normalized === RUNTIME_OVERRIDE_SCOPE_HOST
+  ) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function sanitizeRuntimeConfigSchema(rawSchema) {
+  const schema = getDefaultRuntimeConfigSchema();
+  if (!rawSchema || typeof rawSchema !== 'object') return schema;
+
+  for (const key of Object.keys(schema)) {
+    const rawEntry = rawSchema[key];
+    if (!rawEntry || typeof rawEntry !== 'object') continue;
+    schema[key].localOverride = sanitizeRuntimeOverrideScope(rawEntry.localOverride, schema[key].localOverride);
+  }
+
+  return schema;
+}
+
+function sanitizeRuntimeConfigPayload(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+  const payloadValues = payload.values && typeof payload.values === 'object' ? payload.values : payload;
+  const schema = sanitizeRuntimeConfigSchema(payload.schema);
+
+  return {
+    port: parsePortCandidate(payloadValues.port, null),
+    allowContextMenu: parseBooleanConfigValue(payloadValues.allowContextMenu, false),
+    volumePresets: parseVolumePresetsConfigValue(payloadValues.volumePresets, DEFAULT_LIVE_VOLUME_PRESET_VALUES),
+    schema,
+  };
+}
+
+function getRuntimeLocalOverrideScope(configKey, schema = runtimeServerConfig.schema) {
+  const fallbackScope = DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey]
+    ? DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey].localOverride
+    : RUNTIME_OVERRIDE_SCOPE_NONE;
+  if (!schema || typeof schema !== 'object') return fallbackScope;
+  const schemaEntry = schema[configKey];
+  if (!schemaEntry || typeof schemaEntry !== 'object') return fallbackScope;
+  return sanitizeRuntimeOverrideScope(schemaEntry.localOverride, fallbackScope);
+}
+
+function canUseRuntimeLocalOverride(configKey, role = currentRole, schema = runtimeServerConfig.schema) {
+  const scope = getRuntimeLocalOverrideScope(configKey, schema);
+  if (scope === RUNTIME_OVERRIDE_SCOPE_CLIENT) return true;
+  if (scope === RUNTIME_OVERRIDE_SCOPE_HOST) return isHostRole(role);
+  return false;
+}
+
+function readRuntimeLocalOverrides(schema = runtimeServerConfig.schema, role = currentRole) {
+  const overrides = {
+    allowContextMenu: null,
+    volumePresets: null,
+  };
+
+  if (canUseRuntimeLocalOverride('allowContextMenu', role, schema)) {
+    const allowContextMenuRaw = readStoredValueByKeys(RUNTIME_LOCAL_OVERRIDE_KEYS.allowContextMenu);
+    overrides.allowContextMenu = parseBooleanConfigValue(allowContextMenuRaw, null);
+  }
+
+  if (canUseRuntimeLocalOverride('volumePresets', role, schema)) {
+    const volumePresetsRaw = readStoredValueByKeys(RUNTIME_LOCAL_OVERRIDE_KEYS.volumePresets);
+    overrides.volumePresets = parseVolumePresetsConfigValue(volumePresetsRaw, null);
+  }
+
+  return overrides;
+}
+
+function setContextMenuBlocked(blocked) {
+  const shouldBlock = Boolean(blocked);
+  if (shouldBlock === contextMenuGuardAttached) return;
+
+  if (shouldBlock) {
+    document.addEventListener('contextmenu', preventContextMenu);
+  } else {
+    document.removeEventListener('contextmenu', preventContextMenu);
+  }
+  contextMenuGuardAttached = shouldBlock;
+}
+
+function preventContextMenu(event) {
+  event.preventDefault();
+}
+
+function rebuildVolumePresetButtons() {
+  if (!localVolumePresetsEl) {
+    localVolumePresetButtons = [];
+    return;
+  }
+
+  localVolumePresetsEl.textContent = '';
+  localVolumePresetButtons = LIVE_VOLUME_PRESET_VALUES.map((presetValue) => {
+    const button = document.createElement('button');
+    button.className = 'volume-presets__button';
+    button.type = 'button';
+    button.dataset.volume = String(presetValue);
+    button.textContent = formatVolumePresetLabel(presetValue);
+    button.addEventListener('click', onVolumePresetButtonClick);
+    localVolumePresetsEl.append(button);
+    return button;
+  });
+}
+
+function applyRuntimeClientConfig() {
+  setContextMenuBlocked(!runtimeAllowContextMenu);
+  LIVE_VOLUME_PRESET_VALUES = normalizeVolumePresetValues(LIVE_VOLUME_PRESET_VALUES);
+  rebuildVolumePresetButtons();
+  updateVolumePresetsUi();
+}
+
+function applyRuntimeConfigFromSources(serverConfig = null) {
+  if (serverConfig && typeof serverConfig === 'object') {
+    runtimeServerConfig = sanitizeRuntimeConfigPayload(serverConfig);
+  }
+
+  const schema = runtimeServerConfig.schema || getDefaultRuntimeConfigSchema();
+  const localOverrides = readRuntimeLocalOverrides(schema, currentRole);
+
+  runtimeAllowContextMenu =
+    localOverrides.allowContextMenu !== null ? localOverrides.allowContextMenu : runtimeServerConfig.allowContextMenu;
+  LIVE_VOLUME_PRESET_VALUES =
+    localOverrides.volumePresets && localOverrides.volumePresets.length
+      ? localOverrides.volumePresets.slice()
+      : runtimeServerConfig.volumePresets.slice();
+
+  applyRuntimeClientConfig();
+}
+
+async function fetchRuntimeConfig() {
+  const response = await fetch('/api/config');
+  if (!response.ok) {
+    throw new Error('Не удалось загрузить runtime-конфиг');
+  }
+  const data = await response.json().catch(() => ({}));
+  return data && typeof data === 'object' ? data : {};
 }
 
 function isOverlayEnabled() {
@@ -1803,6 +2065,7 @@ function applyRoleUi(role) {
   const previousRole = currentRole;
   currentRole = resolvedRole;
   document.body.dataset.role = resolvedRole;
+  applyRuntimeConfigFromSources();
 
   const isHost = isHostRole(resolvedRole);
   const isCoHost = isCoHostRole(resolvedRole);
@@ -6152,10 +6415,6 @@ function initVolumePresetControls() {
     });
   }
 
-  for (const button of localVolumePresetButtons) {
-    button.addEventListener('click', onVolumePresetButtonClick);
-  }
-
   if (isHostRole()) {
     requestHostPlaybackSync(true);
   }
@@ -6377,12 +6636,18 @@ async function applyUpdate() {
 }
 
 async function bootstrap() {
-  document.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-  });
+  applyRuntimeConfigFromSources(null);
 
   const authorized = await ensureAuthorizedUser();
   if (!authorized) return;
+
+  try {
+    const serverRuntimeConfig = await fetchRuntimeConfig();
+    applyRuntimeConfigFromSources(serverRuntimeConfig);
+  } catch (err) {
+    console.error('Не удалось загрузить runtime-конфиг, используем локальные значения.', err);
+    applyRuntimeConfigFromSources(null);
+  }
 
   initSettings();
   initSidebarToggle();

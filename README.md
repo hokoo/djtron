@@ -27,12 +27,46 @@ npm start
 
 По умолчанию приложение доступно на `http://localhost:3000`.
 
+## Конфиг `extra.conf` и `localStorage`
+
+В корне проекта можно создать текстовый файл `extra.conf`.
+Файл полностью опционален: может отсутствовать, а любой параметр можно не указывать.
+Шаблон: `extra.conf.example` (скопируйте его в `extra.conf`).
+
+Поддерживаемые параметры:
+
+- `port` - порт сервера (если `PORT` не задан через переменную окружения).
+- `allow_context_menu` (или `context_menu`) - `true/false`; при `true` отключает блокировку контекстного меню.
+- `volume_presets` - пользовательский набор пресетов громкости в процентах (`0-100` формат).
+
+Пример:
+
+```conf
+port=3010
+allow_context_menu=true
+volume_presets=15,35,60
+```
+
+Схема уровней переопределения (`override-scope`):
+
+- `none` - только серверное значение (`extra.conf`/ENV), `localStorage` игнорируется.
+- `client` - локальное переопределение разрешено на любом клиенте.
+- `host` - локальное переопределение разрешено только на клиенте роли Host.
+
+Текущие правила:
+
+- `port` -> `none` (не читается из `localStorage` вообще).
+- `allow_context_menu` -> `client` (`djtron:config:allowContextMenu`).
+- `volume_presets` -> `host` (`djtron:config:volumePresets`).
+
+Если ключа нет в разрешенном уровне `localStorage`, используется серверное значение из `extra.conf`.
+
 ## LAN-подключение (Windows 10/11)
 
 1. Запустите сервер на основном ПК.
 2. Узнайте его IP через `ipconfig`.
-3. На другом ПК откройте `http://<IP_СЕРВЕРА>:3000`.
-4. Разрешите входящие подключения на TCP-порт `3000` в Windows Firewall.
+3. На другом ПК откройте `http://<IP_СЕРВЕРА>:<PORT>`.
+4. Разрешите входящие подключения на выбранный TCP-порт в Windows Firewall.
 
 ## Авторизация
 
@@ -117,6 +151,7 @@ myStrongPassword123
 
 - Windows: `run-player.bat`
 - macOS: `run-player.command`
+- Оба скрипта открывают браузер на порту из `PORT`, иначе из `extra.conf`, иначе `3000`.
 
 Если `run-player.command` не запускается, дайте права:
 

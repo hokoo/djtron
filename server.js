@@ -36,9 +36,166 @@ function loadEnvFile() {
     });
 }
 
-loadEnvFile();
+const DEFAULT_PORT = 3000;
+const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
+const ROOT_CONF_CANDIDATES = ['extra.conf'];
 
-const PORT = process.env.PORT || 3000;
+function stripWrappingQuotes(value) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function loadRootConfig() {
+  let confPath = null;
+  for (const candidate of ROOT_CONF_CANDIDATES) {
+    const absolutePath = path.join(__dirname, candidate);
+    if (fs.existsSync(absolutePath)) {
+      confPath = absolutePath;
+      break;
+    }
+  }
+
+  if (!confPath) return {};
+
+  try {
+    const content = fs.readFileSync(confPath, 'utf8');
+    const result = {};
+
+    content.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return;
+
+      const eqIndex = trimmed.indexOf('=');
+      const colonIndex = trimmed.indexOf(':');
+      const delimiterIndex =
+        eqIndex > 0 && colonIndex > 0 ? Math.min(eqIndex, colonIndex) : Math.max(eqIndex, colonIndex);
+
+      if (delimiterIndex <= 0) return;
+
+      const rawKey = trimmed.slice(0, delimiterIndex).trim().toLowerCase();
+      if (!rawKey) return;
+
+      const rawValue = trimmed.slice(delimiterIndex + 1).trim();
+      result[rawKey] = stripWrappingQuotes(rawValue);
+    });
+
+    return result;
+  } catch (err) {
+    console.error('Failed to read extra.conf file', err);
+    return {};
+  }
+}
+
+function pickConfigValue(config, keys) {
+  if (!config || typeof config !== 'object' || !Array.isArray(keys)) return undefined;
+  for (const key of keys) {
+    if (typeof key !== 'string') continue;
+    if (Object.prototype.hasOwnProperty.call(config, key)) {
+      return config[key];
+    }
+  }
+  return undefined;
+}
+
+function parseBooleanConfigValue(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (value === null || value === undefined) return fallback;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
+  const source = Array.isArray(values) ? values : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (const rawValue of source) {
+    const percentValue = Number(rawValue);
+    if (!Number.isFinite(percentValue)) continue;
+    if (percentValue < 1 || percentValue >= 100) continue;
+
+    const rounded = Math.round((percentValue / 100) * 1000) / 1000;
+    const dedupeKey = rounded.toFixed(3);
+    if (seen.has(dedupeKey)) continue;
+
+    seen.add(dedupeKey);
+    normalized.push(rounded);
+    if (normalized.length >= 8) break;
+  }
+
+  if (normalized.length) return normalized;
+  return Array.isArray(fallback) && fallback.length ? fallback.slice() : DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
+}
+
+function parseVolumePresetsConfigValue(value, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
+  if (Array.isArray(value)) {
+    return normalizeVolumePresetValues(value, fallback);
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return normalizeVolumePresetValues([value], fallback);
+  }
+
+  if (typeof value !== 'string') {
+    return normalizeVolumePresetValues([], fallback);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return normalizeVolumePresetValues([], fallback);
+  }
+
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return normalizeVolumePresetValues(parsed, fallback);
+      }
+    } catch (err) {
+      // fallback to token parsing
+    }
+  }
+
+  const tokens = trimmed.split(/[,\s;|]+/).filter(Boolean);
+  return normalizeVolumePresetValues(tokens, fallback);
+}
+
+function serializeVolumePresetPercentValues(values) {
+  return normalizeVolumePresetValues(values, []).map((value) => Math.round(value * 1000) / 10);
+}
+
+function parsePortCandidate(value) {
+  if (value === null || value === undefined) return null;
+  const numeric = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 65535) return null;
+  return numeric;
+}
+
+function resolvePortValue(envValue, configValue, fallback = DEFAULT_PORT) {
+  const fromEnv = parsePortCandidate(envValue);
+  if (fromEnv !== null) return fromEnv;
+  const fromConfig = parsePortCandidate(configValue);
+  if (fromConfig !== null) return fromConfig;
+  return fallback;
+}
+
+loadEnvFile();
+const ROOT_CONFIG = loadRootConfig();
+
+const PORT = resolvePortValue(
+  process.env.PORT,
+  pickConfigValue(ROOT_CONFIG, ['port']),
+  DEFAULT_PORT,
+);
 const AUDIO_DIR = path.join(__dirname, 'audio');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const USERS_DIR = path.join(__dirname, 'users');
@@ -74,7 +231,22 @@ const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_HOST = 'host';
 const ROLE_SLAVE = 'slave';
 const ROLE_COHOST = 'co-host';
-const LIVE_VOLUME_PRESET_VALUES = [0.1, 0.3, 0.5];
+const RUNTIME_OVERRIDE_SCOPE_NONE = 'none';
+const RUNTIME_OVERRIDE_SCOPE_CLIENT = 'client';
+const RUNTIME_OVERRIDE_SCOPE_HOST = 'host';
+const LIVE_VOLUME_PRESET_VALUES = parseVolumePresetsConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['volume_presets', 'live_volume_presets', 'presets']),
+  DEFAULT_LIVE_VOLUME_PRESET_VALUES,
+);
+const ALLOW_CONTEXT_MENU = parseBooleanConfigValue(
+  pickConfigValue(ROOT_CONFIG, ['allow_context_menu', 'context_menu']),
+  false,
+);
+const RUNTIME_CONFIG_SCHEMA = Object.freeze({
+  port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
+  volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
+});
 const DEFAULT_LIVE_VOLUME = 1;
 
 let shuttingDown = false;
@@ -351,14 +523,7 @@ function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
   if (Math.abs(normalized - 1) < 0.0001) {
     return 1;
   }
-
-  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
-    if (Math.abs(normalized - preset) < 0.0001) {
-      return preset;
-    }
-  }
-
-  return fallback;
+  return normalized;
 }
 
 function hasActiveVolumePreset(value) {
@@ -1871,6 +2036,20 @@ function handleApiVersion(req, res) {
   sendJson(res, 200, { version: appVersion });
 }
 
+function handleApiConfig(req, res) {
+  const values = {
+    port: PORT,
+    allowContextMenu: ALLOW_CONTEXT_MENU,
+    volumePresets: serializeVolumePresetPercentValues(LIVE_VOLUME_PRESET_VALUES),
+  };
+
+  sendJson(res, 200, {
+    ...values,
+    values,
+    schema: RUNTIME_CONFIG_SCHEMA,
+  });
+}
+
 function handleApiLayoutGet(req, res) {
   sendJson(res, 200, buildLayoutPayload(null));
 }
@@ -2500,6 +2679,16 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleApiAudioAttributes(req, res, requestUrl);
+    return;
+  }
+
+  if (pathname === '/api/config') {
+    if (req.method !== 'GET') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+    handleApiConfig(req, res);
     return;
   }
 

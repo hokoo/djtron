@@ -1,0 +1,14 @@
+# Optional djTRON runtime config.
+# Copy this file to "extra.conf" in the project root and adjust values.
+
+# Server port (used when PORT env var is not set, localStorage override is not supported)
+# port=3000
+
+# true -> allow browser context menu (disable global blocking)
+# false -> keep context menu blocked
+# allow_context_menu=false
+
+# Custom live volume presets (percent form: 0-100)
+# localStorage override is allowed only for Host role
+# Examples:
+# volume_presets=10,30,50
