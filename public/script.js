@@ -32,7 +32,6 @@ const updateInfoEl = document.getElementById('updateInfo');
 const updateMessageEl = document.getElementById('updateMessage');
 const updateButton = document.getElementById('updateButton');
 const updateStatusEl = document.getElementById('updateStatus');
-const releaseLinkEl = document.getElementById('releaseLink');
 const allowPrereleaseInput = document.getElementById('allowPrerelease');
 const allowPrereleaseRow = allowPrereleaseInput ? allowPrereleaseInput.closest('.update-settings') : null;
 const dspSetupPanelEl = document.getElementById('dspSetupPanel');
@@ -11184,26 +11183,26 @@ function showUpdateBlock(isVisible) {
 function resetUpdateUi() {
   setUpdateMessage('');
   setUpdateStatus('');
-  setReleaseLink(null);
   if (updateButton) {
     updateButton.disabled = true;
   }
   showUpdateBlock(false);
 }
 
-function setReleaseLink(url, label = 'Релиз') {
-  if (!releaseLinkEl) return;
-  if (url) {
-    releaseLinkEl.href = url;
-    releaseLinkEl.textContent = label;
-    releaseLinkEl.style.display = 'inline';
-  } else {
-    releaseLinkEl.style.display = 'none';
-  }
-}
-
-function setUpdateMessage(text) {
+function setUpdateMessage(text, linkUrl = null, linkLabel = '') {
   if (!updateMessageEl) return;
+  if (linkUrl && linkLabel) {
+    updateMessageEl.textContent = '';
+    updateMessageEl.append(document.createTextNode(text || ''));
+    const linkEl = document.createElement('a');
+    linkEl.className = 'sidebar-repo__link';
+    linkEl.href = linkUrl;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = linkLabel;
+    updateMessageEl.append(linkEl);
+    return;
+  }
   updateMessageEl.textContent = text;
 }
 
@@ -11259,8 +11258,11 @@ async function checkForUpdates() {
 
     if (data && data.hasUpdate && data.latestVersion) {
       const releaseLabel = data.releaseName || `v${data.latestVersion}`;
-      setUpdateMessage(`Доступен релиз: ${releaseLabel}`);
-      setReleaseLink(data.releaseUrl || null, releaseLabel);
+      if (data.releaseUrl) {
+        setUpdateMessage('Доступен релиз: ', data.releaseUrl, releaseLabel);
+      } else {
+        setUpdateMessage(`Доступен релиз: ${releaseLabel}`);
+      }
       updateButton.disabled = false;
       showUpdateBlock(true);
     }
