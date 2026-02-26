@@ -3618,7 +3618,7 @@ function syncDapNowPlayingPanel() {
     return;
   }
 
-  const titlePrefix = dapPlaybackState.interrupted ? 'DAP (пауза): ' : 'DAP: ';
+  const titlePrefix = isCoHostRole() ? 'LIVE (DAP): ' : dapPlaybackState.interrupted ? 'DAP (пауза): ' : 'DAP: ';
   dapNowPlayingTitleEl.textContent = `${titlePrefix}${trackDisplayName(dapPlaybackState.trackFile)}`;
   dapNowPlayingControlLabelEl.textContent = dapPlaybackState.paused ? '▶' : '❚❚';
   setDapNowPlayingReelActive(true, dapPlaybackState.paused);
@@ -3889,6 +3889,20 @@ function syncNowPlayingPanelForCoHost() {
     return;
   }
 
+  if (isDapTrackContext(hostPlaybackState, dapConfig)) {
+    if (nowPlayingSeekActive) {
+      cleanupNowPlayingSeekInteraction();
+    }
+    nowPlayingTitleEl.textContent = '';
+    nowPlayingControlLabelEl.textContent = '▶';
+    nowPlayingControlBtn.disabled = true;
+    setNowPlayingReelActive(false);
+    setNowPlayingProgress(0);
+    setNowPlayingTime(null);
+    stopCoHostProgressLoop();
+    return;
+  }
+
   nowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostTrackFile)}`;
   nowPlayingControlBtn.disabled = false;
   nowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
@@ -3973,6 +3987,20 @@ function syncNowPlayingPanel() {
       cleanupNowPlayingSeekInteraction();
     }
     nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
+    nowPlayingControlLabelEl.textContent = '▶';
+    nowPlayingControlBtn.disabled = true;
+    setNowPlayingReelActive(false);
+    setNowPlayingProgress(0);
+    setNowPlayingTime(null);
+    requestHostPlaybackSync(false);
+    return;
+  }
+
+  if (isHostRole() && isDapTrackContext(currentTrack, dapConfig)) {
+    if (nowPlayingSeekActive) {
+      cleanupNowPlayingSeekInteraction();
+    }
+    nowPlayingTitleEl.textContent = '';
     nowPlayingControlLabelEl.textContent = '▶';
     nowPlayingControlBtn.disabled = true;
     setNowPlayingReelActive(false);
@@ -4993,10 +5021,16 @@ function updateProgress(fileKey, currentTime, duration) {
   if (!currentTrack || currentTrack.key !== fileKey) return;
 
   const safeTime = Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
-  const percent = duration ? Math.min(100, (safeTime / duration) * 100) : 0;
-  setNowPlayingProgress(percent);
-  const remaining = duration ? Math.max(0, duration - safeTime) : getCurrentTrackRemainingSeconds();
-  setNowPlayingTime(remaining, { useCeil: true });
+  const isDapTrackOnHostMain = isHostRole() && isDapTrackContext(currentTrack, dapConfig);
+  if (isDapTrackOnHostMain) {
+    setNowPlayingProgress(0);
+    setNowPlayingTime(null);
+  } else {
+    const percent = duration ? Math.min(100, (safeTime / duration) * 100) : 0;
+    setNowPlayingProgress(percent);
+    const remaining = duration ? Math.max(0, duration - safeTime) : getCurrentTrackRemainingSeconds();
+    setNowPlayingTime(remaining, { useCeil: true });
+  }
   syncDapNowPlayingPanel();
   refreshTrackDurationLabels(fileKey);
 }
