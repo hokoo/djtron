@@ -729,6 +729,13 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   background: rgba(127, 29, 29, 0.78);
 }
 
+.track-card.has-drag-mode[data-drag-mode='next']::after {
+  content: 'NEXT';
+  border-color: var(--border-strong);
+  background: rgba(0, 0, 0, 0.72);
+  box-shadow: 0 0 8px var(--shadow-accent);
+}
+
 .track-card.is-locked {
   background:
     repeating-linear-gradient(
@@ -780,6 +787,11 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
 .desktop-drag-ghost.has-drag-mode[data-drag-mode='delete'] {
   border-color: #dc2626;
   box-shadow: 0 0 14px rgba(220, 38, 38, 0.7);
+}
+
+.desktop-drag-ghost.has-drag-mode[data-drag-mode='next'] {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 14px var(--shadow-accent);
 }
 
 .touch-drag-ghost {
@@ -841,6 +853,17 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   background: rgba(127, 29, 29, 0.8);
 }
 
+.touch-drag-ghost.is-next {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 14px var(--shadow-accent);
+}
+
+.touch-drag-ghost.is-next::after {
+  content: 'NEXT';
+  border-color: var(--border-strong);
+  background: rgba(0, 0, 0, 0.74);
+}
+
 .drag-trash {
   position: fixed;
   right: 16px;
@@ -885,6 +908,66 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.drag-next {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 1700;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--muted);
+  padding: 8px 10px;
+  min-width: 84px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: opacity 0.12s ease, transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease,
+    color 0.12s ease;
+}
+
+.drag-next.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.drag-next.is-active {
+  border-color: var(--border-strong);
+  color: #fff;
+  box-shadow: 0 0 12px var(--shadow-accent);
+}
+
+.drag-next__icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.drag-next__label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.drag-next__timer {
+  min-height: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--border-strong);
+}
+
+.drag-next:not(.has-timer) .drag-next__timer {
+  visibility: hidden;
 }
 
 .zones-actions {

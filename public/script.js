@@ -106,6 +106,7 @@ const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
 const DAP_NO_SILENCE_GUARD_INTERVAL_MS = 320;
+const QUEUE_NEXT_CHAIN_WINDOW_MS = 10000;
 const TOUCH_COPY_HOLD_MS = 360;
 const PLAYLIST_COLLAPSE_HOLD_MS = 480;
 const PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX = 24;
@@ -319,6 +320,10 @@ let desktopDragGhostOffsetX = 16;
 let desktopDragGhostOffsetY = 16;
 let emptyDragImage = null;
 let trashDropzoneEl = null;
+let queueNextDropzoneEl = null;
+let queueNextChainAnchor = null;
+let queueNextChainExpiresAt = 0;
+let queueNextCountdownTimer = null;
 let nowPlayingSeekActive = false;
 let nowPlayingSeekMoved = false;
 let nowPlayingSeekPointerId = null;
@@ -1489,7 +1494,7 @@ function setDropEffectFromEvent(event, targetZoneIndex = null) {
 }
 
 function normalizeDragMode(mode) {
-  if (mode === 'copy' || mode === 'cancel' || mode === 'delete') return mode;
+  if (mode === 'copy' || mode === 'cancel' || mode === 'delete' || mode === 'next') return mode;
   return 'move';
 }
 
@@ -1638,11 +1643,21 @@ function ensureTrashDropzone() {
 function showTrashDropzone() {
   const trash = ensureTrashDropzone();
   trash.classList.add('is-visible');
+  syncQueueNextDropzoneVisibility();
 }
 
 function hideTrashDropzone() {
-  if (!trashDropzoneEl) return;
-  trashDropzoneEl.classList.remove('is-visible', 'is-active');
+  if (trashDropzoneEl) {
+    trashDropzoneEl.classList.remove('is-visible', 'is-active');
+  }
+  stopQueueNextDropzoneCountdownLoop();
+  if (queueNextDropzoneEl) {
+    queueNextDropzoneEl.classList.remove('is-visible', 'is-active', 'has-timer');
+    const timerEl = queueNextDropzoneEl.querySelector('.drag-next__timer');
+    if (timerEl instanceof HTMLElement) {
+      timerEl.textContent = '';
+    }
+  }
 }
 
 function isTrashDropzoneTarget(target) {
@@ -1657,10 +1672,246 @@ function isPointOverTrashDropzone(clientX, clientY) {
   return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
 }
 
+function resolveQueueNextPlaybackAnchor() {
+  const localTrackFile = currentTrack && typeof currentTrack.file === 'string' ? currentTrack.file.trim() : '';
+  if (localTrackFile && currentAudio && !currentAudio.paused) {
+    return {
+      file: localTrackFile,
+      playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
+      playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
+    };
+  }
+
+  if (!isRemoteLiveMirrorRole()) return null;
+  const hostTrackFile = hostPlaybackState && typeof hostPlaybackState.trackFile === 'string'
+    ? hostPlaybackState.trackFile.trim()
+    : '';
+  if (!hostTrackFile || hostPlaybackState.paused) return null;
+
+  return {
+    file: hostTrackFile,
+    playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+  };
+}
+
+function clearQueueNextChainAnchor() {
+  queueNextChainAnchor = null;
+  queueNextChainExpiresAt = 0;
+}
+
+function getQueueNextChainRemainingMs() {
+  if (!queueNextChainAnchor || !Number.isFinite(queueNextChainExpiresAt) || queueNextChainExpiresAt <= 0) {
+    return 0;
+  }
+
+  const remainingMs = queueNextChainExpiresAt - Date.now();
+  if (remainingMs > 0) {
+    return remainingMs;
+  }
+
+  clearQueueNextChainAnchor();
+  return 0;
+}
+
+function setQueueNextChainAnchor(trackContext) {
+  if (!trackContext || typeof trackContext.file !== 'string' || !trackContext.file.trim()) {
+    clearQueueNextChainAnchor();
+    return;
+  }
+
+  queueNextChainAnchor = {
+    file: trackContext.file.trim(),
+    playlistIndex: normalizePlaylistTrackIndex(trackContext.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(trackContext.playlistPosition),
+  };
+  queueNextChainExpiresAt = Date.now() + QUEUE_NEXT_CHAIN_WINDOW_MS;
+}
+
+function resolveQueueNextInsertTargetFromAnchor(anchor, layoutState = layout) {
+  if (!anchor || typeof anchor.file !== 'string' || !anchor.file.trim()) return null;
+
+  const normalizedLayout = ensurePlaylists(layoutState);
+  const resolution = resolveTrackIndexByContext(normalizedLayout, {
+    sourceZoneIndex: normalizePlaylistTrackIndex(anchor.playlistIndex),
+    sourceIndex: normalizePlaylistTrackIndex(anchor.playlistPosition),
+    file: anchor.file.trim(),
+  });
+  if (resolution.playlistIndex < 0 || resolution.trackIndex < 0) return null;
+
+  const playlist = Array.isArray(normalizedLayout[resolution.playlistIndex])
+    ? normalizedLayout[resolution.playlistIndex]
+    : [];
+  const insertIndex = Math.max(0, Math.min(resolution.trackIndex + 1, playlist.length));
+  return {
+    playlistIndex: resolution.playlistIndex,
+    insertIndex,
+  };
+}
+
+function resolveQueueNextChainInsertTarget(layoutState = layout) {
+  if (!queueNextChainAnchor || !Number.isFinite(queueNextChainExpiresAt) || queueNextChainExpiresAt <= 0) {
+    return null;
+  }
+  if (Date.now() > queueNextChainExpiresAt) {
+    clearQueueNextChainAnchor();
+    return null;
+  }
+
+  const target = resolveQueueNextInsertTargetFromAnchor(queueNextChainAnchor, layoutState);
+  if (!target) {
+    clearQueueNextChainAnchor();
+    return null;
+  }
+
+  queueNextChainAnchor.playlistIndex = target.playlistIndex;
+  queueNextChainAnchor.playlistPosition = Math.max(0, target.insertIndex - 1);
+  return target;
+}
+
+function resolveQueueNextInsertTarget(layoutState = layout) {
+  const playbackAnchor = resolveQueueNextPlaybackAnchor();
+  if (!playbackAnchor || !playbackAnchor.file) {
+    clearQueueNextChainAnchor();
+    return null;
+  }
+
+  const chainedTarget = resolveQueueNextChainInsertTarget(layoutState);
+  if (chainedTarget) return chainedTarget;
+  return resolveQueueNextInsertTargetFromAnchor(playbackAnchor, layoutState);
+}
+
+function ensureQueueNextDropzone() {
+  if (queueNextDropzoneEl) return queueNextDropzoneEl;
+
+  const dropzone = document.createElement('div');
+  dropzone.className = 'drag-next';
+  dropzone.setAttribute('aria-label', 'Поставить следующим');
+  dropzone.innerHTML =
+    '<span class="drag-next__icon">↪</span><span class="drag-next__label">воспроизвести следующим</span><span class="drag-next__timer"></span>';
+  document.body.appendChild(dropzone);
+
+  dropzone.addEventListener('dragover', (event) => {
+    if (!draggingCard || !dragContext) return;
+    const queueTarget = resolveQueueNextInsertTarget(layout);
+    if (!queueTarget) return;
+    event.preventDefault();
+    const mode = resolveEffectiveDragMode(event, queueTarget.playlistIndex);
+    event.dataTransfer.dropEffect = mode === 'copy' ? 'copy' : 'move';
+    dropzone.classList.add('is-active');
+    applyDragModeBadge('next');
+    updateDesktopDragGhostPosition(event.clientX, event.clientY);
+  });
+
+  dropzone.addEventListener('dragleave', () => {
+    dropzone.classList.remove('is-active');
+  });
+
+  dropzone.addEventListener('drop', (event) => {
+    if (!draggingCard || !dragContext) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dropzone.classList.remove('is-active');
+    handleDragQueueNextFromContext(event).catch((err) => {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось поставить трек следующим.');
+    });
+  });
+
+  queueNextDropzoneEl = dropzone;
+  return queueNextDropzoneEl;
+}
+
+function updateQueueNextDropzoneCountdownUi() {
+  if (!queueNextDropzoneEl) return;
+  const labelEl = queueNextDropzoneEl.querySelector('.drag-next__label');
+  const timerEl = queueNextDropzoneEl.querySelector('.drag-next__timer');
+  if (!(timerEl instanceof HTMLElement)) return;
+
+  const remainingMs = getQueueNextChainRemainingMs();
+  if (remainingMs <= 0) {
+    queueNextDropzoneEl.classList.remove('has-timer');
+    timerEl.textContent = '';
+    if (labelEl instanceof HTMLElement) {
+      labelEl.textContent = 'воспроизвести следующим';
+    }
+    return;
+  }
+
+  const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  queueNextDropzoneEl.classList.add('has-timer');
+  if (labelEl instanceof HTMLElement) {
+    labelEl.textContent = 'Добавить в стек';
+  }
+  timerEl.textContent = `${remainingSeconds}s`;
+}
+
+function stopQueueNextDropzoneCountdownLoop() {
+  if (queueNextCountdownTimer === null) return;
+  clearInterval(queueNextCountdownTimer);
+  queueNextCountdownTimer = null;
+}
+
+function startQueueNextDropzoneCountdownLoop() {
+  if (queueNextCountdownTimer !== null) return;
+  updateQueueNextDropzoneCountdownUi();
+  queueNextCountdownTimer = setInterval(() => {
+    if (!queueNextDropzoneEl || !queueNextDropzoneEl.classList.contains('is-visible')) {
+      stopQueueNextDropzoneCountdownLoop();
+      return;
+    }
+    updateQueueNextDropzoneCountdownUi();
+  }, 200);
+}
+
+function syncQueueNextDropzoneVisibility() {
+  const dragActive = Boolean(draggingCard && dragContext);
+  if (!dragActive && !queueNextDropzoneEl) return;
+  const dropzone = ensureQueueNextDropzone();
+  const shouldShow = dragActive && Boolean(resolveQueueNextInsertTarget(layout));
+  if (shouldShow) {
+    dropzone.classList.add('is-visible');
+    updateQueueNextDropzoneCountdownUi();
+    if (dropzone.classList.contains('has-timer')) {
+      startQueueNextDropzoneCountdownLoop();
+    } else {
+      stopQueueNextDropzoneCountdownLoop();
+    }
+    return;
+  }
+  stopQueueNextDropzoneCountdownLoop();
+  dropzone.classList.remove('is-visible', 'is-active', 'has-timer');
+  const timerEl = dropzone.querySelector('.drag-next__timer');
+  if (timerEl instanceof HTMLElement) {
+    timerEl.textContent = '';
+  }
+}
+
+function isQueueNextDropzoneTarget(target) {
+  if (!queueNextDropzoneEl || !(target instanceof Element)) return false;
+  return queueNextDropzoneEl.contains(target);
+}
+
+function isPointOverQueueNextDropzone(clientX, clientY) {
+  if (!queueNextDropzoneEl || !queueNextDropzoneEl.classList.contains('is-visible')) return false;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  const rect = queueNextDropzoneEl.getBoundingClientRect();
+  return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+}
+
 function handleGlobalDragOver(event) {
   if (!draggingCard || !event.dataTransfer) return;
   updateDesktopDragGhostPosition(event.clientX, event.clientY);
   const target = event.target instanceof Element ? event.target : null;
+  if (isQueueNextDropzoneTarget(target)) {
+    const queueTarget = resolveQueueNextInsertTarget(layout);
+    if (queueTarget) {
+      const mode = resolveEffectiveDragMode(event, queueTarget.playlistIndex);
+      applyDragModeBadge('next');
+      event.dataTransfer.dropEffect = mode === 'copy' ? 'copy' : 'move';
+      return;
+    }
+  }
   if (isTrashDropzoneTarget(target)) {
     applyDragModeBadge('delete');
     event.dataTransfer.dropEffect = 'move';
@@ -1976,6 +2227,26 @@ function getZoneFromPoint(clientX, clientY) {
 function updateTouchCopyDragPreview(clientX, clientY) {
   updateTouchCopyGhostPosition(clientX, clientY);
   clearZoneDragOverState();
+  syncQueueNextDropzoneVisibility();
+
+  if (isPointOverQueueNextDropzone(clientX, clientY)) {
+    if (queueNextDropzoneEl) {
+      queueNextDropzoneEl.classList.add('is-active');
+    }
+    if (trashDropzoneEl) {
+      trashDropzoneEl.classList.remove('is-active');
+    }
+    applyDragModeBadge('next');
+    if (touchCopyDragGhost) {
+      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-delete');
+      touchCopyDragGhost.classList.add('is-next');
+    }
+    return;
+  }
+
+  if (queueNextDropzoneEl) {
+    queueNextDropzoneEl.classList.remove('is-active');
+  }
 
   if (isPointOverTrashDropzone(clientX, clientY)) {
     if (trashDropzoneEl) {
@@ -1983,7 +2254,7 @@ function updateTouchCopyDragPreview(clientX, clientY) {
     }
     applyDragModeBadge('delete');
     if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel');
+      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-next');
       touchCopyDragGhost.classList.add('is-delete');
     }
     return;
@@ -1997,7 +2268,7 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   if (!zone) {
     applyDragModeBadge('cancel');
     if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-delete');
+      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-delete', 'is-next');
       touchCopyDragGhost.classList.add('is-cancel');
     }
     return;
@@ -2007,7 +2278,7 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   const dropMode = resolveEffectiveDragMode(null, Number.isInteger(targetZoneIndex) ? targetZoneIndex : null);
   applyDragModeBadge(dropMode);
   if (touchCopyDragGhost) {
-    touchCopyDragGhost.classList.remove('is-delete', 'is-cancel', 'is-copy', 'is-move');
+    touchCopyDragGhost.classList.remove('is-delete', 'is-cancel', 'is-copy', 'is-move', 'is-next');
     touchCopyDragGhost.classList.add(dropMode === 'copy' ? 'is-copy' : 'is-move');
   }
 
@@ -2035,6 +2306,15 @@ async function finishTouchCopyDrag(clientX, clientY) {
   if (isPointOverTrashDropzone(clientX, clientY)) {
     try {
       await handleDragDeleteFromContext();
+    } finally {
+      cleanupTouchCopyDrag({ restoreLayout: false });
+    }
+    return;
+  }
+
+  if (isPointOverQueueNextDropzone(clientX, clientY)) {
+    try {
+      await handleDragQueueNextFromContext();
     } finally {
       cleanupTouchCopyDrag({ restoreLayout: false });
     }
@@ -6806,6 +7086,115 @@ async function handleDragDeleteFromContext() {
     playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
     setStatus('Не удалось синхронизировать удаление трека.');
+    return false;
+  }
+}
+
+async function handleDragQueueNextFromContext(event = null) {
+  if (!dragContext) return false;
+
+  const snapshotLayout = cloneLayoutState(dragContext.snapshotLayout);
+  const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
+  const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
+  const snapshotDap = normalizeDapConfig(dapConfig, snapshotLayout.length, dapConfig);
+  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, snapshotDap, snapshotLayout.length);
+  const snapshotDsp = normalizePlaylistDspFlags(playlistDsp, snapshotAutoplay, snapshotLayout.length);
+
+  const queueTarget = resolveQueueNextInsertTarget(snapshotLayout);
+  if (!queueTarget) {
+    setStatus('Нет активного воспроизведения. Режим "Следующий" недоступен.');
+    return false;
+  }
+
+  const targetZoneIndex = queueTarget.playlistIndex;
+  if (!Number.isInteger(targetZoneIndex) || targetZoneIndex < 0 || !Array.isArray(snapshotLayout[targetZoneIndex])) {
+    setStatus('Не удалось определить целевой плей-лист для режима "Следующий".');
+    return false;
+  }
+
+  const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
+  let insertIndex = queueTarget.insertIndex;
+  let queuedTrackAnchor = null;
+
+  if (isCopyDrop) {
+    if (!dragContext.file) {
+      setStatus('Не удалось определить трек для копирования.');
+      return false;
+    }
+    insertIndex = Math.max(0, Math.min(insertIndex, snapshotLayout[targetZoneIndex].length));
+    snapshotLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+    queuedTrackAnchor = {
+      file: dragContext.file,
+      playlistIndex: targetZoneIndex,
+      playlistPosition: insertIndex,
+    };
+  } else {
+    const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
+    if (resolution.playlistIndex < 0 || resolution.trackIndex < 0) {
+      setStatus('Не удалось определить исходную позицию трека.');
+      return false;
+    }
+
+    const sourcePlaylist = snapshotLayout[resolution.playlistIndex];
+    if (!Array.isArray(sourcePlaylist)) {
+      setStatus('Не удалось прочитать исходный плей-лист.');
+      return false;
+    }
+
+    const [removedFile] = sourcePlaylist.splice(resolution.trackIndex, 1);
+    const movedFile = typeof removedFile === 'string' && removedFile ? removedFile : resolution.file;
+    if (typeof movedFile !== 'string' || !movedFile) {
+      setStatus('Не удалось подготовить трек для переноса.');
+      return false;
+    }
+
+    if (resolution.playlistIndex === targetZoneIndex && resolution.trackIndex < insertIndex) {
+      insertIndex -= 1;
+    }
+
+    insertIndex = Math.max(0, Math.min(insertIndex, snapshotLayout[targetZoneIndex].length));
+    snapshotLayout[targetZoneIndex].splice(insertIndex, 0, movedFile);
+    queuedTrackAnchor = {
+      file: movedFile,
+      playlistIndex: targetZoneIndex,
+      playlistPosition: insertIndex,
+    };
+  }
+
+  const previousLayout = cloneLayoutState(layout);
+  const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
+  const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
+  const previousDap = { ...dapConfig };
+
+  layout = ensurePlaylists(snapshotLayout);
+  playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
+  dapConfig = normalizeDapConfig(snapshotDap, layout.length, snapshotDap);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, dapConfig, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(snapshotDsp, playlistAutoplay, layout.length);
+  dragDropHandled = true;
+  hideTrashDropzone();
+  clearDragModeBadge();
+  clearDragPreviewCard();
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    setQueueNextChainAnchor(queuedTrackAnchor);
+    setStatus(isCopyDrop ? 'Копия трека поставлена следующей и синхронизирована.' : 'Трек поставлен следующим и синхронизирован.');
+    return true;
+  } catch (err) {
+    console.error(err);
+    layout = previousLayout;
+    playlistNames = previousNames;
+    playlistMeta = previousMeta;
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    renderZones();
+    setStatus(isCopyDrop ? 'Не удалось синхронизировать "следующую" копию трека.' : 'Не удалось синхронизировать трек как следующий.');
     return false;
   }
 }
