@@ -5692,6 +5692,38 @@ if (DSP_ENABLED) {
   });
 }
 
+function isPrivateIpv4Address(address) {
+  if (typeof address !== 'string') return false;
+  if (address.startsWith('10.') || address.startsWith('192.168.')) return true;
+  if (!address.startsWith('172.')) return false;
+  const secondOctet = Number.parseInt(address.split('.')[1], 10);
+  return Number.isInteger(secondOctet) && secondOctet >= 16 && secondOctet <= 31;
+}
+
+function resolveLocalNetworkIp() {
+  let privateFallbackAddress = null;
+  let fallbackAddress = null;
+  const interfaces = os.networkInterfaces();
+
+  for (const entries of Object.values(interfaces)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry || entry.family !== 'IPv4' || entry.internal || entry.address.startsWith('169.254.')) continue;
+      if (entry.address.startsWith('192.168.')) return entry.address;
+      if (!privateFallbackAddress && isPrivateIpv4Address(entry.address)) privateFallbackAddress = entry.address;
+      if (!fallbackAddress) fallbackAddress = entry.address;
+    }
+  }
+
+  return privateFallbackAddress || fallbackAddress;
+}
+
 server.listen(PORT, () => {
   console.log(`Server is running at http://localhost:${PORT}`);
+  const localNetworkIp = resolveLocalNetworkIp();
+  if (localNetworkIp) {
+    console.log(`Local network URL for slaves: http://${localNetworkIp}:${PORT}`);
+  } else {
+    console.log('Local network URL for slaves: not detected');
+  }
 });

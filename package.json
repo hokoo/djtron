@@ -1,6 +1,6 @@
 {
   "name": "djtron-player",
-  "version": "0.3",
+  "version": "0.3.1",
   "description": "djTRON player for discos and music events with per-track controls and overlay transitions.",
   "main": "server.js",
   "scripts": {
