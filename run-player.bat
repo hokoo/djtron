@@ -28,7 +28,8 @@ echo Starting djTRON player on port !APP_PORT!...
 start "" "http://localhost:!APP_PORT!/"
 
 rem Start server
-npm start
+title djTRON
+node server.js
 
 endlocal
 exit /b 0

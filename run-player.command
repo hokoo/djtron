@@ -59,4 +59,5 @@ APP_PORT="$(resolve_port)"
 open "http://localhost:${APP_PORT}/"
 
 # Start server
-npm start
+printf '\033]0;djTRON\007'
+node server.js
