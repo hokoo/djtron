@@ -255,6 +255,14 @@ const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_HOST = 'host';
 const ROLE_SLAVE = 'slave';
 const ROLE_COHOST = 'co-host';
+const DAP_DEFAULT_VOLUME_PERCENT = 5;
+const DAP_MIN_VOLUME_PERCENT = 0;
+const DAP_MAX_VOLUME_PERCENT = 100;
+const DEFAULT_DAP_CONFIG = Object.freeze({
+  enabled: false,
+  playlistIndex: null,
+  volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
+});
 const RUNTIME_OVERRIDE_SCOPE_NONE = 'none';
 const RUNTIME_OVERRIDE_SCOPE_CLIENT = 'client';
 const RUNTIME_OVERRIDE_SCOPE_HOST = 'host';
@@ -580,6 +588,7 @@ function getDefaultLayoutState() {
     playlistMeta: [{ type: 'manual' }],
     playlistAutoplay: [false],
     playlistDsp: [false],
+    dapConfig: { ...DEFAULT_DAP_CONFIG },
     trackTitleModesByTrack: {},
   };
 }
@@ -638,10 +647,6 @@ function sanitizeLayout(layout) {
     normalized.push(clean);
   });
 
-  if (!normalized.length) {
-    normalized.push([]);
-  }
-
   return normalized;
 }
 
@@ -677,6 +682,68 @@ function normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layoutLength) 
   }
 
   return result;
+}
+
+function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return normalizeDapVolumePercent(fallback, DAP_DEFAULT_VOLUME_PERCENT);
+  }
+
+  const rounded = Math.round(numeric);
+  if (rounded < DAP_MIN_VOLUME_PERCENT) return DAP_MIN_VOLUME_PERCENT;
+  if (rounded > DAP_MAX_VOLUME_PERCENT) return DAP_MAX_VOLUME_PERCENT;
+  return rounded;
+}
+
+function sanitizeDapConfig(dapConfig, layoutLength, fallback = DEFAULT_DAP_CONFIG) {
+  const expectedLayoutLength = Number.isInteger(layoutLength) && layoutLength >= 0 ? layoutLength : 0;
+  const safeFallback =
+    fallback && typeof fallback === 'object'
+      ? {
+          enabled: Boolean(fallback.enabled),
+          playlistIndex: normalizePlaylistTrackIndex(fallback.playlistIndex),
+          volumePercent: normalizeDapVolumePercent(fallback.volumePercent, DAP_DEFAULT_VOLUME_PERCENT),
+        }
+      : { ...DEFAULT_DAP_CONFIG };
+  const rawConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : null;
+
+  const requestedEnabled =
+    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'enabled')
+      ? Boolean(rawConfig.enabled)
+      : safeFallback.enabled;
+  const requestedPlaylistIndex =
+    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'playlistIndex')
+      ? normalizePlaylistTrackIndex(rawConfig.playlistIndex)
+      : safeFallback.playlistIndex;
+  const playlistIndex =
+    requestedPlaylistIndex !== null &&
+    requestedPlaylistIndex >= 0 &&
+    requestedPlaylistIndex < expectedLayoutLength
+      ? requestedPlaylistIndex
+      : null;
+  const volumePercent = normalizeDapVolumePercent(
+    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'volumePercent')
+      ? rawConfig.volumePercent
+      : safeFallback.volumePercent,
+    safeFallback.volumePercent,
+  );
+  const enabled = Boolean(requestedEnabled && playlistIndex !== null);
+
+  return {
+    enabled,
+    playlistIndex,
+    volumePercent,
+  };
+}
+
+function normalizePlaylistAutoplayWithDap(playlistAutoplay, dapConfig, layoutLength) {
+  const normalized = normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
+  const sanitizedDap = sanitizeDapConfig(dapConfig, layoutLength, DEFAULT_DAP_CONFIG);
+  if (sanitizedDap.enabled && sanitizedDap.playlistIndex !== null) {
+    normalized[sanitizedDap.playlistIndex] = true;
+  }
+  return normalized;
 }
 
 function sanitizeTrackTitleMode(value) {
@@ -882,6 +949,33 @@ function isDeletingLivePlaybackPlaylist(nextLayout) {
   return !Array.isArray(nextLayout[livePlaylistIndex]);
 }
 
+function detectRemovedPlaylistIndex(previousLayout, nextLayout) {
+  if (!Array.isArray(previousLayout) || !Array.isArray(nextLayout)) return null;
+  if (previousLayout.length !== nextLayout.length + 1) return null;
+
+  const serializedPrevious = previousLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
+  const serializedNext = nextLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
+
+  let removedIndex = -1;
+  for (let index = 0; index < serializedNext.length; index += 1) {
+    if (serializedPrevious[index] === serializedNext[index]) continue;
+    removedIndex = index;
+    break;
+  }
+
+  if (removedIndex === -1) {
+    return previousLayout.length - 1;
+  }
+
+  for (let index = removedIndex; index < serializedNext.length; index += 1) {
+    if (serializedPrevious[index + 1] !== serializedNext[index]) {
+      return null;
+    }
+  }
+
+  return removedIndex;
+}
+
 function loadPersistedLayoutState() {
   try {
     if (!fs.existsSync(LAYOUT_STATE_PATH)) {
@@ -896,7 +990,12 @@ function loadPersistedLayoutState() {
     }
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
     const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
-    const sanitizedAutoplay = normalizePlaylistAutoplayFlags(parsed.playlistAutoplay, sanitizedLayout.length);
+    const sanitizedDap = sanitizeDapConfig(parsed.dapConfig, sanitizedLayout.length, DEFAULT_DAP_CONFIG);
+    const sanitizedAutoplay = normalizePlaylistAutoplayWithDap(
+      parsed.playlistAutoplay,
+      sanitizedDap,
+      sanitizedLayout.length,
+    );
     const sanitizedDsp = normalizePlaylistDspFlags(parsed.playlistDsp, sanitizedAutoplay, sanitizedLayout.length);
     const sanitizedTrackTitleModes = sanitizeTrackTitleModesByTrack(parsed.trackTitleModesByTrack);
 
@@ -911,6 +1010,7 @@ function loadPersistedLayoutState() {
       playlistMeta: sanitizedMeta,
       playlistAutoplay: sanitizedAutoplay,
       playlistDsp: sanitizedDsp,
+      dapConfig: sanitizedDap,
       trackTitleModesByTrack: sanitizedTrackTitleModes,
     };
   } catch (err) {
@@ -958,6 +1058,7 @@ function buildLayoutPayload(sourceClientId = null) {
     playlistMeta: sharedLayoutState.playlistMeta,
     playlistAutoplay: sharedLayoutState.playlistAutoplay,
     playlistDsp: sharedLayoutState.playlistDsp,
+    dapConfig: sharedLayoutState.dapConfig,
     trackTitleModesByTrack: sharedLayoutState.trackTitleModesByTrack,
     version: sharedLayoutState.version,
     updatedAt: sharedLayoutState.updatedAt,
@@ -4712,9 +4813,39 @@ async function handleApiLayoutUpdate(req, res) {
     Array.isArray(body.playlistMeta) ? body.playlistMeta : sharedLayoutState.playlistMeta,
     nextLayout.length,
   );
+  let nextDapConfig = auth.isServer
+    ? sanitizeDapConfig(
+        body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : sharedLayoutState.dapConfig,
+        nextLayout.length,
+        sharedLayoutState.dapConfig,
+      )
+    : sanitizeDapConfig(sharedLayoutState.dapConfig, nextLayout.length, sharedLayoutState.dapConfig);
+  if (!auth.isServer) {
+    const currentDapIndex = normalizePlaylistTrackIndex(sharedLayoutState.dapConfig && sharedLayoutState.dapConfig.playlistIndex);
+    const isCurrentDapEnabled = Boolean(sharedLayoutState.dapConfig && sharedLayoutState.dapConfig.enabled);
+    const removedPlaylistIndex = detectRemovedPlaylistIndex(sharedLayoutState.layout, nextLayout);
+    if (currentDapIndex !== null && removedPlaylistIndex !== null) {
+      if (isCurrentDapEnabled && removedPlaylistIndex === currentDapIndex) {
+        sendJson(res, 409, { error: 'Нельзя удалить плей-лист, выбранный для DAP.' });
+        return;
+      }
+
+      if (removedPlaylistIndex < currentDapIndex) {
+        nextDapConfig = sanitizeDapConfig(
+          {
+            ...sharedLayoutState.dapConfig,
+            enabled: isCurrentDapEnabled,
+            playlistIndex: currentDapIndex - 1,
+          },
+          nextLayout.length,
+          sharedLayoutState.dapConfig,
+        );
+      }
+    }
+  }
   const nextPlaylistAutoplay = auth.isServer
-    ? normalizePlaylistAutoplayFlags(body.playlistAutoplay, nextLayout.length)
-    : normalizePlaylistAutoplayFlags(sharedLayoutState.playlistAutoplay, nextLayout.length);
+    ? normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
+    : normalizePlaylistAutoplayWithDap(sharedLayoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
   const nextPlaylistDsp = auth.isServer
     ? normalizePlaylistDspFlags(
         body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
@@ -4737,6 +4868,7 @@ async function handleApiLayoutUpdate(req, res) {
     JSON.stringify(nextPlaylistMeta) !== JSON.stringify(sharedLayoutState.playlistMeta) ||
     JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay) ||
     JSON.stringify(nextPlaylistDsp) !== JSON.stringify(sharedLayoutState.playlistDsp) ||
+    JSON.stringify(nextDapConfig) !== JSON.stringify(sharedLayoutState.dapConfig) ||
     JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(sharedLayoutState.trackTitleModesByTrack);
 
   if (hasChanged) {
@@ -4746,6 +4878,7 @@ async function handleApiLayoutUpdate(req, res) {
       playlistMeta: nextPlaylistMeta,
       playlistAutoplay: nextPlaylistAutoplay,
       playlistDsp: nextPlaylistDsp,
+      dapConfig: nextDapConfig,
       trackTitleModesByTrack: nextTrackTitleModesByTrack,
       version: sharedLayoutState.version + 1,
       updatedAt: Date.now(),

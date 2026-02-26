@@ -23,6 +23,20 @@
 				<span>Seek</span>
 				<input type="checkbox" id="liveSeekEnabled" class="cohost-role-switch settings-toggle-switch"/>
 			</label>
+			<section class="panel sidebar-panel dap-settings" id="dapSettingsPanel" hidden>
+				<label class="settings-toggle-row dap-settings__toggle-row" for="dapEnabled">
+					<span>DAP</span>
+					<input type="checkbox" id="dapEnabled" class="cohost-role-switch settings-toggle-switch"/>
+				</label>
+				<label class="dap-settings__field" for="dapPlaylistSelect">
+					<span>Плей-лист DAP</span>
+					<select id="dapPlaylistSelect"></select>
+				</label>
+				<label class="dap-settings__field" for="dapVolumePercent">
+					<span>Громкость DAP (%)</span>
+					<input type="number" id="dapVolumePercent" min="0" max="100" step="1" inputmode="numeric"/>
+				</label>
+			</section>
 			<section class="panel sidebar-panel" id="overlaySettingsPanel">
 				<div class="settings">
 					<label>

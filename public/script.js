@@ -14,6 +14,10 @@ const showVolumePresetsToggleRow = showVolumePresetsToggle
   : null;
 const liveSeekEnabledToggle = document.getElementById('liveSeekEnabled');
 const liveSeekToggleRow = liveSeekEnabledToggle ? liveSeekEnabledToggle.closest('.settings-toggle-row') : null;
+const dapSettingsPanelEl = document.getElementById('dapSettingsPanel');
+const dapEnabledToggle = document.getElementById('dapEnabled');
+const dapPlaylistSelect = document.getElementById('dapPlaylistSelect');
+const dapVolumePercentInput = document.getElementById('dapVolumePercent');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const serverPanelEl = document.getElementById('serverPanel');
@@ -92,6 +96,7 @@ const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
 const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
+const DAP_NO_SILENCE_GUARD_INTERVAL_MS = 320;
 const TOUCH_COPY_HOLD_MS = 360;
 const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
@@ -119,6 +124,14 @@ const PLAYLIST_TYPE_FOLDER = 'folder';
 const ROLE_HOST = 'host';
 const ROLE_SLAVE = 'slave';
 const ROLE_COHOST = 'co-host';
+const DAP_DEFAULT_VOLUME_PERCENT = 5;
+const DAP_MIN_VOLUME_PERCENT = 0;
+const DAP_MAX_VOLUME_PERCENT = 100;
+const DEFAULT_DAP_CONFIG = Object.freeze({
+  enabled: false,
+  playlistIndex: null,
+  volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
+});
 const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
 const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
 const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
@@ -170,6 +183,7 @@ let playlistNames = ['Плей-лист 1'];
 let playlistMeta = [{ type: PLAYLIST_TYPE_MANUAL }];
 let playlistAutoplay = [false];
 let playlistDsp = [false];
+let dapConfig = { ...DEFAULT_DAP_CONFIG };
 let availableFiles = [];
 let availableFolders = [];
 let audioCatalogSignature = '';
@@ -178,6 +192,12 @@ let audioCatalogPollInFlight = false;
 let tracksReloadInFlight = false;
 let tracksReloadQueued = false;
 let tracksReloadQueuedReason = 'auto';
+let dapNoSilenceGuardTimer = null;
+let dapAutoStartInFlight = false;
+let autoplayStartInFlight = false;
+let overlayHandoffInFlight = false;
+let dapNoSilenceArmedPlaylistIndex = null;
+let dapInterruptedPlaybackSnapshot = null;
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
@@ -647,7 +667,7 @@ function updateTransitionSettingsUi() {
 
 function applyLiveVolumeToCurrentAudio() {
   if (!currentAudio) return;
-  currentAudio.volume = clampVolume(livePlaybackVolume);
+  currentAudio.volume = getEffectiveLiveVolume(currentTrack);
 }
 
 function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) {
@@ -669,8 +689,8 @@ function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) 
   return changed;
 }
 
-function getEffectiveLiveVolume() {
-  return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+function getEffectiveLiveVolume(trackOrContext = null) {
+  return getEffectiveLiveVolumeForTrack(trackOrContext);
 }
 
 function setShowVolumePresetsEnabled(
@@ -722,6 +742,62 @@ function updateLiveSeekUi() {
       isSlaveRole() ||
       ((isHostRole() || isCoHostRole()) && liveSeekEnabled);
     nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
+  }
+}
+
+function getPlaylistDisplayLabel(playlistIndex) {
+  const safeIndex = Number.isInteger(playlistIndex) && playlistIndex >= 0 ? playlistIndex : 0;
+  return sanitizePlaylistName(playlistNames[safeIndex], safeIndex);
+}
+
+function updateDapSettingsUi(role = currentRole) {
+  const isHost = isHostRole(role);
+  const normalizedLayout = ensurePlaylists(layout);
+  const normalizedDap = normalizeDapConfig(dapConfig, normalizedLayout.length, dapConfig);
+  dapConfig = normalizedDap;
+
+  if (dapSettingsPanelEl) {
+    dapSettingsPanelEl.hidden = !isHost;
+  }
+
+  if (dapPlaylistSelect) {
+    const selectedValue = normalizedDap.playlistIndex !== null
+      ? String(normalizedDap.playlistIndex)
+      : '';
+    const previousValue = dapPlaylistSelect.value;
+    dapPlaylistSelect.innerHTML = '';
+
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = 'Выберите плей-лист';
+    dapPlaylistSelect.appendChild(emptyOption);
+
+    for (let index = 0; index < normalizedLayout.length; index += 1) {
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = `${index + 1}. ${getPlaylistDisplayLabel(index)}`;
+      dapPlaylistSelect.appendChild(option);
+    }
+
+    dapPlaylistSelect.value = selectedValue;
+    if (dapPlaylistSelect.value !== selectedValue) {
+      dapPlaylistSelect.value = '';
+    }
+    if (previousValue && !selectedValue && !dapPlaylistSelect.value) {
+      dapPlaylistSelect.value = '';
+    }
+
+    dapPlaylistSelect.disabled = !isHost || !normalizedDap.enabled || normalizedLayout.length <= 0;
+  }
+
+  if (dapEnabledToggle) {
+    dapEnabledToggle.checked = normalizedDap.enabled;
+    dapEnabledToggle.disabled = !isHost || normalizedLayout.length <= 0;
+  }
+
+  if (dapVolumePercentInput) {
+    dapVolumePercentInput.value = String(normalizedDap.volumePercent);
+    dapVolumePercentInput.disabled = !isHost || !normalizedDap.enabled;
   }
 }
 
@@ -1172,8 +1248,10 @@ function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
   nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
   nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
 
+  const rootFiles = availableFiles.filter((file) => typeof file === 'string' && file && !file.includes('/'));
+
   let manualIndex = getManualPlaylistIndex(nextMeta, nextLayout);
-  if (manualIndex < 0) {
+  if (manualIndex < 0 && rootFiles.length > 0) {
     nextLayout.push([]);
     nextNames.push(defaultPlaylistName(nextLayout.length - 1));
     nextMeta.push(defaultPlaylistMeta());
@@ -1181,12 +1259,13 @@ function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
   }
 
   const occurrence = buildFileOccurrenceMap(nextLayout);
-  const rootFiles = availableFiles.filter((file) => typeof file === 'string' && file && !file.includes('/'));
-  rootFiles.forEach((file) => {
-    if ((occurrence.get(file) || 0) > 0) return;
-    nextLayout[manualIndex].push(file);
-    occurrence.set(file, (occurrence.get(file) || 0) + 1);
-  });
+  if (manualIndex >= 0 && manualIndex < nextLayout.length) {
+    rootFiles.forEach((file) => {
+      if ((occurrence.get(file) || 0) > 0) return;
+      nextLayout[manualIndex].push(file);
+      occurrence.set(file, (occurrence.get(file) || 0) + 1);
+    });
+  }
 
   availableFolders.forEach((folder) => {
     const folderIndex = folderIndexByKey.get(folder.key);
@@ -2358,6 +2437,7 @@ function applyRoleUi(role) {
   renderCohostUsers();
   updateVolumePresetsUi();
   updateLiveSeekUi();
+  updateDapSettingsUi(resolvedRole);
   updatePrereleaseSettingUi(resolvedRole);
   updateDspSetupUi(resolvedRole);
 
@@ -2856,6 +2936,60 @@ function getCurrentTrackRemainingSeconds() {
   return Math.max(0, duration - Math.max(0, currentTime));
 }
 
+function isTrackPlaybackContextEqual(leftContext = null, rightContext = null) {
+  const left = normalizeTrackPlaybackContext(leftContext);
+  const right = normalizeTrackPlaybackContext(rightContext);
+  if (left.playlistIndex === null || left.playlistPosition === null) return false;
+  if (right.playlistIndex === null || right.playlistPosition === null) return false;
+  return left.playlistIndex === right.playlistIndex && left.playlistPosition === right.playlistPosition;
+}
+
+function resolveDurationLabelPlaybackContext(label) {
+  if (!label || typeof label.closest !== 'function') return null;
+  const card = label.closest('.track-card');
+  if (!card) return null;
+  const context = normalizeTrackPlaybackContext({
+    playlistIndex: card.dataset.playlistIndex,
+    playlistPosition: card.dataset.playlistPosition,
+  });
+  if (context.playlistIndex === null || context.playlistPosition === null) return null;
+  return context;
+}
+
+function getDapInterruptedPlaybackDisplayState(config = dapConfig) {
+  const interruptedTrack = resolveDapInterruptedPlaybackTrack(config);
+  if (!interruptedTrack) return null;
+
+  const playbackContext = normalizeTrackPlaybackContext(interruptedTrack);
+  if (playbackContext.playlistIndex === null || playbackContext.playlistPosition === null) return null;
+
+  const fileKey = trackKey(interruptedTrack.file, interruptedTrack.basePath || '/audio');
+  if (
+    currentTrack &&
+    currentAudio &&
+    !currentAudio.paused &&
+    currentTrack.key === fileKey &&
+    isTrackPlaybackContextEqual(currentTrack, playbackContext)
+  ) {
+    return null;
+  }
+
+  const rawStartAtSeconds =
+    dapInterruptedPlaybackSnapshot && Number.isFinite(Number(dapInterruptedPlaybackSnapshot.startAtSeconds))
+      ? Number(dapInterruptedPlaybackSnapshot.startAtSeconds)
+      : 0;
+  const startAtSeconds = Math.max(0, rawStartAtSeconds);
+  const knownDuration = getKnownDurationSeconds(fileKey);
+  const remainingSeconds =
+    Number.isFinite(knownDuration) && knownDuration > 0 ? Math.max(0, knownDuration - startAtSeconds) : null;
+
+  return {
+    fileKey,
+    playbackContext,
+    remainingSeconds,
+  };
+}
+
 function getHostPlaybackElapsedSeconds() {
   if (!hostPlaybackState || !hostPlaybackState.trackFile) return 0;
 
@@ -2916,6 +3050,133 @@ function normalizeTrackPlaybackContext(playbackContext = null) {
     playlistIndex: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistIndex : null),
     playlistPosition: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistPosition : null),
   };
+}
+
+function resolveTrackContextInLayoutByFile(
+  file,
+  { preferredPlaylistIndex = null, preferredPlaylistPosition = null } = {},
+) {
+  const normalizedFile = typeof file === 'string' ? file.trim() : '';
+  if (!normalizedFile) return null;
+
+  const normalizedLayout = ensurePlaylists(layout);
+  if (!normalizedLayout.length) return null;
+
+  const candidateIndices = [];
+  const pushCandidate = (rawIndex) => {
+    const index = normalizePlaylistTrackIndex(rawIndex);
+    if (index === null || index < 0 || index >= normalizedLayout.length) return;
+    if (candidateIndices.includes(index)) return;
+    const playlist = Array.isArray(normalizedLayout[index]) ? normalizedLayout[index] : [];
+    if (!playlist.includes(normalizedFile)) return;
+    candidateIndices.push(index);
+  };
+
+  pushCandidate(preferredPlaylistIndex);
+  for (let index = 0; index < normalizedLayout.length; index += 1) {
+    pushCandidate(index);
+  }
+
+  for (const playlistIndex of candidateIndices) {
+    const playlist = Array.isArray(normalizedLayout[playlistIndex]) ? normalizedLayout[playlistIndex] : [];
+    let playlistPosition =
+      playlistIndex === normalizePlaylistTrackIndex(preferredPlaylistIndex)
+        ? normalizePlaylistTrackIndex(preferredPlaylistPosition)
+        : null;
+    if (
+      playlistPosition === null ||
+      playlistPosition < 0 ||
+      playlistPosition >= playlist.length ||
+      playlist[playlistPosition] !== normalizedFile
+    ) {
+      playlistPosition = playlist.indexOf(normalizedFile);
+    }
+    if (playlistPosition === -1) continue;
+    return {
+      playlistIndex,
+      playlistPosition,
+    };
+  }
+
+  return null;
+}
+
+function reconcileTrackContextWithLayout(track, { preferredPlaylistIndex = null } = {}) {
+  if (!track || typeof track !== 'object') return false;
+
+  const file = typeof track.file === 'string' ? track.file.trim() : '';
+  const previousPlaylistIndex = normalizePlaylistTrackIndex(track.playlistIndex);
+  const previousPlaylistPosition = normalizePlaylistTrackIndex(track.playlistPosition);
+  if (!file) {
+    const changed = previousPlaylistIndex !== null || previousPlaylistPosition !== null;
+    track.playlistIndex = null;
+    track.playlistPosition = null;
+    return changed;
+  }
+
+  const preferredIndex = normalizePlaylistTrackIndex(preferredPlaylistIndex);
+  const fallbackPreferredIndex = preferredIndex !== null ? preferredIndex : previousPlaylistIndex;
+  const resolvedContext = resolveTrackContextInLayoutByFile(file, {
+    preferredPlaylistIndex: fallbackPreferredIndex,
+    preferredPlaylistPosition: previousPlaylistPosition,
+  });
+
+  const nextPlaylistIndex = resolvedContext ? resolvedContext.playlistIndex : null;
+  const nextPlaylistPosition = resolvedContext ? resolvedContext.playlistPosition : null;
+  const changed = previousPlaylistIndex !== nextPlaylistIndex || previousPlaylistPosition !== nextPlaylistPosition;
+  if (!changed) return false;
+
+  track.playlistIndex = nextPlaylistIndex;
+  track.playlistPosition = nextPlaylistPosition;
+  return true;
+}
+
+function reconcileDapInterruptedSnapshotWithLayout() {
+  if (!dapInterruptedPlaybackSnapshot || typeof dapInterruptedPlaybackSnapshot !== 'object') return false;
+
+  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
+  const previousPlaylistIndex = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistIndex);
+  const previousPlaylistPosition = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistPosition);
+  const snapshotFile =
+    typeof dapInterruptedPlaybackSnapshot.file === 'string' ? dapInterruptedPlaybackSnapshot.file.trim() : '';
+
+  if (dapPlaylistIndex === null || !snapshotFile) {
+    dapInterruptedPlaybackSnapshot = null;
+    return true;
+  }
+
+  const resolvedContext = resolveTrackContextInLayoutByFile(snapshotFile, {
+    preferredPlaylistIndex: dapPlaylistIndex,
+    preferredPlaylistPosition: previousPlaylistPosition,
+  });
+
+  if (!resolvedContext || resolvedContext.playlistIndex !== dapPlaylistIndex) {
+    dapInterruptedPlaybackSnapshot = null;
+    return true;
+  }
+
+  const changed =
+    previousPlaylistIndex !== resolvedContext.playlistIndex || previousPlaylistPosition !== resolvedContext.playlistPosition;
+  if (!changed) return false;
+
+  dapInterruptedPlaybackSnapshot.playlistIndex = resolvedContext.playlistIndex;
+  dapInterruptedPlaybackSnapshot.playlistPosition = resolvedContext.playlistPosition;
+  return true;
+}
+
+function buildPlaylistSelectionIdentity(layoutState, metaState, playlistIndex) {
+  const normalizedLayout = ensurePlaylists(layoutState);
+  const normalizedIndex = normalizePlaylistTrackIndex(playlistIndex);
+  if (normalizedIndex === null || normalizedIndex < 0 || normalizedIndex >= normalizedLayout.length) return '';
+
+  const normalizedMeta = normalizePlaylistMeta(metaState, normalizedLayout.length);
+  const metaEntry = normalizedMeta[normalizedIndex] || defaultPlaylistMeta();
+  const playlist = Array.isArray(normalizedLayout[normalizedIndex]) ? normalizedLayout[normalizedIndex] : [];
+  return JSON.stringify({
+    type: metaEntry.type,
+    folderKey: metaEntry.type === PLAYLIST_TYPE_FOLDER ? metaEntry.folderKey || '' : '',
+    files: playlist,
+  });
 }
 
 function buildLiveDspNextTrackDescriptor(trackFile, playbackContext = null, basePath = '/audio') {
@@ -3116,19 +3377,38 @@ function syncHostNowPlayingPanel() {
   }
 }
 
-function getTrackDurationTextByKey(fileKey) {
-  const isCurrent = Boolean(currentTrack && currentAudio && currentTrack.key === fileKey);
+function getTrackDurationTextByKey(fileKey, playbackContext = null) {
+  const normalizedContext = normalizeTrackPlaybackContext(playbackContext);
+  const hasContext = normalizedContext.playlistIndex !== null && normalizedContext.playlistPosition !== null;
+
+  const isCurrent = Boolean(
+    currentTrack &&
+      currentAudio &&
+      currentTrack.key === fileKey &&
+      (!hasContext || isTrackPlaybackContextEqual(currentTrack, normalizedContext)),
+  );
 
   if (isCurrent) {
     const remaining = getCurrentTrackRemainingSeconds();
     return formatDuration(remaining, { useCeil: true });
   }
 
+  const interruptedDap = getDapInterruptedPlaybackDisplayState(dapConfig);
+  if (
+    interruptedDap &&
+    interruptedDap.fileKey === fileKey &&
+    hasContext &&
+    isTrackPlaybackContextEqual(interruptedDap.playbackContext, normalizedContext)
+  ) {
+    return formatDuration(interruptedDap.remainingSeconds, { useCeil: true });
+  }
+
   const isCoHostCurrent =
     isCoHostRole() && hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
       ? trackKey(hostPlaybackState.trackFile, '/audio') === fileKey
       : false;
-  if (isCoHostCurrent) {
+  const coHostContextMatches = !hasContext || isTrackPlaybackContextEqual(hostPlaybackState, normalizedContext);
+  if (isCoHostCurrent && coHostContextMatches) {
     const knownDuration = getKnownDurationSeconds(fileKey);
     const duration =
       Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : knownDuration;
@@ -3146,9 +3426,9 @@ function refreshTrackDurationLabels(fileKey) {
   const labels = durationLabelsByFile.get(fileKey);
   if (!labels || !labels.size) return;
 
-  const text = getTrackDurationTextByKey(fileKey);
   for (const label of labels) {
-    label.textContent = text;
+    const context = resolveDurationLabelPlaybackContext(label);
+    label.textContent = getTrackDurationTextByKey(fileKey, context);
   }
 }
 
@@ -3301,6 +3581,7 @@ function stopAndClearLocalPlayback() {
   currentAudio = null;
   currentTrack = null;
   resetLiveDspNextTrackPreview();
+  clearDapInterruptedPlaybackSnapshot();
   syncNowPlayingPanel();
 }
 
@@ -3362,6 +3643,8 @@ function syncNowPlayingPanelForCoHost() {
 
 function syncNowPlayingPanel() {
   if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
+  const isPauseLocked = isDapPauseLocked(currentTrack, currentAudio, dapConfig);
+  nowPlayingControlBtn.classList.toggle('is-pause-locked', isPauseLocked);
 
   if (isCoHostRole()) {
     setDspTransitionReelReverse(false);
@@ -4198,7 +4481,10 @@ async function toggleNowPlayingPlayback() {
       startProgressLoop(currentAudio, currentTrack.key);
       setStatus(`Играет: ${currentTrack.file}`);
     } else {
-      await pauseCurrentPlayback(currentTrack, currentAudio);
+      const paused = await pauseCurrentPlayback(currentTrack, currentAudio);
+      if (paused) {
+        await ensureDapNoSilencePlayback({ reason: 'toggle-current-pause' });
+      }
     }
   } catch (err) {
     console.error(err);
@@ -4305,11 +4591,12 @@ function isTrackCardDragBlocked(card) {
   return false;
 }
 
-function applyPlayButtonState(button, isPauseState) {
+function applyPlayButtonState(button, isPauseState, { pauseLocked = false } = {}) {
   if (!button) return;
   button.dataset.state = isPauseState ? 'pause' : 'play';
   button.title = isPauseState ? 'Пауза' : 'Воспроизвести';
   button.setAttribute('aria-label', isPauseState ? 'Пауза' : 'Воспроизвести');
+  button.classList.toggle('is-pause-locked', Boolean(isPauseState && pauseLocked));
 }
 
 function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
@@ -4318,12 +4605,15 @@ function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
 
   if (buttons) {
     for (const button of buttons) {
-      applyPlayButtonState(button, false);
+      applyPlayButtonState(button, false, { pauseLocked: false });
     }
 
     if (isPlaying) {
       const targetButton = getTrackButtonByContext(fileKey, playbackContext);
-      applyPlayButtonState(targetButton, true);
+      const isPauseLocked =
+        isDapNoSilenceActive() &&
+        isDapTrackContext(playbackContext, dapConfig);
+      applyPlayButtonState(targetButton, true, { pauseLocked: isPauseLocked });
     }
   }
 
@@ -4356,6 +4646,19 @@ function setTrackPaused(fileKey, isPaused, playbackContext = null) {
 
   targetCard.classList.add('is-paused');
   targetCard.classList.remove('is-playing');
+}
+
+function setTrackPausedByContext(fileKey, isPaused, playbackContext = null) {
+  const targetCard = getTrackCardByContext(fileKey, playbackContext);
+  if (!targetCard) return;
+
+  if (isPaused) {
+    targetCard.classList.add('is-paused');
+    targetCard.classList.remove('is-playing');
+    return;
+  }
+
+  targetCard.classList.remove('is-paused');
 }
 
 function normalizeAudioStartOffsetSeconds(value) {
@@ -4531,7 +4834,7 @@ function buildTrackCard(
 
   const durationLabel = document.createElement('span');
   durationLabel.className = 'track-duration';
-  durationLabel.textContent = getTrackDurationTextByKey(key);
+  durationLabel.textContent = getTrackDurationTextByKey(key, { playlistIndex, playlistPosition });
   addToMultiMap(durationLabelsByFile, key, durationLabel);
 
   const playButton = document.createElement('button');
@@ -4677,9 +4980,7 @@ function applyDragPreview(zoneBody, event) {
 }
 
 function ensurePlaylists(playlists) {
-  const normalized = Array.isArray(playlists) ? playlists.map((playlist) => (Array.isArray(playlist) ? playlist : [])) : [];
-  if (!normalized.length) normalized.push([]);
-  return normalized;
+  return Array.isArray(playlists) ? playlists.map((playlist) => (Array.isArray(playlist) ? playlist : [])) : [];
 }
 
 function defaultPlaylistName(index) {
@@ -4728,6 +5029,365 @@ function normalizePlaylistDspFlags(flags, autoplayFlags, expectedLength) {
   return result;
 }
 
+function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return normalizeDapVolumePercent(fallback, DAP_DEFAULT_VOLUME_PERCENT);
+  }
+
+  const rounded = Math.round(numeric);
+  if (rounded < DAP_MIN_VOLUME_PERCENT) return DAP_MIN_VOLUME_PERCENT;
+  if (rounded > DAP_MAX_VOLUME_PERCENT) return DAP_MAX_VOLUME_PERCENT;
+  return rounded;
+}
+
+function normalizeDapConfig(config, layoutLength, fallback = DEFAULT_DAP_CONFIG) {
+  const expectedLength = Number.isInteger(layoutLength) && layoutLength >= 0 ? layoutLength : 0;
+  const safeFallback =
+    fallback && typeof fallback === 'object'
+      ? {
+          enabled: Boolean(fallback.enabled),
+          playlistIndex: normalizePlaylistTrackIndex(fallback.playlistIndex),
+          volumePercent: normalizeDapVolumePercent(fallback.volumePercent, DAP_DEFAULT_VOLUME_PERCENT),
+        }
+      : { ...DEFAULT_DAP_CONFIG };
+  const raw = config && typeof config === 'object' ? config : null;
+
+  const requestedEnabled =
+    raw && Object.prototype.hasOwnProperty.call(raw, 'enabled') ? Boolean(raw.enabled) : safeFallback.enabled;
+  const requestedPlaylistIndex =
+    raw && Object.prototype.hasOwnProperty.call(raw, 'playlistIndex')
+      ? normalizePlaylistTrackIndex(raw.playlistIndex)
+      : safeFallback.playlistIndex;
+  const playlistIndex =
+    requestedPlaylistIndex !== null &&
+    requestedPlaylistIndex >= 0 &&
+    requestedPlaylistIndex < expectedLength
+      ? requestedPlaylistIndex
+      : null;
+  const volumePercent = normalizeDapVolumePercent(
+    raw && Object.prototype.hasOwnProperty.call(raw, 'volumePercent') ? raw.volumePercent : safeFallback.volumePercent,
+    safeFallback.volumePercent,
+  );
+  const enabled = Boolean(requestedEnabled && playlistIndex !== null);
+
+  return {
+    enabled,
+    playlistIndex,
+    volumePercent,
+  };
+}
+
+function normalizePlaylistAutoplayWithDap(flags, dapState, expectedLength) {
+  const normalized = normalizePlaylistAutoplayFlags(flags, expectedLength);
+  const normalizedDap = normalizeDapConfig(dapState, expectedLength, DEFAULT_DAP_CONFIG);
+  if (normalizedDap.enabled && normalizedDap.playlistIndex !== null) {
+    normalized[normalizedDap.playlistIndex] = true;
+  }
+  return normalized;
+}
+
+function isDapEnabled(config = dapConfig) {
+  return Boolean(config && config.enabled && Number.isInteger(config.playlistIndex) && config.playlistIndex >= 0);
+}
+
+function getDapPlaylistIndex(config = dapConfig) {
+  if (!isDapEnabled(config)) return null;
+  return normalizePlaylistTrackIndex(config.playlistIndex);
+}
+
+function isDapPlaylistIndex(playlistIndex, config = dapConfig) {
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  return dapPlaylistIndex !== null && dapPlaylistIndex === normalizePlaylistTrackIndex(playlistIndex);
+}
+
+function buildPlaylistRenderOrder(length, config = dapConfig) {
+  const expectedLength = Number.isInteger(length) && length > 0 ? length : 0;
+  const order = Array.from({ length: expectedLength }, (_, index) => index);
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null) return order;
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= expectedLength) return order;
+  return [dapPlaylistIndex, ...order.filter((index) => index !== dapPlaylistIndex)];
+}
+
+function isDapTrackContext(trackOrContext = null, config = dapConfig) {
+  if (!trackOrContext || typeof trackOrContext !== 'object') return false;
+  const playlistIndex = normalizePlaylistTrackIndex(trackOrContext.playlistIndex);
+  if (playlistIndex === null) return false;
+  return isDapPlaylistIndex(playlistIndex, config);
+}
+
+function getEffectiveLiveVolumeForTrack(trackOrContext = null) {
+  if (!isHostRole()) {
+    return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+  }
+  if (!isDapTrackContext(trackOrContext)) {
+    return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+  }
+  return clampVolume(normalizeDapVolumePercent(dapConfig.volumePercent, DAP_DEFAULT_VOLUME_PERCENT) / 100);
+}
+
+function getDapPlaylistFiles(config = dapConfig) {
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null) return [];
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return [];
+  const playlist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  return playlist.filter((file) => typeof file === 'string' && file.trim());
+}
+
+function disarmDapNoSilence() {
+  dapNoSilenceArmedPlaylistIndex = null;
+}
+
+function clearDapInterruptedPlaybackSnapshot() {
+  const previousSnapshot =
+    dapInterruptedPlaybackSnapshot && typeof dapInterruptedPlaybackSnapshot === 'object'
+      ? { ...dapInterruptedPlaybackSnapshot }
+      : null;
+  dapInterruptedPlaybackSnapshot = null;
+
+  if (!previousSnapshot) return;
+  const previousFile = typeof previousSnapshot.file === 'string' ? previousSnapshot.file.trim() : '';
+  if (!previousFile) return;
+
+  const previousContext = normalizeTrackPlaybackContext(previousSnapshot);
+  if (previousContext.playlistIndex !== null && previousContext.playlistPosition !== null) {
+    setTrackPausedByContext(trackKey(previousFile, '/audio'), false, previousContext);
+  }
+  refreshTrackDurationLabels(trackKey(previousFile, '/audio'));
+}
+
+function captureDapInterruptedPlaybackSnapshot(track = currentTrack, audio = currentAudio, config = dapConfig) {
+  if (!track || !audio) return false;
+  if (!isDapTrackContext(track, config)) return false;
+
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return false;
+
+  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  if (!dapPlaylist.length) return false;
+
+  const trackFile = typeof track.file === 'string' ? track.file.trim() : '';
+  if (!trackFile) return false;
+
+  let trackPosition = normalizePlaylistTrackIndex(track.playlistPosition);
+  if (
+    trackPosition === null ||
+    trackPosition < 0 ||
+    trackPosition >= dapPlaylist.length ||
+    dapPlaylist[trackPosition] !== trackFile
+  ) {
+    trackPosition = dapPlaylist.indexOf(trackFile);
+  }
+  if (trackPosition < 0) return false;
+
+  const rawCurrentTime = Number(audio.currentTime);
+  const startAtSeconds = Number.isFinite(rawCurrentTime) && rawCurrentTime > 0 ? rawCurrentTime : 0;
+
+  dapInterruptedPlaybackSnapshot = {
+    file: trackFile,
+    playlistIndex: dapPlaylistIndex,
+    playlistPosition: trackPosition,
+    startAtSeconds,
+  };
+  return true;
+}
+
+function resolveDapInterruptedPlaybackTrack(config = dapConfig) {
+  if (!dapInterruptedPlaybackSnapshot || typeof dapInterruptedPlaybackSnapshot !== 'object') return null;
+
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) {
+    clearDapInterruptedPlaybackSnapshot();
+    return null;
+  }
+
+  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  if (!dapPlaylist.length) {
+    clearDapInterruptedPlaybackSnapshot();
+    return null;
+  }
+
+  const storedFile = typeof dapInterruptedPlaybackSnapshot.file === 'string' ? dapInterruptedPlaybackSnapshot.file.trim() : '';
+  let resolvedPosition = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistPosition);
+  let resolvedFile = storedFile;
+
+  if (
+    resolvedPosition !== null &&
+    resolvedPosition >= 0 &&
+    resolvedPosition < dapPlaylist.length &&
+    dapPlaylist[resolvedPosition] === storedFile
+  ) {
+    resolvedFile = storedFile;
+  } else {
+    const byFilePosition = storedFile ? dapPlaylist.indexOf(storedFile) : -1;
+    if (byFilePosition !== -1) {
+      resolvedPosition = byFilePosition;
+      resolvedFile = storedFile;
+    } else if (resolvedPosition !== null && resolvedPosition >= 0 && resolvedPosition < dapPlaylist.length) {
+      resolvedFile = dapPlaylist[resolvedPosition];
+    } else {
+      clearDapInterruptedPlaybackSnapshot();
+      return null;
+    }
+  }
+
+  if (typeof resolvedFile !== 'string' || !resolvedFile.trim()) {
+    clearDapInterruptedPlaybackSnapshot();
+    return null;
+  }
+
+  return {
+    file: resolvedFile,
+    basePath: '/audio',
+    playlistIndex: dapPlaylistIndex,
+    playlistPosition: resolvedPosition,
+    startAtSeconds: normalizeAudioStartOffsetSeconds(dapInterruptedPlaybackSnapshot.startAtSeconds),
+    fromInterruptedDap: true,
+  };
+}
+
+function armDapNoSilenceByPlaylistIndex(playlistIndex, config = dapConfig) {
+  if (!isDapEnabled(config)) return false;
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  const normalizedPlaylistIndex = normalizePlaylistTrackIndex(playlistIndex);
+  if (dapPlaylistIndex === null || normalizedPlaylistIndex === null) return false;
+  if (dapPlaylistIndex !== normalizedPlaylistIndex) return false;
+  dapNoSilenceArmedPlaylistIndex = dapPlaylistIndex;
+  return true;
+}
+
+function isDapNoSilenceArmed(config = dapConfig) {
+  if (!isDapEnabled(config)) return false;
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null) return false;
+  return dapNoSilenceArmedPlaylistIndex === dapPlaylistIndex;
+}
+
+function isDapNoSilenceActive(config = dapConfig) {
+  if (!isHostRole()) return false;
+  if (!isDapEnabled(config)) return false;
+  if (!isDapNoSilenceArmed(config)) return false;
+  return getDapPlaylistFiles(config).length > 0;
+}
+
+function isDapPauseLocked(track = currentTrack, audio = currentAudio, config = dapConfig) {
+  if (!isDapNoSilenceActive(config)) return false;
+  if (!track || !audio) return false;
+  if (audio.paused) return false;
+  return isDapTrackContext(track, config);
+}
+
+function resolveDapNoSilenceTrack(config = dapConfig) {
+  const dapPlaylistIndex = getDapPlaylistIndex(config);
+  if (dapPlaylistIndex === null) return null;
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return null;
+
+  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  if (!dapPlaylist.length) return null;
+
+  const interruptedTrack = resolveDapInterruptedPlaybackTrack(config);
+  if (interruptedTrack) {
+    return interruptedTrack;
+  }
+
+  if (
+    currentTrack &&
+    currentAudio &&
+    currentAudio.paused &&
+    isDapTrackContext(currentTrack, config) &&
+    typeof currentTrack.file === 'string' &&
+    currentTrack.file.trim()
+  ) {
+    let pausedPosition = normalizePlaylistTrackIndex(currentTrack.playlistPosition);
+    if (
+      pausedPosition === null ||
+      pausedPosition < 0 ||
+      pausedPosition >= dapPlaylist.length ||
+      dapPlaylist[pausedPosition] !== currentTrack.file
+    ) {
+      pausedPosition = dapPlaylist.indexOf(currentTrack.file);
+    }
+    if (pausedPosition !== -1) {
+      return {
+        file: currentTrack.file,
+        basePath: '/audio',
+        playlistIndex: dapPlaylistIndex,
+        playlistPosition: pausedPosition,
+      };
+    }
+  }
+
+  for (let index = 0; index < dapPlaylist.length; index += 1) {
+    const file = dapPlaylist[index];
+    if (typeof file !== 'string' || !file.trim()) continue;
+    return {
+      file,
+      basePath: '/audio',
+      playlistIndex: dapPlaylistIndex,
+      playlistPosition: index,
+    };
+  }
+
+  return null;
+}
+
+async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
+  if (!isDapNoSilenceActive()) return false;
+  if (dapAutoStartInFlight) return false;
+  if (autoplayStartInFlight) return false;
+  if (overlayHandoffInFlight) return false;
+  if (isDspTransitionPlaybackActive()) return false;
+  if (currentTrack && currentAudio && !currentAudio.paused) return false;
+
+  const targetTrack = resolveDapNoSilenceTrack(dapConfig);
+  if (!targetTrack) return false;
+
+  const targetButton = getTrackButton(
+    targetTrack.file,
+    targetTrack.playlistIndex,
+    targetTrack.playlistPosition,
+    targetTrack.basePath || '/audio',
+  );
+  if (!targetButton) return false;
+
+  dapAutoStartInFlight = true;
+  try {
+    await handlePlay(targetTrack.file, targetButton, targetTrack.basePath || '/audio', {
+      playlistIndex: targetTrack.playlistIndex,
+      playlistPosition: targetTrack.playlistPosition,
+      startAtSeconds: targetTrack.startAtSeconds,
+      fromAutoplay: true,
+      fromDapNoSilence: true,
+      fromDapInterruptedResume: Boolean(targetTrack.fromInterruptedDap),
+    });
+    const targetKey = trackKey(targetTrack.file, targetTrack.basePath || '/audio');
+    const started = Boolean(currentTrack && currentAudio && !currentAudio.paused && currentTrack.key === targetKey);
+    if (started && targetTrack.fromInterruptedDap) {
+      clearDapInterruptedPlaybackSnapshot();
+    }
+    return started;
+  } catch (err) {
+    console.error(`DAP fallback (${reason}) failed`, err);
+    return false;
+  } finally {
+    dapAutoStartInFlight = false;
+  }
+}
+
+function startDapNoSilenceGuard() {
+  if (dapNoSilenceGuardTimer !== null) return;
+  dapNoSilenceGuardTimer = setInterval(() => {
+    ensureDapNoSilencePlayback({ reason: 'interval' }).catch(() => {});
+  }, DAP_NO_SILENCE_GUARD_INTERVAL_MS);
+}
+
+function stopDapNoSilenceGuard() {
+  if (dapNoSilenceGuardTimer === null) return;
+  clearInterval(dapNoSilenceGuardTimer);
+  dapNoSilenceGuardTimer = null;
+}
+
 function serializeLayout(playlists) {
   return JSON.stringify(ensurePlaylists(playlists));
 }
@@ -4763,6 +5423,22 @@ function playlistDspEqual(left, right, autoplayFlags, expectedLength) {
   return serializePlaylistDsp(left, autoplayFlags, expectedLength) === serializePlaylistDsp(right, autoplayFlags, expectedLength);
 }
 
+function serializeDapConfig(config, lengthHint = null) {
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  return JSON.stringify(normalizeDapConfig(config, expectedLength, DEFAULT_DAP_CONFIG));
+}
+
+function dapConfigEqual(left, right, expectedLength) {
+  return serializeDapConfig(left, expectedLength) === serializeDapConfig(right, expectedLength);
+}
+
+function applyDapConstraintsForCurrentLayout() {
+  layout = ensurePlaylists(layout);
+  dapConfig = normalizeDapConfig(dapConfig, layout.length, dapConfig);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, dapConfig, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
+}
+
 function normalizeLayoutForFiles(rawLayout, files) {
   const normalized = ensurePlaylists(rawLayout);
   const allowedFiles = new Set(Array.isArray(files) ? files : []);
@@ -4781,6 +5457,7 @@ function normalizeLayoutForFiles(rawLayout, files) {
 
 function isServerLayoutEmpty(playlists) {
   const normalized = ensurePlaylists(playlists);
+  if (normalized.length === 0) return true;
   return normalized.length === 1 && normalized[0].length === 0;
 }
 
@@ -4798,18 +5475,22 @@ function readLegacyLocalLayout(files) {
 
 function syncLayoutFromDom() {
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
-  const nextLayout = zones.map((zone) => {
+  const nextLayout = ensurePlaylists(layout).map(() => []);
+
+  zones.forEach((zone) => {
+    const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (!Number.isInteger(zoneIndex) || zoneIndex < 0 || zoneIndex >= nextLayout.length) return;
     const body = zone.querySelector('.zone-body');
-    if (!body) return [];
-    return Array.from(body.querySelectorAll('.track-card'))
+    if (!body) return;
+    nextLayout[zoneIndex] = Array.from(body.querySelectorAll('.track-card'))
       .map((card) => card.dataset.file)
       .filter(Boolean);
   });
+
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
+  applyDapConstraintsForCurrentLayout();
 }
 
 function buildTrackOccurrenceMap(layoutState) {
@@ -4881,7 +5562,8 @@ async function handleDragDeleteFromContext() {
   const snapshotLayout = cloneLayoutState(dragContext.snapshotLayout);
   const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
   const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
-  const snapshotAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, snapshotLayout.length);
+  const snapshotDap = normalizeDapConfig(dapConfig, snapshotLayout.length, dapConfig);
+  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, snapshotDap, snapshotLayout.length);
   const snapshotDsp = normalizePlaylistDspFlags(playlistDsp, snapshotAutoplay, snapshotLayout.length);
 
   const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
@@ -4898,11 +5580,13 @@ async function handleDragDeleteFromContext() {
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
+  const previousDap = { ...dapConfig };
 
   layout = ensurePlaylists(snapshotLayout);
   playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
   playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(snapshotAutoplay, layout.length);
+  dapConfig = normalizeDapConfig(snapshotDap, layout.length, snapshotDap);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(snapshotDsp, playlistAutoplay, layout.length);
   dragDropHandled = true;
   clearDragModeBadge();
@@ -4919,8 +5603,9 @@ async function handleDragDeleteFromContext() {
     layout = previousLayout;
     playlistNames = previousNames;
     playlistMeta = previousMeta;
-    playlistAutoplay = previousAutoplay;
-    playlistDsp = previousDsp;
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
     setStatus('Не удалось синхронизировать удаление трека.');
     return false;
@@ -4978,7 +5663,46 @@ function resolveSequentialNextTrack(track, { requireAutoplay = false } = {}) {
 }
 
 function resolveAutoplayNextTrack(finishedTrack) {
-  return resolveSequentialNextTrack(finishedTrack, { requireAutoplay: true });
+  const directNext = resolveSequentialNextTrack(finishedTrack, { requireAutoplay: true });
+  if (directNext) return directNext;
+
+  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
+  if (dapPlaylistIndex === null) return null;
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return null;
+
+  const finishedPlaylistIndex = normalizePlaylistTrackIndex(finishedTrack ? finishedTrack.playlistIndex : null);
+  if (finishedPlaylistIndex !== dapPlaylistIndex) return null;
+
+  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  if (!dapPlaylist.length) return null;
+
+  if (finishedTrack && typeof finishedTrack.file === 'string') {
+    let currentIndex = Number.isInteger(finishedTrack.playlistPosition) ? finishedTrack.playlistPosition : -1;
+    if (currentIndex < 0 || currentIndex >= dapPlaylist.length || dapPlaylist[currentIndex] !== finishedTrack.file) {
+      currentIndex = dapPlaylist.indexOf(finishedTrack.file);
+    }
+    if (currentIndex >= 0) {
+      const wrappedNextIndex = (currentIndex + 1) % dapPlaylist.length;
+      const wrappedNextFile = dapPlaylist[wrappedNextIndex];
+      if (typeof wrappedNextFile === 'string' && wrappedNextFile) {
+        return {
+          file: wrappedNextFile,
+          basePath: '/audio',
+          playlistIndex: dapPlaylistIndex,
+          playlistPosition: wrappedNextIndex,
+        };
+      }
+    }
+  }
+
+  const firstDapFile = dapPlaylist[0];
+  if (typeof firstDapFile !== 'string' || !firstDapFile) return null;
+  return {
+    file: firstDapFile,
+    basePath: '/audio',
+    playlistIndex: dapPlaylistIndex,
+    playlistPosition: 0,
+  };
 }
 
 function isPlaylistDspEnabled(playlistIndex) {
@@ -5140,7 +5864,7 @@ function primeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
   const basePromise = (async () => {
     const preparedAudio = createAudio(targetTrack);
     preparedAudio.preload = 'auto';
-    preparedAudio.volume = getEffectiveLiveVolume();
+    preparedAudio.volume = getEffectiveLiveVolume(targetTrack);
     if (normalizedSlice > 0) {
       await seekAudioToOffset(preparedAudio, normalizedSlice);
     }
@@ -5288,7 +6012,7 @@ function triggerLiveDspTransitionForTrack(track) {
   liveDspRenderToken = token;
   setLiveDspNextTrackReady(null);
 
-  const nextTrack = resolveSequentialNextTrack(track, { requireAutoplay: false });
+  const nextTrack = resolveAutoplayNextTrack(track);
   if (!nextTrack) return;
   if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return;
 
@@ -5408,7 +6132,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
   const transitionAudio = new Audio(details.outputUrl);
   transitionAudio.preload = 'auto';
-  transitionAudio.volume = getEffectiveLiveVolume();
+  transitionAudio.volume = getEffectiveLiveVolume(targetTrack);
   dspTransitionPlayback = {
     audio: transitionAudio,
     fromTrack: sourceTrack,
@@ -5451,7 +6175,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
         try {
           const cachedAudio = await cachedContinuationWarmup;
           if (cachedAudio) {
-            cachedAudio.volume = getEffectiveLiveVolume();
+            cachedAudio.volume = getEffectiveLiveVolume(targetTrack);
             continuationAudio = cachedAudio;
             return cachedAudio;
           }
@@ -5462,7 +6186,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
       const preparedAudio = createAudio(targetTrack);
       preparedAudio.preload = 'auto';
-      preparedAudio.volume = getEffectiveLiveVolume();
+      preparedAudio.volume = getEffectiveLiveVolume(targetTrack);
       if (sliceSeconds > 0) {
         await seekAudioToOffset(preparedAudio, sliceSeconds);
       }
@@ -5520,7 +6244,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     }
 
     try {
-      preparedAudio.volume = getEffectiveLiveVolume();
+      preparedAudio.volume = getEffectiveLiveVolume(targetTrack);
       await preparedAudio.play();
     } catch (err) {
       await fallbackToRegularNextTrackStart();
@@ -5617,22 +6341,29 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
 async function tryAutoplayNextTrack(finishedTrack) {
   if (!isHostRole()) return false;
+  if (autoplayStartInFlight) return false;
 
-  const nextTrack = resolveAutoplayNextTrack(finishedTrack);
-  if (!nextTrack) return false;
+  autoplayStartInFlight = true;
+  try {
+    const nextTrack = resolveAutoplayNextTrack(finishedTrack);
+    if (!nextTrack) return false;
 
-  const transitionStarted = await tryStartAutoplayWithDspTransition(finishedTrack, nextTrack);
-  if (transitionStarted) return true;
+    const transitionStarted = await tryStartAutoplayWithDspTransition(finishedTrack, nextTrack);
+    if (transitionStarted) return true;
 
-  const button = getTrackButton(nextTrack.file, nextTrack.playlistIndex, nextTrack.playlistPosition, nextTrack.basePath);
-  if (!button) return false;
+    const button = getTrackButton(nextTrack.file, nextTrack.playlistIndex, nextTrack.playlistPosition, nextTrack.basePath);
+    if (!button) return false;
 
-  await handlePlay(nextTrack.file, button, nextTrack.basePath, {
-    playlistIndex: nextTrack.playlistIndex,
-    playlistPosition: nextTrack.playlistPosition,
-    fromAutoplay: true,
-  });
-  return true;
+    await handlePlay(nextTrack.file, button, nextTrack.basePath, {
+      playlistIndex: nextTrack.playlistIndex,
+      playlistPosition: nextTrack.playlistPosition,
+      fromAutoplay: true,
+    });
+    const expectedKey = trackKey(nextTrack.file, nextTrack.basePath || '/audio');
+    return Boolean(currentTrack && currentAudio && !currentAudio.paused && currentTrack.key === expectedKey);
+  } finally {
+    autoplayStartInFlight = false;
+  }
 }
 
 function resetTrackReferences() {
@@ -5658,14 +6389,20 @@ function applyIncomingLayoutState(
   nextPlaylistMeta,
   nextPlaylistAutoplay,
   nextPlaylistDsp,
+  nextDapConfig,
   nextTrackTitleModesByTrack = null,
   version = null,
   render = true,
 ) {
+  const previousDap = { ...dapConfig };
+  const previousLayout = ensurePlaylists(layout);
+  const previousMeta = normalizePlaylistMeta(playlistMeta, previousLayout.length);
+  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
   const normalizedLayout = normalizeLayoutForFiles(nextLayout, availableFiles);
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
   const normalizedMeta = normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
-  const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextPlaylistAutoplay, normalizedLayout.length);
+  const normalizedDap = normalizeDapConfig(nextDapConfig, normalizedLayout.length, dapConfig);
+  const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextPlaylistAutoplay, normalizedDap, normalizedLayout.length);
   const normalizedDsp = normalizePlaylistDspFlags(nextPlaylistDsp, normalizedAutoplay, normalizedLayout.length);
   const normalizedTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(
     nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
@@ -5681,14 +6418,49 @@ function applyIncomingLayoutState(
     !playlistMetaEqual(playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
     !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length) ||
     !playlistDspEqual(playlistDsp, normalizedDsp, normalizedAutoplay, withFolderCoverage.layout.length) ||
+    !dapConfigEqual(dapConfig, normalizedDap, withFolderCoverage.layout.length) ||
     !trackTitleModesByTrackEqual(trackTitleModesByTrack, normalizedTrackTitleModes);
 
   layout = withFolderCoverage.layout;
   playlistNames = withFolderCoverage.playlistNames;
   playlistMeta = withFolderCoverage.playlistMeta;
-  playlistAutoplay = normalizePlaylistAutoplayFlags(normalizedAutoplay, layout.length);
+  dapConfig = normalizeDapConfig(normalizedDap, layout.length, normalizedDap);
+  if (!isDapEnabled(dapConfig)) {
+    disarmDapNoSilence();
+    clearDapInterruptedPlaybackSnapshot();
+  } else {
+    const previousDapIndex = normalizePlaylistTrackIndex(previousDap.playlistIndex);
+    const nextDapIndex = normalizePlaylistTrackIndex(dapConfig.playlistIndex);
+    const previousDapIdentity =
+      previousDapIndex !== null ? buildPlaylistSelectionIdentity(previousLayout, previousMeta, previousDapIndex) : '';
+    const nextDapIdentity =
+      nextDapIndex !== null ? buildPlaylistSelectionIdentity(layout, playlistMeta, nextDapIndex) : '';
+    const isDapSelectionPreservedByShift =
+      Boolean(previousDapIdentity) && Boolean(nextDapIdentity) && previousDapIdentity === nextDapIdentity;
+    if (
+      !Boolean(previousDap.enabled) ||
+      previousDapIndex === null ||
+      nextDapIndex === null ||
+      (previousDapIndex !== nextDapIndex && !isDapSelectionPreservedByShift)
+    ) {
+      disarmDapNoSilence();
+      clearDapInterruptedPlaybackSnapshot();
+    }
+  }
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(normalizedAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(normalizedDsp, playlistAutoplay, layout.length);
   trackTitleModesByTrack = normalizedTrackTitleModes;
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+    preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
+  });
+  const dapSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
+  if (currentTrackContextChanged && currentAudio) {
+    applyLiveVolumeToCurrentAudio();
+  }
+  if (dspTransitionPlayback && dspTransitionPlayback.audio) {
+    dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(dspTransitionPlayback.toTrack || null);
+  }
   saveTrackTitleModesByTrackSetting();
 
   const numericVersion = Number(version);
@@ -5700,7 +6472,19 @@ function applyIncomingLayoutState(
     renderZones();
   }
 
-  return changed;
+  if (!render) {
+    updateDapSettingsUi(currentRole);
+  }
+
+  if (currentTrackContextChanged && isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
+
+  if (changed && isHostRole()) {
+    ensureDapNoSilencePlayback({ reason: 'layout-sync' }).catch(() => {});
+  }
+
+  return changed || currentTrackContextChanged || dapSnapshotContextChanged;
 }
 
 function applyIncomingHostPlaybackState(nextState, sync = true) {
@@ -6176,6 +6960,7 @@ async function fetchSharedLayoutState() {
     playlistMeta: Array.isArray(data.playlistMeta) ? data.playlistMeta : [],
     playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
     playlistDsp: Array.isArray(data.playlistDsp) ? data.playlistDsp : [],
+    dapConfig: data && data.dapConfig && typeof data.dapConfig === 'object' ? data.dapConfig : { ...DEFAULT_DAP_CONFIG },
     trackTitleModesByTrack:
       data && data.trackTitleModesByTrack && typeof data.trackTitleModesByTrack === 'object'
         ? data.trackTitleModesByTrack
@@ -6186,7 +6971,8 @@ async function fetchSharedLayoutState() {
 
 async function pushSharedLayout({ renderOnApply = true } = {}) {
   const payloadState = ensureFolderPlaylistsCoverage(layout, playlistNames, playlistMeta);
-  const payloadAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, payloadState.layout.length);
+  const payloadDapConfig = normalizeDapConfig(dapConfig, payloadState.layout.length, dapConfig);
+  const payloadAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, payloadDapConfig, payloadState.layout.length);
   const payloadDsp = normalizePlaylistDspFlags(playlistDsp, payloadAutoplay, payloadState.layout.length);
 
   const response = await fetch('/api/layout', {
@@ -6198,6 +6984,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
       playlistMeta: payloadState.playlistMeta,
       playlistAutoplay: payloadAutoplay,
       playlistDsp: payloadDsp,
+      dapConfig: payloadDapConfig,
       trackTitleModesByTrack: serializeTrackTitleModesByTrack(),
       clientId,
       version: layoutVersion,
@@ -6216,6 +7003,7 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
     data.playlistMeta,
     data.playlistAutoplay,
     data.playlistDsp,
+    data.dapConfig,
     data.trackTitleModesByTrack,
     data.version,
     renderOnApply,
@@ -6263,6 +7051,7 @@ function connectLayoutStream() {
       payload.playlistMeta,
       payload.playlistAutoplay,
       payload.playlistDsp,
+      payload.dapConfig,
       payload.trackTitleModesByTrack,
       payload.version,
       true,
@@ -6318,14 +7107,16 @@ async function initializeLayoutState() {
   const incomingLayout = ensurePlaylists(serverState.layout);
   const incomingNames = normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
   const incomingMeta = normalizePlaylistMeta(serverState.playlistMeta, incomingLayout.length);
-  const incomingAutoplay = normalizePlaylistAutoplayFlags(serverState.playlistAutoplay, incomingLayout.length);
+  const incomingDap = normalizeDapConfig(serverState.dapConfig, incomingLayout.length, DEFAULT_DAP_CONFIG);
+  const incomingAutoplay = normalizePlaylistAutoplayWithDap(serverState.playlistAutoplay, incomingDap, incomingLayout.length);
   const incomingDsp = normalizePlaylistDspFlags(serverState.playlistDsp, incomingAutoplay, incomingLayout.length);
   const incomingTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, availableFiles, '/audio');
 
   let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
   let nextMeta = normalizePlaylistMeta(incomingMeta, nextLayout.length);
-  let nextAutoplay = normalizePlaylistAutoplayFlags(incomingAutoplay, nextLayout.length);
+  let nextDap = normalizeDapConfig(incomingDap, nextLayout.length, incomingDap);
+  let nextAutoplay = normalizePlaylistAutoplayWithDap(incomingAutoplay, nextDap, nextLayout.length);
   let nextDsp = normalizePlaylistDspFlags(incomingDsp, nextAutoplay, nextLayout.length);
   let nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(incomingTrackTitleModes, availableFiles, '/audio');
   let shouldPush =
@@ -6334,6 +7125,7 @@ async function initializeLayoutState() {
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
     !playlistDspEqual(incomingDsp, nextDsp, nextAutoplay, nextLayout.length) ||
+    !dapConfigEqual(incomingDap, nextDap, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   if (isHostRole() && isServerLayoutEmpty(incomingLayout)) {
@@ -6342,7 +7134,8 @@ async function initializeLayoutState() {
       nextLayout = legacyLayout;
       nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
       nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
-      nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+      nextDap = normalizeDapConfig(nextDap, nextLayout.length, nextDap);
+      nextAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, nextDap, nextLayout.length);
       nextDsp = normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
       shouldPush = true;
     }
@@ -6352,7 +7145,8 @@ async function initializeLayoutState() {
   nextLayout = withFolderCoverage.layout;
   nextNames = withFolderCoverage.playlistNames;
   nextMeta = withFolderCoverage.playlistMeta;
-  nextAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, nextLayout.length);
+  nextDap = normalizeDapConfig(nextDap, nextLayout.length, nextDap);
+  nextAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, nextDap, nextLayout.length);
   nextDsp = normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
   nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(nextTrackTitleModes, availableFiles, '/audio');
 
@@ -6363,13 +7157,15 @@ async function initializeLayoutState() {
     !playlistMetaEqual(incomingMeta, nextMeta, nextLayout.length) ||
     !playlistAutoplayEqual(incomingAutoplay, nextAutoplay, nextLayout.length) ||
     !playlistDspEqual(incomingDsp, nextDsp, nextAutoplay, nextLayout.length) ||
+    !dapConfigEqual(incomingDap, nextDap, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   layout = nextLayout;
   playlistNames = nextNames;
   playlistMeta = nextMeta;
-  playlistAutoplay = nextAutoplay;
-  playlistDsp = nextDsp;
+  dapConfig = normalizeDapConfig(nextDap, layout.length, nextDap);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
   trackTitleModesByTrack = nextTrackTitleModes;
   saveTrackTitleModesByTrackSetting();
   layoutVersion = serverState.version;
@@ -6391,7 +7187,8 @@ async function addPlaylist() {
   layout.push([]);
   playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
   playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags([...playlistAutoplay, false], layout.length);
+  dapConfig = normalizeDapConfig(dapConfig, layout.length, dapConfig);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap([...playlistAutoplay, false], dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], playlistAutoplay, layout.length);
   renderZones();
 
@@ -6438,12 +7235,16 @@ async function togglePlaylistAutoplay(playlistIndex) {
   }
 
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (isDapPlaylistIndex(playlistIndex)) {
+    setStatus('Для DAP-плей-листа автовоспроизведение всегда включено.');
+    return;
+  }
 
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
   const nextAutoplay = playlistAutoplay.slice();
   nextAutoplay[playlistIndex] = !nextAutoplay[playlistIndex];
-  const normalizedAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
+  const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
   const normalizedDsp = normalizePlaylistDspFlags(playlistDsp, normalizedAutoplay, layout.length);
 
   if (
@@ -6466,8 +7267,8 @@ async function togglePlaylistAutoplay(playlistIndex) {
     );
   } catch (err) {
     console.error(err);
-    playlistAutoplay = previousAutoplay;
-    playlistDsp = previousDsp;
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
     setStatus('Не удалось синхронизировать автопроигрывание плей-листа.');
   }
@@ -6504,6 +7305,102 @@ async function togglePlaylistDsp(playlistIndex) {
     renderZones();
     setStatus('Не удалось синхронизировать DSP плей-листа.');
   }
+}
+
+async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновлен.' } = {}) {
+  if (!isHostRole()) {
+    setStatus('DAP может менять только хост.');
+    return false;
+  }
+
+  const normalizedNextDap = normalizeDapConfig(nextDapConfig, layout.length, dapConfig);
+  const nextAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, normalizedNextDap, layout.length);
+  const nextDsp = normalizePlaylistDspFlags(playlistDsp, nextAutoplay, layout.length);
+
+  if (
+    dapConfigEqual(dapConfig, normalizedNextDap, layout.length) &&
+    playlistAutoplayEqual(playlistAutoplay, nextAutoplay, layout.length) &&
+    playlistDspEqual(playlistDsp, nextDsp, nextAutoplay, layout.length)
+  ) {
+    updateDapSettingsUi(currentRole);
+    return false;
+  }
+
+  const previousDap = { ...dapConfig };
+  const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
+  const previousDapInterruptedPlaybackSnapshot = dapInterruptedPlaybackSnapshot
+    ? { ...dapInterruptedPlaybackSnapshot }
+    : null;
+  const previousDapEnabled = Boolean(previousDap.enabled);
+  const previousDapIndex = normalizePlaylistTrackIndex(previousDap.playlistIndex);
+  const nextDapEnabled = Boolean(normalizedNextDap.enabled);
+  const nextDapIndex = normalizePlaylistTrackIndex(normalizedNextDap.playlistIndex);
+  const shouldResetNoSilenceArm =
+    !nextDapEnabled || !previousDapEnabled || previousDapIndex !== nextDapIndex;
+  const shouldStopDapPlaybackOnDisable =
+    isDapEnabled(previousDap) &&
+    !normalizedNextDap.enabled &&
+    ((currentTrack && currentAudio && !currentAudio.paused && isDapTrackContext(currentTrack, previousDap)) ||
+      (isDspTransitionPlaybackActive() &&
+        dspTransitionPlayback &&
+        (isDapTrackContext(dspTransitionPlayback.fromTrack, previousDap) ||
+          isDapTrackContext(dspTransitionPlayback.toTrack, previousDap))));
+
+  dapConfig = normalizedNextDap;
+  playlistAutoplay = nextAutoplay;
+  playlistDsp = nextDsp;
+  if (shouldResetNoSilenceArm) {
+    disarmDapNoSilence();
+    clearDapInterruptedPlaybackSnapshot();
+  }
+  if (shouldStopDapPlaybackOnDisable) {
+    stopAndClearLocalPlayback();
+    requestHostPlaybackSync(true);
+  }
+  applyLiveVolumeToCurrentAudio();
+  if (dspTransitionPlayback && dspTransitionPlayback.audio) {
+    dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(dspTransitionPlayback.toTrack || null);
+  }
+  updateDapSettingsUi(currentRole);
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    if (successMessage) {
+      setStatus(successMessage);
+    }
+    if (normalizedNextDap.enabled) {
+      ensureDapNoSilencePlayback({ reason: 'dap-config-updated' }).catch(() => {});
+    }
+    return true;
+  } catch (err) {
+    console.error(err);
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    dapInterruptedPlaybackSnapshot = previousDapInterruptedPlaybackSnapshot;
+    updateDapSettingsUi(currentRole);
+    renderZones();
+    setStatus('Не удалось синхронизировать DAP.');
+    return false;
+  }
+}
+
+async function togglePlaylistDap(playlistIndex) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+
+  const isCurrentlySelected = isDapPlaylistIndex(playlistIndex, dapConfig);
+  const nextDap = {
+    enabled: !isCurrentlySelected,
+    playlistIndex,
+    volumePercent: dapConfig.volumePercent,
+  };
+
+  const statusMessage = isCurrentlySelected
+    ? 'DAP выключен.'
+    : `DAP включен для плей-листа ${playlistIndex + 1}.`;
+  await syncDapConfig(nextDap, { successMessage: statusMessage });
 }
 
 function buildPlaylistCoverage(layoutState) {
@@ -6553,6 +7450,7 @@ function syncPlaylistHeaderActiveState() {
   if (!zonesContainer) return;
 
   const activePlaylistIndex = getLiveLockedPlaylistIndex();
+  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
   const zones = zonesContainer.querySelectorAll('.zone');
   zones.forEach((zone) => {
     if (!(zone instanceof HTMLElement)) return;
@@ -6564,8 +7462,17 @@ function syncPlaylistHeaderActiveState() {
     if (!(deleteButton instanceof HTMLElement) || !(activeReel instanceof HTMLElement)) return;
 
     const isActive = activePlaylistIndex !== null && activePlaylistIndex === playlistIndex;
+    const isDapPlaylist = dapPlaylistIndex !== null && dapPlaylistIndex === playlistIndex;
+    if (isDapPlaylist) {
+      deleteButton.style.display = 'none';
+      activeReel.style.display = 'inline-flex';
+      activeReel.classList.toggle('is-rotating', isActive);
+      return;
+    }
+
     deleteButton.style.display = isActive ? 'none' : 'inline-flex';
     activeReel.style.display = isActive ? 'inline-flex' : 'none';
+    activeReel.classList.remove('is-rotating');
   });
 }
 
@@ -6586,13 +7493,13 @@ function getPlaylistDeleteEligibility(playlistIndex) {
     return { canDelete: false, reason: 'Нельзя удалить авто-плей-лист папки, пока папка есть в /audio.' };
   }
 
-  if (normalizedLayout.length <= 1) {
-    return { canDelete: false, reason: 'Нельзя удалить последний плей-лист.' };
-  }
-
   const liveLockedPlaylistIndex = getLiveLockedPlaylistIndex();
   if (liveLockedPlaylistIndex !== null && liveLockedPlaylistIndex === playlistIndex) {
     return { canDelete: false, reason: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' };
+  }
+
+  if (isDapPlaylistIndex(playlistIndex)) {
+    return { canDelete: false, reason: 'Нельзя удалить плей-лист, выбранный для DAP.' };
   }
 
   const playlist = normalizedLayout[playlistIndex];
@@ -6633,6 +7540,18 @@ async function deletePlaylist(playlistIndex) {
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
+  const previousDap = { ...dapConfig };
+  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
+  const previousCurrentTrackContext =
+    currentTrack && typeof currentTrack === 'object'
+      ? {
+          playlistIndex: currentTrack.playlistIndex,
+          playlistPosition: currentTrack.playlistPosition,
+        }
+      : null;
+  const previousDapInterruptedSnapshot = dapInterruptedPlaybackSnapshot
+    ? { ...dapInterruptedPlaybackSnapshot }
+    : null;
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
   nextLayout.splice(playlistIndex, 1);
@@ -6645,13 +7564,36 @@ async function deletePlaylist(playlistIndex) {
   nextAutoplay.splice(playlistIndex, 1);
   const nextDsp = previousDsp.slice();
   nextDsp.splice(playlistIndex, 1);
+  const nextDapRaw = { ...previousDap };
+  if (isDapPlaylistIndex(playlistIndex, previousDap)) {
+    nextDapRaw.enabled = false;
+    nextDapRaw.playlistIndex = null;
+  } else {
+    const previousDapIndex = normalizePlaylistTrackIndex(previousDap.playlistIndex);
+    if (previousDapIndex !== null && previousDapIndex > playlistIndex) {
+      nextDapRaw.playlistIndex = previousDapIndex - 1;
+    }
+  }
 
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(nextNames, layout.length);
   playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(nextAutoplay, layout.length);
+  dapConfig = normalizeDapConfig(nextDapRaw, layout.length, nextDapRaw);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+    preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
+  });
+  reconcileDapInterruptedSnapshotWithLayout();
+  if (currentTrackContextChanged && currentAudio) {
+    applyLiveVolumeToCurrentAudio();
+  }
+  updateDapSettingsUi(currentRole);
   renderZones();
+  if (currentTrackContextChanged && isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
 
   try {
     await pushSharedLayout();
@@ -6661,8 +7603,23 @@ async function deletePlaylist(playlistIndex) {
     layout = previousLayout;
     playlistNames = previousNames;
     playlistMeta = previousMeta;
-    playlistAutoplay = previousAutoplay;
-    playlistDsp = previousDsp;
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    if (currentTrack && previousCurrentTrackContext) {
+      currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
+      currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
+    }
+    dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
+    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
+    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+      preferredPlaylistIndex: rollbackPreferredIndex,
+    });
+    const rollbackSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
+    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && currentAudio) {
+      applyLiveVolumeToCurrentAudio();
+    }
+    updateDapSettingsUi(currentRole);
     renderZones();
     setStatus(err && err.message ? err.message : 'Не удалось синхронизировать удаление плей-листа.');
   }
@@ -6673,18 +7630,24 @@ function renderZones() {
   resetTrackReferences();
   layout = ensurePlaylists(layout);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
+  applyDapConstraintsForCurrentLayout();
+  updateDapSettingsUi(currentRole);
   const trackOccurrence = buildTrackOccurrenceMap(layout);
+  const renderOrder = buildPlaylistRenderOrder(layout.length, dapConfig);
 
-  layout.forEach((playlistFiles, playlistIndex) => {
+  renderOrder.forEach((playlistIndex) => {
+    const playlistFiles = Array.isArray(layout[playlistIndex]) ? layout[playlistIndex] : [];
     const metaEntry = playlistMeta[playlistIndex] || defaultPlaylistMeta();
+    const isDapPlaylist = isDapPlaylistIndex(playlistIndex);
     const zone = document.createElement('div');
     zone.className = 'zone';
     zone.dataset.zoneIndex = playlistIndex.toString();
     zone.dataset.playlistType = metaEntry.type;
     if (metaEntry.type === PLAYLIST_TYPE_FOLDER) {
       zone.classList.add('zone--folder');
+    }
+    if (isDapPlaylist) {
+      zone.classList.add('zone--dap');
     }
 
     zone.addEventListener('dragover', (e) => {
@@ -6750,14 +7713,17 @@ function renderZones() {
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
     const isDspEnabled = Boolean(playlistDsp[playlistIndex]);
-    const canManageAutoplay = isHostRole();
-    const canManageDsp = canManageAutoplay && isAutoplayEnabled;
+    const canManageAutoplay = isHostRole() && !isDapPlaylist;
+    const canManageDsp = isHostRole() && isAutoplayEnabled;
     autoplayButton.dataset.state = isAutoplayEnabled ? 'on' : 'off';
     autoplayButton.setAttribute('aria-pressed', isAutoplayEnabled ? 'true' : 'false');
-    autoplayButton.title = canManageAutoplay
-      ? `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'}`
-      : `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'} (только хост)`;
+    autoplayButton.title = isDapPlaylist
+      ? 'Для DAP-плей-листа автопроигрывание всегда включено'
+      : canManageAutoplay
+        ? `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'}`
+        : `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'} (только хост)`;
     autoplayButton.classList.toggle('is-on', isAutoplayEnabled);
+    autoplayButton.hidden = isDapPlaylist;
     autoplayButton.disabled = !canManageAutoplay;
     autoplayButton.addEventListener('click', (event) => {
       event.preventDefault();
@@ -6765,6 +7731,15 @@ function renderZones() {
       if (!canManageAutoplay) return;
       togglePlaylistAutoplay(playlistIndex);
     });
+
+    const dapButton = document.createElement('span');
+    dapButton.className = 'playlist-dap-toggle';
+    dapButton.textContent = 'DAP';
+    const isDapEnabledForPlaylist = isDapPlaylist;
+    dapButton.dataset.state = isDapEnabledForPlaylist ? 'on' : 'off';
+    dapButton.classList.toggle('is-on', isDapEnabledForPlaylist);
+    dapButton.title = `DAP: ${isDapEnabledForPlaylist ? 'вкл' : 'выкл'}`;
+    dapButton.setAttribute('aria-hidden', 'true');
 
     const dspButton = document.createElement('button');
     dspButton.type = 'button';
@@ -6810,11 +7785,20 @@ function renderZones() {
 
     const activeReel = document.createElement('span');
     activeReel.className = 'playlist-active-reel';
-    activeReel.title = 'Активный плей-лист';
+    activeReel.title = isDapPlaylist ? 'DAP плей-лист' : 'Активный плей-лист';
     activeReel.setAttribute('aria-hidden', 'true');
-    activeReel.style.display = 'none';
+    if (isDapPlaylist) {
+      activeReel.classList.add('playlist-active-reel--dap');
+      activeReel.style.display = 'inline-flex';
+      deleteButton.style.display = 'none';
+    } else {
+      activeReel.style.display = 'none';
+    }
 
-    headerMeta.append(autoplayButton, dspButton, count, deleteButton, activeReel);
+    if (!isDapPlaylist) {
+      headerMeta.append(autoplayButton);
+    }
+    headerMeta.append(dapButton, dspButton, count, deleteButton, activeReel);
     header.append(titleWrap, headerMeta);
 
     const body = document.createElement('div');
@@ -6849,11 +7833,20 @@ function syncCurrentTrackState() {
     setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
     setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
   }
+  syncDapInterruptedTrackState();
   syncDspTransitionTrackHighlight();
   syncLiveDspNextTrackHighlight();
   syncPlaylistHeaderActiveState();
   syncNowPlayingPanel();
   syncHostNowPlayingPanel();
+}
+
+function syncDapInterruptedTrackState() {
+  const interruptedState = getDapInterruptedPlaybackDisplayState(dapConfig);
+  if (!interruptedState) return;
+
+  setTrackPausedByContext(interruptedState.fileKey, true, interruptedState.playbackContext);
+  refreshTrackDurationLabels(interruptedState.fileKey);
 }
 
 async function handleDrop(event, targetZoneIndex) {
@@ -6886,6 +7879,7 @@ async function handleDrop(event, targetZoneIndex) {
   const previousMeta = clonePlaylistMetaState(playlistMeta);
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
+  const previousDap = { ...dapConfig };
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
 
   let nextLayout;
@@ -6936,7 +7930,8 @@ async function handleDrop(event, targetZoneIndex) {
   layout = ensurePlaylists(nextLayout);
   playlistNames = normalizePlaylistNames(previousNames, layout.length);
   playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
-  playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
+  dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
   renderZones();
   try {
@@ -6947,7 +7942,8 @@ async function handleDrop(event, targetZoneIndex) {
     layout = previousLayout;
     playlistNames = normalizePlaylistNames(previousNames, layout.length);
     playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
-    playlistAutoplay = normalizePlaylistAutoplayFlags(previousAutoplay, layout.length);
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
     playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
     setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
@@ -7051,7 +8047,8 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
     layout = normalizeLayoutForFiles(fallback.layout, availableFiles);
     playlistNames = normalizePlaylistNames(fallback.playlistNames, layout.length);
     playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, layout.length);
-    playlistAutoplay = normalizePlaylistAutoplayFlags([], layout.length);
+    dapConfig = normalizeDapConfig(DEFAULT_DAP_CONFIG, layout.length, DEFAULT_DAP_CONFIG);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap([], dapConfig, layout.length);
     playlistDsp = normalizePlaylistDspFlags([], playlistAutoplay, layout.length);
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }
@@ -7067,6 +8064,7 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
   renderZones();
   syncCurrentTrackState();
   setStatus(getTrackReloadStatusMessage(reason, availableFiles.length));
+  ensureDapNoSilencePlayback({ reason: 'tracks-loaded' }).catch(() => {});
   connectLayoutStream();
 }
 
@@ -7134,6 +8132,7 @@ function stopAudioCatalogAutoRefresh() {
 function resetFadeState() {
   fadeCancel.cancelled = true;
   fadeCancel = { cancelled: false };
+  overlayHandoffInFlight = false;
 }
 
 function fadeOutAndStop(audio, durationSeconds, curve, track) {
@@ -7236,6 +8235,10 @@ function fadeOutAndPause(audio, durationSeconds, curve) {
 
 async function pauseCurrentPlayback(track, audio) {
   if (!track || !audio) return false;
+  if (isDapPauseLocked(track, audio)) {
+    setStatus('DAP: пауза текущего трека запрещена. Включите другой трек.');
+    return false;
+  }
 
   const stopFadeSeconds = getStopFadeSeconds();
   const curve = getTransitionCurve();
@@ -7310,37 +8313,40 @@ function createAudio(track) {
   });
 
   audio.addEventListener('ended', () => {
-    const wasCurrentTrack = Boolean(currentTrack && currentTrack.key === key);
+    const isCurrentAudioInstance = currentAudio === audio;
+    const wasCurrentTrack = isCurrentAudioInstance && Boolean(currentTrack && currentTrack.key === key);
+    if (!wasCurrentTrack) return;
 
-    if (wasCurrentTrack) {
+    const overlayState = audio.dataset.autoplayOverlayState;
+    const isAutoplayOverlayHandoff =
+      overlayState === AUTOPLAY_OVERLAY_STATE_PENDING || overlayState === AUTOPLAY_OVERLAY_STATE_STARTED;
+
+    if (!isAutoplayOverlayHandoff) {
       currentAudio = null;
       currentTrack = null;
       resetLiveDspNextTrackPreview();
     }
     setButtonPlaying(key, false, track);
     setTrackPaused(key, false, track);
+    if (isAutoplayOverlayHandoff) {
+      return;
+    }
     stopProgressLoop();
     resetProgress(key);
     syncNowPlayingPanel();
     requestHostPlaybackSync(true);
 
-    if (!wasCurrentTrack) return;
-    if (
-      audio.dataset.autoplayOverlayState === AUTOPLAY_OVERLAY_STATE_PENDING ||
-      audio.dataset.autoplayOverlayState === AUTOPLAY_OVERLAY_STATE_STARTED
-    ) {
-      return;
-    }
-
     tryAutoplayNextTrack(track)
       .then((started) => {
         if (!started) {
           setStatus(`Воспроизведение завершено: ${file}`);
+          ensureDapNoSilencePlayback({ reason: 'track-ended' }).catch(() => {});
         }
       })
       .catch((err) => {
         console.error('Autoplay failed', err);
         setStatus(`Воспроизведение завершено: ${file}`);
+        ensureDapNoSilencePlayback({ reason: 'track-ended-error' }).catch(() => {});
       });
   });
 
@@ -7357,6 +8363,7 @@ function createAudio(track) {
     }
     syncNowPlayingPanel();
     requestHostPlaybackSync(true);
+    ensureDapNoSilencePlayback({ reason: 'track-error' }).catch(() => {});
   });
 
   bindProgress(audio, key);
@@ -7370,9 +8377,13 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
   const initialOldVolume = clampVolume(oldAudio ? oldAudio.volume : 1);
   resetFadeState();
   const token = fadeCancel;
+  overlayHandoffInFlight = true;
 
   function step(now) {
-    if (token.cancelled) return;
+    if (token.cancelled) {
+      overlayHandoffInFlight = false;
+      return;
+    }
     const progress = Math.min((now - start) / duration, 1);
     const eased = easing(progress, curve);
     newAudio.volume = clampVolume(safeTargetVolume * eased);
@@ -7382,6 +8393,7 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
     if (progress < 1) {
       requestAnimationFrame(step);
     } else {
+      overlayHandoffInFlight = false;
       if (oldAudio) {
         oldAudio.pause();
         oldAudio.currentTime = 0;
@@ -7406,9 +8418,8 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
 }
 
 async function handlePlay(file, button, basePath = '/audio', playbackContext = {}) {
-  const overlaySeconds = getOverlaySeconds();
+  const baseOverlaySeconds = getOverlaySeconds();
   const curve = getTransitionCurve();
-  const targetVolume = getEffectiveLiveVolume();
   const startAtSeconds = normalizeAudioStartOffsetSeconds(playbackContext.startAtSeconds);
   const resolvedPlaylistIndex =
     Number.isInteger(playbackContext.playlistIndex) && playbackContext.playlistIndex >= 0
@@ -7425,6 +8436,32 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     playlistIndex: resolvedPlaylistIndex,
     playlistPosition: resolvedPlaylistPosition,
   };
+  const isTargetDapTrack = isDapTrackContext(track, dapConfig);
+  if (isHostRole() && isTargetDapTrack && !Boolean(playbackContext && playbackContext.fromDapInterruptedResume)) {
+    clearDapInterruptedPlaybackSnapshot();
+  }
+  const shouldArmDapNoSilence =
+    isHostRole() &&
+    isDapEnabled(dapConfig) &&
+    isTargetDapTrack &&
+    !Boolean(playbackContext && playbackContext.fromAutoplay) &&
+    !Boolean(playbackContext && playbackContext.fromDapNoSilence);
+  if (shouldArmDapNoSilence) {
+    armDapNoSilenceByPlaylistIndex(track.playlistIndex, dapConfig);
+  }
+  const isSwitchingAwayFromDap =
+    isHostRole() &&
+    isDapNoSilenceActive() &&
+    currentTrack &&
+    currentAudio &&
+    !currentAudio.paused &&
+    isDapTrackContext(currentTrack) &&
+    !isTargetDapTrack;
+  if (isSwitchingAwayFromDap) {
+    captureDapInterruptedPlaybackSnapshot(currentTrack, currentAudio, dapConfig);
+  }
+  const overlaySeconds = isSwitchingAwayFromDap ? 0 : baseOverlaySeconds;
+  const targetVolume = getEffectiveLiveVolume(track);
 
   button.disabled = true;
 
@@ -7450,7 +8487,10 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
   }
 
   if (currentTrack && currentTrack.key === track.key && currentAudio && !currentAudio.paused) {
-    await pauseCurrentPlayback(track, currentAudio);
+    const paused = await pauseCurrentPlayback(track, currentAudio);
+    if (paused) {
+      await ensureDapNoSilencePlayback({ reason: 'track-toggle-pause' });
+    }
     syncNowPlayingPanel();
     requestHostPlaybackSync(true);
     button.disabled = false;
@@ -7498,10 +8538,16 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     } else {
       if (currentAudio) {
         currentAudio.pause();
-        currentAudio.currentTime = 0;
+        if (!isSwitchingAwayFromDap) {
+          currentAudio.currentTime = 0;
+        }
         if (currentTrack) {
           setButtonPlaying(currentTrack.key, false, currentTrack);
-          setTrackPaused(currentTrack.key, false, currentTrack);
+          if (isSwitchingAwayFromDap) {
+            setTrackPausedByContext(currentTrack.key, true, currentTrack);
+          } else {
+            setTrackPaused(currentTrack.key, false, currentTrack);
+          }
         }
       }
       resetFadeState();
@@ -7693,6 +8739,93 @@ function initServerControls() {
   if (clientLogoutBtn) {
     clientLogoutBtn.addEventListener('click', () => {
       logoutClient({ requireConfirmation: true });
+    });
+  }
+}
+
+function initDapSettingsControls() {
+  updateDapSettingsUi(currentRole);
+
+  if (dapEnabledToggle) {
+    dapEnabledToggle.addEventListener('change', async () => {
+      if (!isHostRole()) {
+        updateDapSettingsUi(currentRole);
+        setStatus('DAP может менять только хост.');
+        return;
+      }
+
+      const enabled = Boolean(dapEnabledToggle.checked);
+      let playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect ? dapPlaylistSelect.value : null);
+      if (playlistIndex === null) {
+        playlistIndex = normalizePlaylistTrackIndex(dapConfig.playlistIndex);
+      }
+      if (playlistIndex === null && layout.length > 0) {
+        playlistIndex = 0;
+      }
+      if (enabled && playlistIndex === null) {
+        updateDapSettingsUi(currentRole);
+        setStatus('Выберите плей-лист для DAP.');
+        return;
+      }
+
+      const nextDap = {
+        enabled,
+        playlistIndex,
+        volumePercent: normalizeDapVolumePercent(
+          dapVolumePercentInput ? dapVolumePercentInput.value : dapConfig.volumePercent,
+          dapConfig.volumePercent,
+        ),
+      };
+      const message = enabled
+        ? `DAP включен для плей-листа ${Number(playlistIndex) + 1}.`
+        : 'DAP выключен.';
+      await syncDapConfig(nextDap, { successMessage: message });
+    });
+  }
+
+  if (dapPlaylistSelect) {
+    dapPlaylistSelect.addEventListener('change', async () => {
+      if (!isHostRole()) {
+        updateDapSettingsUi(currentRole);
+        setStatus('DAP может менять только хост.');
+        return;
+      }
+
+      const playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect.value);
+      if (playlistIndex === null) {
+        updateDapSettingsUi(currentRole);
+        setStatus('Выберите плей-лист для DAP.');
+        return;
+      }
+
+      const nextDap = {
+        enabled: true,
+        playlistIndex,
+        volumePercent: normalizeDapVolumePercent(
+          dapVolumePercentInput ? dapVolumePercentInput.value : dapConfig.volumePercent,
+          dapConfig.volumePercent,
+        ),
+      };
+      await syncDapConfig(nextDap, { successMessage: `DAP переключен на плей-лист ${playlistIndex + 1}.` });
+    });
+  }
+
+  if (dapVolumePercentInput) {
+    dapVolumePercentInput.addEventListener('change', async () => {
+      if (!isHostRole()) {
+        updateDapSettingsUi(currentRole);
+        setStatus('DAP может менять только хост.');
+        return;
+      }
+
+      const nextVolumePercent = normalizeDapVolumePercent(dapVolumePercentInput.value, dapConfig.volumePercent);
+      dapVolumePercentInput.value = String(nextVolumePercent);
+      const nextDap = {
+        enabled: Boolean(dapConfig.enabled),
+        playlistIndex: normalizePlaylistTrackIndex(dapConfig.playlistIndex),
+        volumePercent: nextVolumePercent,
+      };
+      await syncDapConfig(nextDap, { successMessage: `Громкость DAP: ${nextVolumePercent}%.` });
     });
   }
 }
@@ -8022,11 +9155,13 @@ async function bootstrap() {
   initSettings();
   initSidebarToggle();
   initServerControls();
+  initDapSettingsControls();
   initDspSetupPanel();
   initPlaylistControls();
   initTouchFullscreenToggle();
   initNowPlayingControls();
   initZonesPanControls();
+  startDapNoSilenceGuard();
   initUpdater();
   startAudioCatalogAutoRefresh();
   window.addEventListener('beforeunload', () => {
@@ -8040,6 +9175,7 @@ async function bootstrap() {
     stopHostProgressLoop();
     stopCoHostProgressLoop();
     clearQueuedCoHostSeekCommands();
+    stopDapNoSilenceGuard();
     cleanupNowPlayingSeekInteraction();
     stopZonesPanMomentum();
     stopZonesWheelSmoothScroll();
