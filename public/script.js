@@ -2677,7 +2677,6 @@ function renderCohostUsers() {
     const disconnectBtn = document.createElement('button');
     disconnectBtn.type = 'button';
     disconnectBtn.className = 'cohost-disconnect-btn';
-    disconnectBtn.textContent = '⨯';
     disconnectBtn.title = 'Отключить все сессии пользователя';
     disconnectBtn.setAttribute('aria-label', `Отключить пользователя ${entry.username}`);
     disconnectBtn.disabled = isRoleUpdatePending || isDisconnectPending;

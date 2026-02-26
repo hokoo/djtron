@@ -1648,18 +1648,19 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
 }
 
 .cohost-disconnect-btn {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.22);
+  background: transparent;
   color: var(--muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 0;
   line-height: 1;
   padding: 0;
+  position: relative;
   cursor: pointer;
   opacity: 0;
   transform: translateX(4px) scale(0.96);
@@ -1668,8 +1669,30 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
     opacity 0.15s ease,
     transform 0.15s ease,
     color 0.2s ease,
+    background 0.2s ease,
     border-color 0.2s ease,
     box-shadow 0.2s ease;
+}
+
+.cohost-disconnect-btn::before,
+.cohost-disconnect-btn::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 11px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.cohost-disconnect-btn::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.cohost-disconnect-btn::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .cohost-user:hover .cohost-disconnect-btn,
@@ -1683,17 +1706,24 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
 .cohost-disconnect-btn:hover,
 .cohost-disconnect-btn:focus-visible {
   outline: none;
-  color: #fecaca;
-  border-color: #7f1d1d;
-  box-shadow: 0 0 8px rgba(185, 28, 28, 0.4);
+  border-color: var(--border-strong);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.18);
+  transform: translateX(0) scale(1) rotate(90deg);
+  box-shadow: 0 0 8px var(--shadow-accent);
 }
 
 .cohost-disconnect-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.65;
   transform: translateX(0) scale(1);
   pointer-events: none;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+.cohost-disconnect-btn:disabled::before,
+.cohost-disconnect-btn:disabled::after {
+  opacity: 0.9;
 }
 
 @media (hover: none), (pointer: coarse) {
