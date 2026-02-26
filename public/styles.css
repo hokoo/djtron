@@ -137,8 +137,14 @@ body[data-role='co-host'] #overlaySettingsPanel {
   display: none;
 }
 
+.sidebar__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .sidebar__header h1 {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 20px;
 }
 
@@ -146,6 +152,23 @@ body[data-role='co-host'] #overlaySettingsPanel {
   margin: 0 0 12px;
   opacity: 0.9;
   font-size: 13px;
+}
+
+.sidebar__header .fullscreen-toggle {
+  margin-left: auto;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .content {
@@ -523,13 +546,17 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   flex: 1 1 auto;
 }
 
+.sidebar-quick-actions #resetPlaylists {
+  flex: 1 1 auto;
+}
+
 .sidebar-quick-actions #addPlaylist {
   flex: 1 1 auto;
 }
 
 .sidebar-quick-actions #refreshPlaylists,
-.sidebar-quick-actions #addPlaylist,
-.sidebar-quick-actions .fullscreen-toggle {
+.sidebar-quick-actions #resetPlaylists,
+.sidebar-quick-actions #addPlaylist {
   height: 44px;
   min-height: 44px;
   display: inline-flex;
