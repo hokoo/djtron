@@ -3035,6 +3035,9 @@ function renderCohostUsers() {
 
     const row = document.createElement('div');
     row.className = 'cohost-user';
+    if (entry.role === ROLE_COHOST) {
+      row.classList.add('is-cohost');
+    }
     if (isDisconnectPending) {
       row.classList.add('is-disconnect-pending');
     }

@@ -1745,6 +1745,12 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
   background: rgba(0, 0, 0, 0.18);
 }
 
+.cohost-user.is-cohost {
+  border-color: #8b5cf6;
+  background: rgba(124, 58, 237, 0.16);
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.28);
+}
+
 .cohost-user__identity {
   display: flex;
   flex-direction: column;
@@ -1765,6 +1771,14 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
   font-size: 11px;
   color: var(--hint);
   line-height: 1.2;
+}
+
+.cohost-user.is-cohost .cohost-user__name {
+  color: #d7c0ff;
+}
+
+.cohost-user.is-cohost .cohost-user__meta {
+  color: #b7a6d6;
 }
 
 .cohost-user__actions {
@@ -1851,6 +1865,19 @@ body[data-role='co-host'] .track-card.is-host-playing button.play::before {
 .cohost-disconnect-btn:disabled::before,
 .cohost-disconnect-btn:disabled::after {
   opacity: 0.9;
+}
+
+.cohost-user.is-cohost .cohost-disconnect-btn {
+  border-color: #8b5cf6;
+  color: #d7c0ff;
+}
+
+.cohost-user.is-cohost .cohost-disconnect-btn:hover,
+.cohost-user.is-cohost .cohost-disconnect-btn:focus-visible {
+  border-color: #b682ff;
+  color: #fff;
+  background: rgba(124, 58, 237, 0.22);
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.55);
 }
 
 @media (hover: none), (pointer: coarse) {
