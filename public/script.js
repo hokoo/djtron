@@ -8236,7 +8236,7 @@ async function resetPlaylists() {
     const response = await fetch('/api/layout/reset', { method: 'POST' });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message = data && (data.error || data.message);
+      const message = data.error || data.message;
       throw new Error(message || 'Не удалось сбросить плей-листы');
     }
 
@@ -8244,7 +8244,7 @@ async function resetPlaylists() {
     requestTracksReload({ reason: 'manual' });
   } catch (err) {
     console.error(err);
-    setStatus(err && err.message ? err.message : 'Не удалось сбросить плей-листы.');
+    setStatus(err?.message || 'Не удалось сбросить плей-листы.');
   }
 }
 
