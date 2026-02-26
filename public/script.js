@@ -125,6 +125,10 @@ const ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS = 0.02;
 const ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME = 0.92;
 const ZONES_WHEEL_SMOOTH_EASE = 0.24;
 const ZONES_WHEEL_SMOOTH_MIN_DELTA_PX = 0.45;
+const PLAYLIST_VIRTUALIZATION_MIN_ITEMS = 120;
+const PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX = 45;
+const PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS = 8;
+const PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX = 420;
 const TRACK_TITLE_MODE_FILE = 'file';
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
@@ -1811,7 +1815,12 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   const sourceZone = card.closest('.zone');
   const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
   const sourceBody = card.parentElement;
-  const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+  const sourceIndexFromDataset = Number.parseInt(card.dataset.playlistPosition || '', 10);
+  const sourceIndex = Number.isInteger(sourceIndexFromDataset)
+    ? sourceIndexFromDataset
+    : sourceBody
+      ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card)
+      : -1;
   const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
   const resolvedMode = mode === 'copy' ? 'copy' : 'move';
 
@@ -5118,7 +5127,12 @@ function attachDragHandlers(card) {
     const sourceZone = card.closest('.zone');
     const sourceZoneIndex = sourceZone ? Number.parseInt(sourceZone.dataset.zoneIndex || '', 10) : -1;
     const sourceBody = card.parentElement;
-    const sourceIndex = sourceBody ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card) : -1;
+    const sourceIndexFromDataset = Number.parseInt(card.dataset.playlistPosition || '', 10);
+    const sourceIndex = Number.isInteger(sourceIndexFromDataset)
+      ? sourceIndexFromDataset
+      : sourceBody
+        ? Array.from(sourceBody.querySelectorAll('.track-card')).indexOf(card)
+        : -1;
     const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
 
     dragContext = {
@@ -5721,6 +5735,66 @@ function syncLayoutFromDom() {
   playlistNames = normalizePlaylistNames(playlistNames, layout.length);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
   applyDapConstraintsForCurrentLayout();
+}
+
+function parsePlaylistPositionFromCard(card) {
+  if (!(card instanceof HTMLElement)) return null;
+  const playlistPosition = Number.parseInt(card.dataset.playlistPosition || '', 10);
+  if (!Number.isInteger(playlistPosition) || playlistPosition < 0) return null;
+  return playlistPosition;
+}
+
+function getAdjacentTrackCardForDrop(referenceCard, direction) {
+  if (!(referenceCard instanceof HTMLElement)) return null;
+  const searchDirection = direction === 'previous' ? 'previousElementSibling' : 'nextElementSibling';
+  let cursor = referenceCard;
+
+  while (cursor) {
+    cursor = cursor[searchDirection];
+    if (!(cursor instanceof HTMLElement)) return null;
+    if (!cursor.classList.contains('track-card')) continue;
+    if (cursor === draggingCard || cursor === dragPreviewCard) continue;
+    return cursor;
+  }
+
+  return null;
+}
+
+function resolveDropInsertIndex(targetBody, targetZoneIndex, layoutState) {
+  const normalizedLayout = ensurePlaylists(layoutState);
+  const targetPlaylist =
+    Number.isInteger(targetZoneIndex) && targetZoneIndex >= 0 && targetZoneIndex < normalizedLayout.length
+      ? normalizedLayout[targetZoneIndex]
+      : [];
+  const fallbackIndex = Array.isArray(targetPlaylist) ? targetPlaylist.length : 0;
+
+  if (!(targetBody instanceof HTMLElement)) return fallbackIndex;
+
+  const marker =
+    dragPreviewCard && dragPreviewCard.parentElement === targetBody
+      ? dragPreviewCard
+      : draggingCard && draggingCard.parentElement === targetBody
+        ? draggingCard
+        : null;
+
+  if (!marker) {
+    return fallbackIndex;
+  }
+
+  const previousCard = getAdjacentTrackCardForDrop(marker, 'previous');
+  const nextCard = getAdjacentTrackCardForDrop(marker, 'next');
+  const previousPosition = parsePlaylistPositionFromCard(previousCard);
+  const nextPosition = parsePlaylistPositionFromCard(nextCard);
+
+  if (Number.isInteger(nextPosition)) {
+    return Math.max(0, Math.min(nextPosition, fallbackIndex));
+  }
+
+  if (Number.isInteger(previousPosition)) {
+    return Math.max(0, Math.min(previousPosition + 1, fallbackIndex));
+  }
+
+  return fallbackIndex;
 }
 
 function buildTrackOccurrenceMap(layoutState) {
@@ -7874,6 +7948,88 @@ async function deletePlaylist(playlistIndex) {
   }
 }
 
+function shouldVirtualizePlaylist(playlistFiles) {
+  if (!Array.isArray(playlistFiles) || playlistFiles.length < PLAYLIST_VIRTUALIZATION_MIN_ITEMS) {
+    return false;
+  }
+  if (typeof window !== 'object' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia('(pointer: coarse)').matches;
+}
+
+function syncVirtualizedRenderedTrackState() {
+  if (currentTrack) {
+    const isPlaying = Boolean(currentAudio && !currentAudio.paused);
+    setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
+    setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
+  }
+  syncDapInterruptedTrackState();
+  syncDspTransitionTrackHighlight();
+  syncLiveDspNextTrackHighlight();
+  syncHostTrackHighlight();
+  syncPlaylistHeaderActiveState();
+}
+
+function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
+  if (!zoneBody || !Array.isArray(playlistCards) || playlistCards.length === 0) {
+    if (zoneBody) {
+      zoneBody.style.paddingTop = '';
+      zoneBody.style.paddingBottom = '';
+    }
+    return;
+  }
+
+  const totalCards = playlistCards.length;
+  let renderedStart = -1;
+  let renderedEnd = -1;
+  let rafId = null;
+
+  const renderWindow = () => {
+    if (!zoneBody.isConnected || draggingCard) return;
+
+    const viewportHeight = Math.max(1, zoneBody.clientHeight || PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX);
+    const visibleRows = Math.max(1, Math.ceil(viewportHeight / PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX));
+    let start = Math.max(
+      0,
+      Math.floor(zoneBody.scrollTop / PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX) - PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS,
+    );
+    let end = Math.min(
+      totalCards,
+      start + visibleRows + PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS * 2,
+    );
+
+    if (end <= start) {
+      end = Math.min(totalCards, start + visibleRows);
+    }
+
+    if (start === renderedStart && end === renderedEnd) return;
+    renderedStart = start;
+    renderedEnd = end;
+
+    zoneBody.style.paddingTop = `${Math.max(0, start * PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX)}px`;
+    zoneBody.style.paddingBottom = `${Math.max(0, (totalCards - end) * PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX)}px`;
+
+    const fragment = document.createDocumentFragment();
+    for (let index = start; index < end; index += 1) {
+      fragment.appendChild(playlistCards[index]);
+    }
+    zoneBody.replaceChildren(fragment);
+    syncVirtualizedRenderedTrackState();
+  };
+
+  const scheduleRender = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      renderWindow();
+    });
+  };
+
+  zoneBody.addEventListener('scroll', scheduleRender, { passive: true });
+  requestAnimationFrame(renderWindow);
+}
+
 function renderZones() {
   zonesContainer.innerHTML = '';
   resetTrackReferences();
@@ -8053,18 +8209,24 @@ function renderZones() {
     const body = document.createElement('div');
     body.className = 'zone-body';
 
-    playlistFiles.forEach((file, rowIndex) => {
+    const playlistCards = playlistFiles.map((file, rowIndex) => {
       const canDeleteTrack = (trackOccurrence.get(file) || 0) > 1;
-      body.appendChild(
-        buildTrackCard(file, '/audio', {
-          draggable: true,
-          orderNumber: rowIndex + 1,
-          playlistIndex,
-          playlistPosition: rowIndex,
-          canDelete: canDeleteTrack,
-        }),
-      );
+      return buildTrackCard(file, '/audio', {
+        draggable: true,
+        orderNumber: rowIndex + 1,
+        playlistIndex,
+        playlistPosition: rowIndex,
+        canDelete: canDeleteTrack,
+      });
     });
+
+    if (shouldVirtualizePlaylist(playlistFiles)) {
+      mountVirtualizedPlaylistCards(body, playlistCards);
+    } else if (playlistCards.length > 0) {
+      const fragment = document.createDocumentFragment();
+      playlistCards.forEach((card) => fragment.appendChild(card));
+      body.appendChild(fragment);
+    }
 
     body.addEventListener('dragover', (e) => applyDragPreview(body, e));
 
@@ -8130,8 +8292,16 @@ async function handleDrop(event, targetZoneIndex) {
   const previousDsp = playlistDsp.slice();
   const previousDap = { ...dapConfig };
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
+  const targetBody = targetZone.querySelector('.zone-body');
 
-  let nextLayout;
+  let nextLayout = cloneLayoutState(dragContext.snapshotLayout);
+  if (!Array.isArray(nextLayout[targetZoneIndex])) {
+    hideTrashDropzone();
+    clearDragModeBadge();
+    clearDragPreviewCard();
+    return;
+  }
+
   if (isCopyDrop) {
     if (!dragContext.file) {
       hideTrashDropzone();
@@ -8139,38 +8309,43 @@ async function handleDrop(event, targetZoneIndex) {
       clearDragPreviewCard();
       return;
     }
-    nextLayout = cloneLayoutState(dragContext.snapshotLayout);
-    if (!Array.isArray(nextLayout[targetZoneIndex])) {
+    let insertIndex = resolveDropInsertIndex(targetBody, targetZoneIndex, nextLayout);
+    insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
+    nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+  } else {
+    clearDragPreviewCard();
+    const resolution = resolveTrackIndexByContext(nextLayout, dragContext);
+    if (resolution.playlistIndex < 0 || resolution.trackIndex < 0) {
       hideTrashDropzone();
       clearDragModeBadge();
       clearDragPreviewCard();
       return;
     }
 
-    const targetBody = targetZone.querySelector('.zone-body');
-    const cards = targetBody ? Array.from(targetBody.querySelectorAll('.track-card')) : [];
-    const dropReferenceCard = dragPreviewCard || draggingCard;
-    const droppedIndexWithoutSource = cards.indexOf(dropReferenceCard);
-    const fallbackIndex = nextLayout[targetZoneIndex].length;
-    let insertIndex = droppedIndexWithoutSource === -1 ? fallbackIndex : droppedIndexWithoutSource;
-    const sourceCardPresentInTarget = cards.includes(draggingCard);
+    const sourcePlaylist = nextLayout[resolution.playlistIndex];
+    if (!Array.isArray(sourcePlaylist)) {
+      hideTrashDropzone();
+      clearDragModeBadge();
+      clearDragPreviewCard();
+      return;
+    }
 
-    if (
-      dragContext.sourceZoneIndex === targetZoneIndex &&
-      Number.isInteger(dragContext.sourceIndex) &&
-      dragContext.sourceIndex >= 0 &&
-      !sourceCardPresentInTarget &&
-      insertIndex >= dragContext.sourceIndex
-    ) {
-      insertIndex += 1;
+    let insertIndex = resolveDropInsertIndex(targetBody, targetZoneIndex, nextLayout);
+    const [removedFile] = sourcePlaylist.splice(resolution.trackIndex, 1);
+    const movedFile = typeof removedFile === 'string' && removedFile ? removedFile : resolution.file;
+    if (typeof movedFile !== 'string' || !movedFile) {
+      hideTrashDropzone();
+      clearDragModeBadge();
+      clearDragPreviewCard();
+      return;
+    }
+
+    if (resolution.playlistIndex === targetZoneIndex && resolution.trackIndex < insertIndex) {
+      insertIndex -= 1;
     }
 
     insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
-    nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
-  } else {
-    clearDragPreviewCard();
-    syncLayoutFromDom();
-    nextLayout = cloneLayoutState(layout);
+    nextLayout[targetZoneIndex].splice(insertIndex, 0, movedFile);
   }
 
   hideTrashDropzone();

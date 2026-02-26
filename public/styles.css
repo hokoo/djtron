@@ -2183,6 +2183,39 @@ body[data-role='co-host'] .track-card.is-host-paused {
   }
 }
 
+@media (hover: none), (pointer: coarse) {
+  .track-card.is-playing,
+  .track-card.is-paused,
+  .track-card:is(.is-dsp-transition-source, .is-dsp-transition-target),
+  body[data-role='slave'] .track-card.is-host-playing,
+  body[data-role='slave'] .track-card.is-host-paused,
+  body[data-role='co-host'] .track-card.is-host-playing,
+  body[data-role='co-host'] .track-card.is-host-paused,
+  .zone.zone--dap .track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused, .is-dsp-transition-source, .is-dsp-transition-target) {
+    animation: none !important;
+  }
+
+  .track-card.is-playing,
+  .track-card.is-paused,
+  .track-card:is(.is-dsp-transition-source, .is-dsp-transition-target) {
+    box-shadow: inset 0 0 10px var(--shadow-accent);
+  }
+
+  body[data-role='slave'] .track-card.is-host-playing,
+  body[data-role='slave'] .track-card.is-host-paused {
+    box-shadow: inset 0 0 10px rgba(185, 28, 28, 0.45);
+  }
+
+  body[data-role='co-host'] .track-card.is-host-playing,
+  body[data-role='co-host'] .track-card.is-host-paused {
+    box-shadow: inset 0 0 10px rgba(124, 58, 237, 0.45);
+  }
+
+  .zone.zone--dap .track-card:is(.is-playing, .is-paused, .is-host-playing, .is-host-paused, .is-dsp-transition-source, .is-dsp-transition-target) {
+    box-shadow: inset 0 0 10px var(--dap-shadow);
+  }
+}
+
 @media (max-width: 980px) {
   .content-header {
     grid-template-columns: 1fr;
