@@ -602,11 +602,25 @@ function getDefaultPlaybackState() {
     volume: DEFAULT_LIVE_VOLUME,
     showVolumePresets: false,
     allowLiveSeek: false,
+    dapPlayback: getDefaultDapPlaybackState(),
     overlaySeconds: 0,
     nextDspSliceSeconds: 0,
     nextDspSourceSeconds: 0,
     playlistIndex: null,
     playlistPosition: null,
+    updatedAt: 0,
+  };
+}
+
+function getDefaultDapPlaybackState() {
+  return {
+    trackFile: null,
+    paused: false,
+    currentTime: 0,
+    duration: null,
+    playlistIndex: null,
+    playlistPosition: null,
+    interrupted: false,
     updatedAt: 0,
   };
 }
@@ -869,6 +883,43 @@ function normalizePlaybackSeekRatio(value) {
   return numeric;
 }
 
+function sanitizeDapPlaybackState(rawPlayback) {
+  const base = getDefaultDapPlaybackState();
+  if (!rawPlayback || typeof rawPlayback !== 'object') {
+    return base;
+  }
+
+  const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
+  if (!trackFile) {
+    const updatedAt = Number(rawPlayback.updatedAt);
+    if (Number.isFinite(updatedAt) && updatedAt > 0) {
+      base.updatedAt = updatedAt;
+    }
+    return base;
+  }
+
+  const rawCurrentTime = Number(rawPlayback.currentTime);
+  let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
+
+  const rawDuration = Number(rawPlayback.duration);
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+  if (duration !== null && currentTime > duration) {
+    currentTime = duration;
+  }
+
+  const updatedAt = Number(rawPlayback.updatedAt);
+  return {
+    trackFile,
+    paused: Boolean(rawPlayback.paused),
+    currentTime,
+    duration,
+    playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
+    interrupted: Boolean(rawPlayback.interrupted),
+    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+  };
+}
+
 function sanitizePlaybackState(rawPlayback) {
   if (!rawPlayback || typeof rawPlayback !== 'object') {
     return {
@@ -877,6 +928,7 @@ function sanitizePlaybackState(rawPlayback) {
     };
   }
 
+  const dapPlayback = sanitizeDapPlaybackState(rawPlayback.dapPlayback);
   const volume = normalizeLiveVolumePreset(rawPlayback.volume, DEFAULT_LIVE_VOLUME);
   const hasExplicitShowVolumePresets = Object.prototype.hasOwnProperty.call(rawPlayback, 'showVolumePresets');
   let showVolumePresets = hasExplicitShowVolumePresets ? Boolean(rawPlayback.showVolumePresets) : hasActiveVolumePreset(volume);
@@ -902,6 +954,7 @@ function sanitizePlaybackState(rawPlayback) {
       volume,
       showVolumePresets,
       allowLiveSeek,
+      dapPlayback,
       overlaySeconds,
       nextDspSliceSeconds: 0,
       nextDspSourceSeconds: 0,
@@ -926,6 +979,7 @@ function sanitizePlaybackState(rawPlayback) {
     volume,
     showVolumePresets,
     allowLiveSeek,
+    dapPlayback,
     overlaySeconds,
     nextDspSliceSeconds,
     nextDspSourceSeconds,
@@ -1043,6 +1097,18 @@ function serializePlaybackState(state) {
     volume: normalizeLiveVolumePreset(state.volume, DEFAULT_LIVE_VOLUME),
     showVolumePresets: Boolean(state.showVolumePresets),
     allowLiveSeek: Boolean(state.allowLiveSeek),
+    dapPlayback: (() => {
+      const normalizedDap = sanitizeDapPlaybackState(state.dapPlayback);
+      return {
+        trackFile: normalizedDap.trackFile,
+        paused: normalizedDap.paused,
+        currentTime: normalizedDap.currentTime,
+        duration: normalizedDap.duration,
+        playlistIndex: normalizedDap.playlistIndex,
+        playlistPosition: normalizedDap.playlistPosition,
+        interrupted: normalizedDap.interrupted,
+      };
+    })(),
     overlaySeconds: parseBoundedNumberConfigValue(state.overlaySeconds, 0, { min: 0, max: 120 }),
     nextDspSliceSeconds: parseBoundedNumberConfigValue(state.nextDspSliceSeconds, 0, { min: 0, max: 120 }),
     nextDspSourceSeconds: parseBoundedNumberConfigValue(state.nextDspSourceSeconds, 0, { min: 0, max: 120 }),
@@ -1067,6 +1133,7 @@ function buildLayoutPayload(sourceClientId = null) {
 }
 
 function buildPlaybackPayload(sourceClientId = null) {
+  const normalizedDapPlayback = sanitizeDapPlaybackState(sharedPlaybackState.dapPlayback);
   return {
     trackFile: sharedPlaybackState.trackFile,
     paused: sharedPlaybackState.paused,
@@ -1075,6 +1142,16 @@ function buildPlaybackPayload(sourceClientId = null) {
     volume: sharedPlaybackState.volume,
     showVolumePresets: Boolean(sharedPlaybackState.showVolumePresets),
     allowLiveSeek: Boolean(sharedPlaybackState.allowLiveSeek),
+    dapPlayback: {
+      trackFile: normalizedDapPlayback.trackFile,
+      paused: normalizedDapPlayback.paused,
+      currentTime: normalizedDapPlayback.currentTime,
+      duration: normalizedDapPlayback.duration,
+      playlistIndex: normalizedDapPlayback.playlistIndex,
+      playlistPosition: normalizedDapPlayback.playlistPosition,
+      interrupted: normalizedDapPlayback.interrupted,
+      updatedAt: normalizedDapPlayback.updatedAt,
+    },
     overlaySeconds: parseBoundedNumberConfigValue(sharedPlaybackState.overlaySeconds, 0, { min: 0, max: 120 }),
     nextDspSliceSeconds: parseBoundedNumberConfigValue(sharedPlaybackState.nextDspSliceSeconds, 0, {
       min: 0,

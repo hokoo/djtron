@@ -173,6 +173,8 @@ body[data-role='co-host'] #overlaySettingsPanel {
   justify-content: center;
 }
 
+body[data-role='host'] .now-playing-grid,
+body[data-role='co-host'] .now-playing-grid,
 body[data-role='slave'] .now-playing-grid {
   grid-template-columns: repeat(2, minmax(240px, 1fr));
 }
@@ -182,6 +184,15 @@ body[data-role='slave'] .now-playing-grid {
 }
 
 body[data-role='slave'] #hostNowPlaying {
+  display: flex;
+}
+
+#dapNowPlaying {
+  display: none;
+}
+
+body[data-role='host'] #dapNowPlaying,
+body[data-role='co-host'] #dapNowPlaying {
   display: flex;
 }
 
@@ -297,6 +308,17 @@ body[data-role='slave'] #localVolumePresets {
   background: linear-gradient(90deg, #b91c1c, rgba(185, 28, 28, 0.75));
 }
 
+.now-playing-control--dap {
+  border-color: var(--dap-border);
+  box-shadow: 0 0 14px var(--dap-shadow);
+  cursor: default;
+  user-select: none;
+}
+
+.now-playing-control--dap .now-playing-control__progress {
+  background: linear-gradient(90deg, var(--dap-accent), rgba(124, 244, 255, 0.72));
+}
+
 body[data-role='slave'] .now-playing-control--host .now-playing-control__progress {
   background:
     repeating-linear-gradient(
@@ -309,6 +331,10 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
 
 .now-playing--host .now-playing__title {
   color: #fca5a5;
+}
+
+.now-playing--dap .now-playing__title {
+  color: var(--dap-accent-strong);
 }
 
 .now-playing-control__progress {
@@ -393,6 +419,11 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__progres
 
 .now-playing-control--host .now-playing-control__reel {
   color: #7f1d1d;
+}
+
+.now-playing-control--dap .now-playing-control__reel {
+  color: var(--dap-accent);
+  filter: drop-shadow(0 0 4px var(--dap-shadow));
 }
 
 body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
