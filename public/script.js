@@ -1485,6 +1485,38 @@ function getZoneIndexFromElement(element) {
   return zoneIndex;
 }
 
+function capturePlaylistBodyScrollTops(playlistIndices = []) {
+  const captured = new Map();
+  if (!zonesContainer) return captured;
+
+  const uniqueIndices = new Set();
+  playlistIndices.forEach((playlistIndex) => {
+    if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return;
+    uniqueIndices.add(playlistIndex);
+  });
+
+  uniqueIndices.forEach((playlistIndex) => {
+    const body = zonesContainer.querySelector(`.zone[data-zone-index="${playlistIndex}"] .zone-body`);
+    if (!(body instanceof HTMLElement)) return;
+    captured.set(playlistIndex, body.scrollTop);
+  });
+
+  return captured;
+}
+
+function restorePlaylistBodyScrollTops(scrollTopsByPlaylist) {
+  if (!zonesContainer) return;
+  if (!(scrollTopsByPlaylist instanceof Map) || !scrollTopsByPlaylist.size) return;
+
+  scrollTopsByPlaylist.forEach((scrollTop, playlistIndex) => {
+    if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return;
+    if (!Number.isFinite(scrollTop)) return;
+    const body = zonesContainer.querySelector(`.zone[data-zone-index="${playlistIndex}"] .zone-body`);
+    if (!(body instanceof HTMLElement)) return;
+    body.scrollTop = scrollTop;
+  });
+}
+
 function resolveRequestedCopyMode(event) {
   if (touchCopyDragActive) {
     return touchDragMode === 'copy';
@@ -1494,6 +1526,10 @@ function resolveRequestedCopyMode(event) {
 
 function resolveEffectiveDragMode(event, targetZoneIndex = null) {
   const requestedCopy = resolveRequestedCopyMode(event);
+  if (!touchCopyDragActive) {
+    return requestedCopy ? 'copy' : 'move';
+  }
+
   if (!dragContext || dragContext.sourcePlaylistType !== PLAYLIST_TYPE_FOLDER) {
     return requestedCopy ? 'copy' : 'move';
   }
@@ -10535,6 +10571,8 @@ async function handleDrop(event, targetZoneIndex) {
     dspState: previousDsp,
     dapState: previousDap,
   });
+  const sourceZoneIndex = Number.isInteger(dragContext.sourceZoneIndex) ? dragContext.sourceZoneIndex : null;
+  const preservedScrollTops = capturePlaylistBodyScrollTops([sourceZoneIndex, targetZoneIndex]);
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
   const targetBody = targetZone.querySelector('.zone-body');
   let relocatedTrackContext = null;
@@ -10613,6 +10651,7 @@ async function handleDrop(event, targetZoneIndex) {
   playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
   renderZones();
+  restorePlaylistBodyScrollTops(preservedScrollTops);
   const undoActionId = relocatedTrackContext
     ? registerTrackRelocationUndoAction(relocatedTrackContext, undoSnapshot)
     : null;
@@ -10628,6 +10667,7 @@ async function handleDrop(event, targetZoneIndex) {
     playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
     playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
+    restorePlaylistBodyScrollTops(preservedScrollTops);
     if (undoActionId) {
       clearTrackRelocationUndoAction(undoActionId);
     } else if (relocatedTrackContext) {
