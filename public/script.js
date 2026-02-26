@@ -113,6 +113,9 @@ const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
+const TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX = 54;
+const TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME = 0.8;
+const TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME = 7;
 const COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS = 260;
 const COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX = 16;
 const COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS = 520;
@@ -285,6 +288,10 @@ let touchCopyDragGhost = null;
 let touchCopyDragStartX = 0;
 let touchCopyDragStartY = 0;
 let touchCopyDragMoved = false;
+let touchCopyDragLastClientX = 0;
+let touchCopyDragLastClientY = 0;
+let touchCopyDragEdgeScrollRaf = null;
+let touchCopyDragEdgeScrollVelocity = 0;
 let touchDragMode = null;
 let playlistCollapseHoldTimer = null;
 let playlistCollapseHoldPointerId = null;
@@ -1740,6 +1747,86 @@ function updateTouchCopyGhostPosition(clientX, clientY) {
   touchCopyDragGhost.style.transform = `translate(${clientX + offsetX}px, ${clientY + offsetY}px)`;
 }
 
+function stopTouchCopyDragEdgeAutoScroll() {
+  if (touchCopyDragEdgeScrollRaf !== null) {
+    cancelAnimationFrame(touchCopyDragEdgeScrollRaf);
+    touchCopyDragEdgeScrollRaf = null;
+  }
+  touchCopyDragEdgeScrollVelocity = 0;
+}
+
+function resolveTouchCopyDragEdgeScrollVelocity(clientX) {
+  if (!Number.isFinite(clientX)) return 0;
+  const viewportWidth = Math.max(0, window.innerWidth || document.documentElement.clientWidth || 0);
+  if (viewportWidth <= 0) return 0;
+  const threshold = Math.max(0, Math.min(TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, viewportWidth / 2));
+  if (threshold <= 0) return 0;
+
+  let direction = 0;
+  let edgeRatio = 0;
+  if (clientX <= threshold) {
+    direction = -1;
+    edgeRatio = (threshold - clientX) / threshold;
+  } else if (clientX >= viewportWidth - threshold) {
+    direction = 1;
+    edgeRatio = (clientX - (viewportWidth - threshold)) / threshold;
+  } else {
+    return 0;
+  }
+
+  const clampedRatio = Math.max(0, Math.min(1, edgeRatio));
+  const speed =
+    TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME +
+    (TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME - TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME) *
+      clampedRatio;
+  return direction * speed;
+}
+
+function runTouchCopyDragEdgeAutoScrollStep() {
+  touchCopyDragEdgeScrollRaf = null;
+  if (!touchCopyDragActive || !zonesContainer) return;
+  if (Math.abs(touchCopyDragEdgeScrollVelocity) < 0.01) return;
+
+  const maxScrollLeft = Math.max(0, zonesContainer.scrollWidth - zonesContainer.clientWidth);
+  if (maxScrollLeft <= 0) {
+    touchCopyDragEdgeScrollVelocity = 0;
+    return;
+  }
+
+  const previousScrollLeft = zonesContainer.scrollLeft;
+  const nextScrollLeft = Math.max(
+    0,
+    Math.min(maxScrollLeft, previousScrollLeft + touchCopyDragEdgeScrollVelocity),
+  );
+  zonesContainer.scrollLeft = nextScrollLeft;
+
+  if (Number.isFinite(touchCopyDragLastClientX) && Number.isFinite(touchCopyDragLastClientY)) {
+    updateTouchCopyDragPreview(touchCopyDragLastClientX, touchCopyDragLastClientY);
+  }
+
+  if (Math.abs(nextScrollLeft - previousScrollLeft) < 0.01) {
+    touchCopyDragEdgeScrollVelocity = 0;
+    return;
+  }
+
+  touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
+}
+
+function updateTouchCopyDragEdgeAutoScroll(clientX, clientY) {
+  touchCopyDragLastClientX = clientX;
+  touchCopyDragLastClientY = clientY;
+  const velocity = resolveTouchCopyDragEdgeScrollVelocity(clientX);
+  if (Math.abs(velocity) < 0.01) {
+    stopTouchCopyDragEdgeAutoScroll();
+    return;
+  }
+
+  touchCopyDragEdgeScrollVelocity = velocity;
+  if (touchCopyDragEdgeScrollRaf === null) {
+    touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
+  }
+}
+
 function removeTouchCopyDragListeners() {
   window.removeEventListener('pointermove', onTouchCopyDragPointerMove, true);
   window.removeEventListener('pointerup', onTouchCopyDragPointerUp, true);
@@ -1751,6 +1838,7 @@ function clearZoneDragOverState() {
 }
 
 function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
+  stopTouchCopyDragEdgeAutoScroll();
   if (touchCopyDragGhost) {
     touchCopyDragGhost.remove();
     touchCopyDragGhost = null;
@@ -1775,6 +1863,8 @@ function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
   touchCopyDragActive = false;
   touchCopyDragPointerId = null;
   touchCopyDragMoved = false;
+  touchCopyDragLastClientX = 0;
+  touchCopyDragLastClientY = 0;
   touchDragMode = null;
 
   if (shouldRestoreLayout) {
@@ -1893,6 +1983,7 @@ function onTouchCopyDragPointerMove(event) {
     touchCopyDragMoved = true;
   }
   updateTouchCopyDragPreview(event.clientX, event.clientY);
+  updateTouchCopyDragEdgeAutoScroll(event.clientX, event.clientY);
 }
 
 function onTouchCopyDragPointerUp(event) {
@@ -1951,6 +2042,8 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   touchCopyDragStartX = clientX;
   touchCopyDragStartY = clientY;
   touchCopyDragMoved = Boolean(moved);
+  touchCopyDragLastClientX = clientX;
+  touchCopyDragLastClientY = clientY;
   touchDragMode = resolvedMode;
   card.classList.add('dragging');
 
@@ -1963,6 +2056,7 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   updateTouchCopyGhostPosition(clientX, clientY);
   showTrashDropzone();
   applyDragModeBadge(touchDragMode);
+  updateTouchCopyDragEdgeAutoScroll(clientX, clientY);
 
   window.addEventListener('pointermove', onTouchCopyDragPointerMove, true);
   window.addEventListener('pointerup', onTouchCopyDragPointerUp, true);
