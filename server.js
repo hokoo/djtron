@@ -1044,7 +1044,12 @@ function loadPersistedLayoutState() {
     }
     const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
     const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
-    const sanitizedDap = sanitizeDapConfig(parsed.dapConfig, sanitizedLayout.length, DEFAULT_DAP_CONFIG);
+    const persistedDap = sanitizeDapConfig(parsed.dapConfig, sanitizedLayout.length, DEFAULT_DAP_CONFIG);
+    // DAP must always start disabled after server reboot, while preserving selected playlist/volume.
+    const sanitizedDap = {
+      ...persistedDap,
+      enabled: false,
+    };
     const sanitizedAutoplay = normalizePlaylistAutoplayWithDap(
       parsed.playlistAutoplay,
       sanitizedDap,
