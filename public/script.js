@@ -8390,17 +8390,29 @@ function getLiveLockedPlaylistIndex() {
 function syncPlaylistHeaderActiveState() {
   if (!zonesContainer) return;
 
-  const activePlaylistIndex = getLiveLockedPlaylistIndex();
   const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
-  const currentPlaybackIndex =
+  const localPlaybackIndex =
     currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()
       ? normalizePlaylistTrackIndex(currentTrack.playlistIndex)
       : null;
-  const isCurrentPlaybackPaused = Boolean(currentTrack && currentAudio && currentAudio.paused);
+  const isLocalPlaybackPaused = Boolean(currentTrack && currentAudio && currentAudio.paused);
   const hostPlaybackIndex =
     hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
       ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
       : null;
+  const livePlaybackIndex = isHostRole() ? localPlaybackIndex : hostPlaybackIndex;
+  const isLivePlaybackPaused = isHostRole() ? isLocalPlaybackPaused : Boolean(hostPlaybackState.paused);
+  const dapPlaybackState = sanitizeIncomingDapPlaybackState(
+    isHostRole()
+      ? buildDapPlaybackSnapshotForSync(dapConfig)
+      : hostPlaybackState && typeof hostPlaybackState === 'object'
+        ? hostPlaybackState.dapPlayback
+        : null,
+  );
+  const dapPlaybackIndex = dapPlaybackState.trackFile
+    ? normalizePlaylistTrackIndex(dapPlaybackState.playlistIndex)
+    : null;
+  const isDapPlaybackPaused = Boolean(!dapPlaybackState.trackFile || dapPlaybackState.paused);
   const zones = zonesContainer.querySelectorAll('.zone');
   zones.forEach((zone) => {
     if (!(zone instanceof HTMLElement)) return;
@@ -8411,24 +8423,29 @@ function syncPlaylistHeaderActiveState() {
     const activeReel = zone.querySelector('.playlist-active-reel');
     if (!(deleteButton instanceof HTMLElement) || !(activeReel instanceof HTMLElement)) return;
 
-    const isActive = activePlaylistIndex !== null && activePlaylistIndex === playlistIndex;
     const isDapPlaylist = dapPlaylistIndex !== null && dapPlaylistIndex === playlistIndex;
-    const isActiveFromCurrent = isActive && currentPlaybackIndex !== null && currentPlaybackIndex === playlistIndex;
-    const isActiveFromHost = isActive && !isActiveFromCurrent && hostPlaybackIndex !== null && hostPlaybackIndex === playlistIndex;
-    const isPaused = (isActiveFromCurrent && isCurrentPlaybackPaused) || (isActiveFromHost && Boolean(hostPlaybackState.paused));
-    const isHostSourceOnSlave =
-      isSlaveRole() && !isDapPlaylist && isActive && hostPlaybackIndex !== null && hostPlaybackIndex === playlistIndex;
+    const isLiveOnPlaylist = livePlaybackIndex !== null && livePlaybackIndex === playlistIndex;
+    const isLocalOnPlaylist = localPlaybackIndex !== null && localPlaybackIndex === playlistIndex;
+    const isDapPlaybackOnPlaylist =
+      isDapPlaylist &&
+      Boolean(dapPlaybackState.trackFile) &&
+      (dapPlaybackIndex === null || dapPlaybackIndex === playlistIndex);
+    const isHostSourceOnSlave = isSlaveRole() && !isDapPlaylist && isLiveOnPlaylist;
     activeReel.classList.toggle('is-host-source', isHostSourceOnSlave);
     if (isDapPlaylist) {
       deleteButton.style.display = 'none';
       activeReel.style.display = 'inline-flex';
-      activeReel.classList.toggle('is-rotating', isActive && !isPaused);
+      activeReel.classList.toggle('is-rotating', isDapPlaybackOnPlaylist && !isDapPlaybackPaused);
       return;
     }
 
-    deleteButton.style.display = isActive ? 'none' : 'inline-flex';
-    activeReel.style.display = isActive ? 'inline-flex' : 'none';
-    activeReel.classList.toggle('is-rotating', isActive && !isPaused);
+    const shouldShowActiveReel = isLiveOnPlaylist || isLocalOnPlaylist;
+    const shouldUseLiveState = isLiveOnPlaylist;
+    const isPaused = shouldUseLiveState ? isLivePlaybackPaused : isLocalPlaybackPaused;
+
+    deleteButton.style.display = shouldShowActiveReel ? 'none' : 'inline-flex';
+    activeReel.style.display = shouldShowActiveReel ? 'inline-flex' : 'none';
+    activeReel.classList.toggle('is-rotating', shouldShowActiveReel && !isPaused);
   });
 }
 
