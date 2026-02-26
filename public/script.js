@@ -5842,7 +5842,7 @@ function attachDragHandlers(card) {
   });
 
   card.addEventListener('dragstart', (e) => {
-    if (isLikelyTouchNativeDragEvent(e)) {
+    if (touchCopyDragActive || touchHoldPointerId !== null || isLikelyTouchNativeDragEvent(e)) {
       e.preventDefault();
       return;
     }
@@ -5936,9 +5936,13 @@ function applyDragPreview(zoneBody, event) {
     if (!previewCard) return;
     const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: true });
     if (beforeElement) {
-      zoneBody.insertBefore(previewCard, beforeElement);
+      if (previewCard.parentElement !== zoneBody || previewCard.nextSibling !== beforeElement) {
+        zoneBody.insertBefore(previewCard, beforeElement);
+      }
     } else {
-      zoneBody.appendChild(previewCard);
+      if (previewCard.parentElement !== zoneBody || previewCard !== zoneBody.lastElementChild) {
+        zoneBody.appendChild(previewCard);
+      }
     }
     return;
   }
@@ -5946,9 +5950,13 @@ function applyDragPreview(zoneBody, event) {
   clearDragPreviewCard();
   const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: false });
   if (beforeElement) {
-    zoneBody.insertBefore(draggingCard, beforeElement);
+    if (draggingCard.parentElement !== zoneBody || draggingCard.nextSibling !== beforeElement) {
+      zoneBody.insertBefore(draggingCard, beforeElement);
+    }
   } else {
-    zoneBody.appendChild(draggingCard);
+    if (draggingCard.parentElement !== zoneBody || draggingCard !== zoneBody.lastElementChild) {
+      zoneBody.appendChild(draggingCard);
+    }
   }
 }
 
