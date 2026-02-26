@@ -189,6 +189,7 @@ let trackTitleModesByTrack = new Map();
 let activeDurationTrackKey = null;
 let progressRaf = null;
 let progressAudio = null;
+let liveAudioInstances = new Set();
 let draggingCard = null;
 let dragDropHandled = false;
 let dragContext = null;
@@ -3835,6 +3836,7 @@ function stopAndClearLocalPlayback() {
   stopProgressLoop();
   currentAudio = null;
   currentTrack = null;
+  stopUnexpectedLiveAudios([]);
   resetLiveDspNextTrackPreview();
   clearDapInterruptedPlaybackSnapshot();
   syncNowPlayingPanel();
@@ -5015,6 +5017,41 @@ async function seekAudioToOffset(audio, offsetSeconds) {
 function getDuration(audio) {
   const d = audio ? audio.duration : NaN;
   return Number.isFinite(d) && d > 0 ? d : null;
+}
+
+function trackLiveAudioInstance(audio) {
+  if (!(audio instanceof HTMLAudioElement)) return audio;
+  liveAudioInstances.add(audio);
+  const cleanup = () => {
+    liveAudioInstances.delete(audio);
+  };
+  audio.addEventListener('ended', cleanup, { once: true });
+  audio.addEventListener('error', cleanup, { once: true });
+  return audio;
+}
+
+function stopUnexpectedLiveAudios(allowedAudios = []) {
+  const allowed = new Set(allowedAudios.filter((audio) => audio instanceof HTMLAudioElement));
+
+  for (const audio of Array.from(liveAudioInstances)) {
+    if (!(audio instanceof HTMLAudioElement)) {
+      liveAudioInstances.delete(audio);
+      continue;
+    }
+    if (allowed.has(audio)) continue;
+
+    try {
+      audio.pause();
+    } catch (err) {
+      // ignore pause failures while cleaning stale playback nodes
+    }
+    try {
+      audio.currentTime = 0;
+    } catch (err) {
+      // ignore seek failures for detached/finished nodes
+    }
+    liveAudioInstances.delete(audio);
+  }
 }
 
 function updateProgress(fileKey, currentTime, duration) {
@@ -6513,7 +6550,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
   setButtonPlaying(targetTrack.key, true, targetTrack);
   setTrackPaused(targetTrack.key, false, targetTrack);
 
-  const transitionAudio = new Audio(details.outputUrl);
+  const transitionAudio = trackLiveAudioInstance(new Audio(details.outputUrl));
   transitionAudio.preload = 'auto';
   transitionAudio.volume = getEffectiveLiveVolume(targetTrack);
   dspTransitionPlayback = {
@@ -6646,6 +6683,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     setButtonPlaying(targetTrack.key, true, targetTrack);
     setTrackPaused(targetTrack.key, false, targetTrack);
     startProgressLoop(preparedAudio, targetTrack.key);
+    stopUnexpectedLiveAudios([preparedAudio]);
     setStatus(`Играет: ${nextTrack.file}`);
     triggerLiveDspTransitionForTrack(targetTrack);
     syncNowPlayingPanel();
@@ -8806,7 +8844,7 @@ function createAudio(track) {
   const { file, basePath, key } = track;
   const encoded = encodeURIComponent(file);
   const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
-  const audio = new Audio(`${normalizedBase}/${encoded}`);
+  const audio = trackLiveAudioInstance(new Audio(`${normalizedBase}/${encoded}`));
   audio.preload = 'metadata';
   audio.load();
   audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_IDLE;
@@ -8911,6 +8949,7 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
       setButtonPlaying(newTrack.key, true, newTrack);
       setTrackPaused(newTrack.key, false, newTrack);
       startProgressLoop(newAudio, newTrack.key);
+      stopUnexpectedLiveAudios([newAudio]);
       setStatus(`Играет: ${newTrack.file}`);
       syncNowPlayingPanel();
       requestHostPlaybackSync(true);
@@ -9006,6 +9045,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
       await currentAudio.play();
       setButtonPlaying(track.key, true, track);
       startProgressLoop(currentAudio, track.key);
+      stopUnexpectedLiveAudios([currentAudio]);
       setStatus(`Играет: ${file}`);
       triggerLiveDspTransitionForTrack(track);
     } catch (err) {
@@ -9060,6 +9100,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
       setButtonPlaying(track.key, true, track);
       setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
+      stopUnexpectedLiveAudios([audio]);
       setStatus(`Играет: ${file}`);
       triggerLiveDspTransitionForTrack(track);
       syncNowPlayingPanel();
