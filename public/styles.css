@@ -1190,6 +1190,11 @@ body[data-role='co-host'] .playlist-folder-icon {
   text-shadow: none;
 }
 
+body[data-role='slave'] .playlist-autoplay-toggle[data-state='off'],
+body[data-role='slave'] .playlist-dsp-toggle[data-state='off'] {
+  display: none !important;
+}
+
 .playlist-autoplay-toggle.is-on:disabled,
 .playlist-dsp-toggle.is-on:disabled {
   opacity: 0.82;

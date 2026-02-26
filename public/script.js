@@ -2871,6 +2871,7 @@ function applyRoleUi(role) {
   updateDapNowPlayingVisibility(resolvedRole);
   updatePrereleaseSettingUi(resolvedRole);
   updateDspSetupUi(resolvedRole);
+  renderZones();
 
   if (isHost && (!isHostRole(previousRole) || dspStatusState.checkedAt <= 0)) {
     refreshDspStatus({ announceError: false, userInitiated: false });
@@ -8798,6 +8799,7 @@ function renderZones() {
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
     const isDspEnabled = Boolean(playlistDsp[playlistIndex]);
+    const hideInactiveIndicatorsOnSlave = isSlaveRole();
     const canManageAutoplay = isHostRole() && !isDapPlaylist;
     const canManageDsp = isHostRole() && isAutoplayEnabled;
     autoplayButton.dataset.state = isAutoplayEnabled ? 'on' : 'off';
@@ -8808,7 +8810,7 @@ function renderZones() {
         ? `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'}`
         : `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'} (только хост)`;
     autoplayButton.classList.toggle('is-on', isAutoplayEnabled);
-    autoplayButton.hidden = isDapPlaylist;
+    autoplayButton.hidden = isDapPlaylist || (hideInactiveIndicatorsOnSlave && !isAutoplayEnabled);
     autoplayButton.disabled = !canManageAutoplay;
     autoplayButton.addEventListener('click', (event) => {
       event.preventDefault();
@@ -8837,6 +8839,7 @@ function renderZones() {
     dspButton.dataset.state = isDspEnabled ? 'on' : 'off';
     dspButton.setAttribute('aria-pressed', isDspEnabled ? 'true' : 'false');
     dspButton.classList.toggle('is-on', isDspEnabled);
+    dspButton.hidden = hideInactiveIndicatorsOnSlave && !isDspEnabled;
     dspButton.disabled = !canManageDsp;
     if (!isAutoplayEnabled) {
       dspButton.title = canManageAutoplay
