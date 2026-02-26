@@ -342,6 +342,7 @@ let zonesFreeAreaLastTapX = 0;
 let zonesFreeAreaLastTapY = 0;
 const zonesWheelTargets = new Map();
 let zonesWheelSmoothRaf = null;
+let zoneBodiesCache = [];
 const collapsedPlaylistIndices = new Set();
 let collapsedPlaylistsOverlayEl = null;
 let collapsedPlaylistsHintTimer = null;
@@ -4821,7 +4822,7 @@ function startZonesPanMomentum(initialVelocityPxPerMs) {
 
 function getZoneBodies() {
   if (!zonesContainer) return [];
-  return Array.from(zonesContainer.querySelectorAll('.zone-body'));
+  return zoneBodiesCache;
 }
 
 function normalizeWheelDeltaPixels(event) {
@@ -4902,6 +4903,17 @@ function getTouchMidpoint(touches) {
   };
 }
 
+function getTouchByIdentifier(touches, identifier) {
+  if (!touches || !Number.isFinite(identifier)) return null;
+  for (let index = 0; index < touches.length; index += 1) {
+    const touch = typeof touches.item === 'function' ? touches.item(index) : touches[index];
+    if (touch && touch.identifier === identifier) {
+      return touch;
+    }
+  }
+  return null;
+}
+
 function resetZonesFreeAreaTapTracking({ resetTapCount = false } = {}) {
   zonesFreeAreaTapCandidate = null;
   if (!resetTapCount) return;
@@ -4946,9 +4958,7 @@ function onZonesFreeAreaTapMove(event) {
     return;
   }
 
-  const candidateTouch = Array.from(event.touches).find(
-    (touch) => touch.identifier === zonesFreeAreaTapCandidate.identifier,
-  );
+  const candidateTouch = getTouchByIdentifier(event.touches, zonesFreeAreaTapCandidate.identifier);
   if (!candidateTouch) {
     resetZonesFreeAreaTapTracking();
     return;
@@ -4993,9 +5003,7 @@ function onZonesFreeAreaTapEnd(event) {
     return;
   }
 
-  const completedTouch = Array.from(event.changedTouches).find(
-    (touch) => touch.identifier === zonesFreeAreaTapCandidate.identifier,
-  );
+  const completedTouch = getTouchByIdentifier(event.changedTouches, zonesFreeAreaTapCandidate.identifier);
   const candidate = zonesFreeAreaTapCandidate;
   zonesFreeAreaTapCandidate = null;
   if (!completedTouch) return;
@@ -8683,6 +8691,7 @@ function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 
 function renderZones() {
   if (!zonesContainer) return;
+  zoneBodiesCache = [];
   hideCollapsedPlaylistsOverlay();
   zonesContainer.innerHTML = '';
   resetTrackReferences();
@@ -8922,6 +8931,7 @@ function renderZones() {
     zone.append(header, body);
     zonesContainer.appendChild(zone);
   });
+  zoneBodiesCache = Array.from(zonesContainer.querySelectorAll('.zone-body'));
 
   syncPlaylistHeaderActiveState();
   syncCurrentTrackState();

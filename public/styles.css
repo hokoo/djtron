@@ -2346,6 +2346,12 @@ body[data-role='co-host'] .track-card.is-host-paused {
   padding: 16px;
 }
 
+@media (hover: none), (pointer: coarse) {
+  .auth-overlay {
+    backdrop-filter: none;
+  }
+}
+
 .auth-card {
   width: min(420px, 100%);
   background: var(--panel);
