@@ -4855,6 +4855,28 @@ function handleApiLayoutGet(req, res) {
   sendJson(res, 200, buildLayoutPayload(null));
 }
 
+function handleApiLayoutReset(req, res) {
+  const auth = requireHostRequest(req, res);
+  if (!auth) return;
+
+  sharedLayoutState = {
+    ...getDefaultLayoutState(),
+    version: sharedLayoutState.version + 1,
+    updatedAt: Date.now(),
+  };
+
+  persistLayoutState(sharedLayoutState);
+  broadcastLayoutUpdate(null);
+  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+    source: 'layout-update',
+    priority: 'normal',
+    force: false,
+    playlistDspFlags: sharedLayoutState.playlistDsp,
+  });
+
+  sendJson(res, 200, buildLayoutPayload(null));
+}
+
 function handleApiPlaybackGet(req, res) {
   sendJson(res, 200, buildPlaybackPayload(null));
 }
@@ -5450,6 +5472,17 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleApiLayoutStream(req, res);
+    return;
+  }
+
+  if (pathname === '/api/layout/reset') {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end('Method Not Allowed');
+      return;
+    }
+
+    handleApiLayoutReset(req, res);
     return;
   }
 

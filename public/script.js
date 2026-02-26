@@ -2,6 +2,7 @@ const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
 const refreshPlaylistsBtn = document.getElementById('refreshPlaylists');
+const resetPlaylistsBtn = document.getElementById('resetPlaylists');
 const touchFullscreenToggleBtn = document.getElementById('touchFullscreenToggle');
 const overlayTimeInput = document.getElementById('overlayTime');
 const overlayCurveSelect = document.getElementById('overlayCurve');
@@ -9108,6 +9109,26 @@ async function initializeLayoutState() {
   }
 }
 
+async function resetPlaylists() {
+  const confirmed = window.confirm('Сбросить все плей-листы и заново загрузить их из папки /audio?');
+  if (!confirmed) return;
+
+  try {
+    const response = await fetch('/api/layout/reset', { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data.error || data.message;
+      throw new Error(message || 'Не удалось сбросить плей-листы');
+    }
+
+    setStatus('Плей-листы сброшены. Загружаем состояние из /audio...');
+    requestTracksReload({ reason: 'manual' });
+  } catch (err) {
+    console.error(err);
+    setStatus(err?.message || 'Не удалось сбросить плей-листы.');
+  }
+}
+
 async function addPlaylist() {
   layout = ensurePlaylists(layout);
   layout.push([]);
@@ -10145,6 +10166,9 @@ function setPlaylistControlsLoading(isLoading) {
   if (addPlaylistBtn) {
     addPlaylistBtn.disabled = isLoading;
   }
+  if (resetPlaylistsBtn) {
+    resetPlaylistsBtn.disabled = isLoading;
+  }
 }
 
 function getTrackReloadStatusMessage(reason, fileCount) {
@@ -10989,6 +11013,10 @@ function initPlaylistControls() {
       setStatus('Обновляем список файлов и плей-листов...');
       requestTracksReload({ reason: 'manual' });
     });
+  }
+
+  if (resetPlaylistsBtn) {
+    resetPlaylistsBtn.addEventListener('click', resetPlaylists);
   }
 
   setPlaylistControlsLoading(false);
