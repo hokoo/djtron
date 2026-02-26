@@ -224,6 +224,7 @@ let autoplayStartInFlight = false;
 let overlayHandoffInFlight = false;
 let dapNoSilenceArmedPlaylistIndex = null;
 let dapInterruptedPlaybackSnapshot = null;
+let syncedDapInterruptedUiState = null;
 let shutdownCountdownTimer = null;
 let currentUser = null;
 let currentRole = null;
@@ -3590,6 +3591,42 @@ function getDapInterruptedPlaybackDisplayState(config = dapConfig) {
   };
 }
 
+function getHostDapInterruptedPlaybackDisplayState() {
+  const dapPlaybackState = sanitizeIncomingDapPlaybackState(
+    hostPlaybackState && typeof hostPlaybackState === 'object' ? hostPlaybackState.dapPlayback : null,
+  );
+  if (!dapPlaybackState.trackFile || !dapPlaybackState.paused || !dapPlaybackState.interrupted) {
+    return null;
+  }
+
+  const playbackContext = normalizeTrackPlaybackContext(dapPlaybackState);
+  if (playbackContext.playlistIndex === null || playbackContext.playlistPosition === null) {
+    return null;
+  }
+
+  const fileKey = trackKey(dapPlaybackState.trackFile, '/audio');
+  const knownDuration = getKnownDurationSeconds(fileKey);
+  const duration =
+    Number.isFinite(dapPlaybackState.duration) && dapPlaybackState.duration > 0
+      ? dapPlaybackState.duration
+      : knownDuration;
+  const elapsed = getDapPlaybackElapsedSeconds(dapPlaybackState);
+  const remainingSeconds = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - elapsed) : null;
+
+  return {
+    fileKey,
+    playbackContext,
+    remainingSeconds,
+  };
+}
+
+function getVisibleDapInterruptedPlaybackDisplayState(config = dapConfig) {
+  if (isHostRole()) {
+    return getDapInterruptedPlaybackDisplayState(config);
+  }
+  return getHostDapInterruptedPlaybackDisplayState();
+}
+
 function buildDapPlaybackSnapshotForSync(config = dapConfig) {
   const snapshot = getDefaultDapPlaybackState();
 
@@ -4061,6 +4098,7 @@ function syncHostNowPlayingPanel() {
 
   setHostNowPlayingProgress(progressPercent);
   setHostNowPlayingTime(remaining, { useCeil: true });
+  refreshTrackDurationLabels(trackKey(hostPlaybackState.trackFile, '/audio'));
   syncHostTrackHighlight();
 
   if (!hostPlaybackState.paused && duration && remaining > 0) {
@@ -4108,6 +4146,7 @@ function syncDapNowPlayingPanel() {
 
   setDapNowPlayingProgress(progressPercent);
   setDapNowPlayingTime(remaining, { useCeil: true });
+  refreshTrackDurationLabels(trackKey(dapPlaybackState.trackFile, '/audio'));
 }
 
 function getTrackDurationTextByKey(fileKey, playbackContext = null) {
@@ -4126,7 +4165,7 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
     return formatDuration(remaining, { useCeil: true });
   }
 
-  const interruptedDap = getDapInterruptedPlaybackDisplayState(dapConfig);
+  const interruptedDap = getVisibleDapInterruptedPlaybackDisplayState(dapConfig);
   if (
     interruptedDap &&
     interruptedDap.fileKey === fileKey &&
@@ -4136,12 +4175,15 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
     return formatDuration(interruptedDap.remainingSeconds, { useCeil: true });
   }
 
-  const isCoHostCurrent =
-    isCoHostRole() && hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+  const isRemoteLiveCurrent =
+    isRemoteLiveMirrorRole() &&
+    hostPlaybackState &&
+    typeof hostPlaybackState.trackFile === 'string' &&
+    hostPlaybackState.trackFile.trim()
       ? trackKey(hostPlaybackState.trackFile, '/audio') === fileKey
       : false;
-  const coHostContextMatches = !hasContext || isTrackPlaybackContextEqual(hostPlaybackState, normalizedContext);
-  if (isCoHostCurrent && coHostContextMatches) {
+  const remoteLiveContextMatches = !hasContext || isTrackPlaybackContextEqual(hostPlaybackState, normalizedContext);
+  if (isRemoteLiveCurrent && remoteLiveContextMatches) {
     const knownDuration = getKnownDurationSeconds(fileKey);
     const duration =
       Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : knownDuration;
@@ -7522,9 +7564,30 @@ function applyIncomingLayoutState(
 }
 
 function applyIncomingHostPlaybackState(nextState, sync = true) {
+  const previousHostTrackKey =
+    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+      ? trackKey(hostPlaybackState.trackFile, '/audio')
+      : null;
+  const previousDapTrackKey =
+    hostPlaybackState &&
+    hostPlaybackState.dapPlayback &&
+    typeof hostPlaybackState.dapPlayback.trackFile === 'string' &&
+    hostPlaybackState.dapPlayback.trackFile.trim()
+      ? trackKey(hostPlaybackState.dapPlayback.trackFile, '/audio')
+      : null;
   const normalizedState = sanitizeIncomingHostPlaybackState(nextState);
   const changed = serializeHostPlaybackState(hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
   hostPlaybackState = normalizedState;
+  const nextHostTrackKey =
+    typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+      ? trackKey(hostPlaybackState.trackFile, '/audio')
+      : null;
+  const nextDapTrackKey =
+    hostPlaybackState.dapPlayback &&
+    typeof hostPlaybackState.dapPlayback.trackFile === 'string' &&
+    hostPlaybackState.dapPlayback.trackFile.trim()
+      ? trackKey(hostPlaybackState.dapPlayback.trackFile, '/audio')
+      : null;
   setLivePlaybackVolume(normalizedState.volume, { sync: false, announce: false });
   setShowVolumePresetsEnabled(normalizedState.showVolumePresets, { persist: isHostRole(), sync: false });
   setLiveSeekEnabled(normalizedState.allowLiveSeek, { persist: isHostRole(), sync: false });
@@ -7535,6 +7598,19 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
     }
     syncHostNowPlayingPanel();
   }
+  if (previousHostTrackKey && previousHostTrackKey !== nextHostTrackKey) {
+    refreshTrackDurationLabels(previousHostTrackKey);
+  }
+  if (previousDapTrackKey && previousDapTrackKey !== nextDapTrackKey && previousDapTrackKey !== nextHostTrackKey) {
+    refreshTrackDurationLabels(previousDapTrackKey);
+  }
+  if (nextHostTrackKey) {
+    refreshTrackDurationLabels(nextHostTrackKey);
+  }
+  if (nextDapTrackKey && nextDapTrackKey !== nextHostTrackKey) {
+    refreshTrackDurationLabels(nextDapTrackKey);
+  }
+  syncDapInterruptedTrackState();
   syncPlaylistHeaderActiveState();
 
   return changed;
@@ -9049,11 +9125,28 @@ function syncCurrentTrackState() {
 }
 
 function syncDapInterruptedTrackState() {
-  const interruptedState = getDapInterruptedPlaybackDisplayState(dapConfig);
+  const interruptedState = getVisibleDapInterruptedPlaybackDisplayState(dapConfig);
+  const previousState = syncedDapInterruptedUiState;
+
+  if (
+    previousState &&
+    (!interruptedState ||
+      interruptedState.fileKey !== previousState.fileKey ||
+      !isTrackPlaybackContextEqual(interruptedState.playbackContext, previousState.playbackContext))
+  ) {
+    setTrackPausedByContext(previousState.fileKey, false, previousState.playbackContext);
+    refreshTrackDurationLabels(previousState.fileKey);
+    syncedDapInterruptedUiState = null;
+  }
+
   if (!interruptedState) return;
 
   setTrackPausedByContext(interruptedState.fileKey, true, interruptedState.playbackContext);
   refreshTrackDurationLabels(interruptedState.fileKey);
+  syncedDapInterruptedUiState = {
+    fileKey: interruptedState.fileKey,
+    playbackContext: normalizeTrackPlaybackContext(interruptedState.playbackContext),
+  };
 }
 
 async function handleDrop(event, targetZoneIndex) {
