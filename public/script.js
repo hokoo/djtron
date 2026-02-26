@@ -52,6 +52,7 @@ const nowPlayingControlLabelEl = document.getElementById('nowPlayingControlLabel
 const nowPlayingProgressEl = document.getElementById('nowPlayingProgress');
 const nowPlayingTimeEl = document.getElementById('nowPlayingTime');
 const nowPlayingReelEl = document.getElementById('nowPlayingReel');
+const nowPlayingGridEl = document.querySelector('.now-playing-grid');
 const localVolumePresetsEl = document.getElementById('localVolumePresets');
 let localVolumePresetButtons = localVolumePresetsEl
   ? Array.from(localVolumePresetsEl.querySelectorAll('.volume-presets__button'))
@@ -62,6 +63,7 @@ const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingCont
 const hostNowPlayingProgressEl = document.getElementById('hostNowPlayingProgress');
 const hostNowPlayingTimeEl = document.getElementById('hostNowPlayingTime');
 const hostNowPlayingReelEl = document.getElementById('hostNowPlayingReel');
+const dapNowPlayingEl = document.getElementById('dapNowPlaying');
 const dapNowPlayingTitleEl = document.getElementById('dapNowPlayingTitle');
 const dapNowPlayingControlEl = document.getElementById('dapNowPlayingControl');
 const dapNowPlayingControlLabelEl = document.getElementById('dapNowPlayingControlLabel');
@@ -332,6 +334,17 @@ function isCoHostRole(role = currentRole) {
 
 function isRemoteLiveMirrorRole(role = currentRole) {
   return role === ROLE_SLAVE || role === ROLE_COHOST;
+}
+
+function updateDapNowPlayingVisibility(role = currentRole) {
+  if (!dapNowPlayingEl) return false;
+  const shouldShow = (isHostRole(role) || isCoHostRole(role)) && isDapEnabled(dapConfig);
+  dapNowPlayingEl.hidden = !shouldShow;
+  if (nowPlayingGridEl) {
+    const shouldCenterSingle = (isHostRole(role) || isCoHostRole(role)) && !shouldShow;
+    nowPlayingGridEl.classList.toggle('now-playing-grid--single', shouldCenterSingle);
+  }
+  return shouldShow;
 }
 
 function clampVolume(value) {
@@ -759,12 +772,14 @@ function getPlaylistDisplayLabel(playlistIndex) {
 
 function updateDapSettingsUi(role = currentRole) {
   const isHost = isHostRole(role);
+  const isHostOrCoHost = isHost || isCoHostRole(role);
   const normalizedLayout = ensurePlaylists(layout);
   const normalizedDap = normalizeDapConfig(dapConfig, normalizedLayout.length, dapConfig);
   dapConfig = normalizedDap;
+  updateDapNowPlayingVisibility(role);
 
   if (dapSettingsPanelEl) {
-    dapSettingsPanelEl.hidden = !isHost;
+    dapSettingsPanelEl.hidden = !isHostOrCoHost;
   }
 
   if (dapPlaylistSelect) {
@@ -2459,6 +2474,7 @@ function applyRoleUi(role) {
   updateVolumePresetsUi();
   updateLiveSeekUi();
   updateDapSettingsUi(resolvedRole);
+  updateDapNowPlayingVisibility(resolvedRole);
   updatePrereleaseSettingUi(resolvedRole);
   updateDspSetupUi(resolvedRole);
 
@@ -3547,7 +3563,7 @@ function syncHostNowPlayingPanel() {
 function syncDapNowPlayingPanel() {
   if (!dapNowPlayingTitleEl || !dapNowPlayingControlLabelEl) return;
 
-  if (!isHostRole() && !isCoHostRole()) {
+  if (!updateDapNowPlayingVisibility(currentRole)) {
     setDapNowPlayingReelActive(false);
     setDapNowPlayingProgress(0);
     setDapNowPlayingTime(null);
@@ -4934,6 +4950,7 @@ function updateProgress(fileKey, currentTime, duration) {
   setNowPlayingProgress(percent);
   const remaining = duration ? Math.max(0, duration - safeTime) : getCurrentTrackRemainingSeconds();
   setNowPlayingTime(remaining, { useCeil: true });
+  syncDapNowPlayingPanel();
   refreshTrackDurationLabels(fileKey);
 }
 

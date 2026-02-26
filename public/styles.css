@@ -179,6 +179,11 @@ body[data-role='slave'] .now-playing-grid {
   grid-template-columns: repeat(2, minmax(240px, 1fr));
 }
 
+body[data-role='host'] .now-playing-grid.now-playing-grid--single,
+body[data-role='co-host'] .now-playing-grid.now-playing-grid--single {
+  grid-template-columns: minmax(320px, 560px);
+}
+
 #hostNowPlaying {
   display: none;
 }
@@ -191,8 +196,8 @@ body[data-role='slave'] #hostNowPlaying {
   display: none;
 }
 
-body[data-role='host'] #dapNowPlaying,
-body[data-role='co-host'] #dapNowPlaying {
+body[data-role='host'] #dapNowPlaying:not([hidden]),
+body[data-role='co-host'] #dapNowPlaying:not([hidden]) {
   display: flex;
 }
 
@@ -565,6 +570,10 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.dap-settings[hidden] {
+  display: none !important;
 }
 
 .dap-settings__toggle-row {
