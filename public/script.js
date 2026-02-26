@@ -106,10 +106,17 @@ const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
 const DAP_NO_SILENCE_GUARD_INTERVAL_MS = 320;
 const TOUCH_COPY_HOLD_MS = 360;
+const PLAYLIST_COLLAPSE_HOLD_MS = 480;
+const PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX = 24;
 const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
+const COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS = 260;
+const COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX = 16;
+const COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS = 520;
+const COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX = 44;
+const COLLAPSED_PLAYLIST_HINT_DURATION_MS = 1400;
 const NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX = 6;
 const NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS = 320;
 const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
@@ -278,6 +285,14 @@ let touchCopyDragStartX = 0;
 let touchCopyDragStartY = 0;
 let touchCopyDragMoved = false;
 let touchDragMode = null;
+let playlistCollapseHoldTimer = null;
+let playlistCollapseHoldPointerId = null;
+let playlistCollapseHoldStartX = 0;
+let playlistCollapseHoldStartY = 0;
+let playlistCollapseHoldPlaylistIndex = null;
+let playlistCollapseHoldTarget = null;
+let playlistCollapseHoldZone = null;
+let playlistCollapseHoldTriggered = false;
 let lastTouchPointerDownAt = 0;
 let dragPreviewCard = null;
 let desktopDragGhost = null;
@@ -319,8 +334,18 @@ let zonesTouchPanStartScrollLeft = 0;
 let zonesTouchPanLastMidX = 0;
 let zonesTouchPanLastAt = 0;
 let zonesTouchPanVelocityX = 0;
+let zonesFreeAreaTapCandidate = null;
+let zonesFreeAreaTapCount = 0;
+let zonesFreeAreaLastTapAt = 0;
+let zonesFreeAreaLastTapX = 0;
+let zonesFreeAreaLastTapY = 0;
 const zonesWheelTargets = new Map();
 let zonesWheelSmoothRaf = null;
+const collapsedPlaylistIndices = new Set();
+let collapsedPlaylistsOverlayEl = null;
+let collapsedPlaylistsHintTimer = null;
+let collapsedPlaylistsHintEl = null;
+let collapsedPlaylistLayoutLength = null;
 const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
 const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
 const HOST_NOW_PLAYING_IDLE_TITLE = 'Live: ничего не играет';
@@ -1894,6 +1919,140 @@ function startTouchCopyHold(card, event) {
   }, TOUCH_COPY_HOLD_MS);
 }
 
+function removePlaylistCollapseHoldListeners() {
+  window.removeEventListener('pointermove', onPlaylistCollapseHoldPointerMove, true);
+  window.removeEventListener('pointerup', onPlaylistCollapseHoldPointerEnd, true);
+  window.removeEventListener('pointercancel', onPlaylistCollapseHoldPointerCancel, true);
+}
+
+function clearPlaylistCollapsePendingVisual() {
+  if (!playlistCollapseHoldZone) return;
+  playlistCollapseHoldZone.classList.remove('zone--collapse-pending');
+  playlistCollapseHoldZone = null;
+}
+
+function clearPlaylistCollapseHold({ resetTriggered = true } = {}) {
+  if (playlistCollapseHoldTimer !== null) {
+    clearTimeout(playlistCollapseHoldTimer);
+    playlistCollapseHoldTimer = null;
+  }
+
+  if (
+    playlistCollapseHoldTarget &&
+    playlistCollapseHoldPointerId !== null &&
+    typeof playlistCollapseHoldTarget.releasePointerCapture === 'function'
+  ) {
+    try {
+      if (
+        playlistCollapseHoldTarget.hasPointerCapture &&
+        playlistCollapseHoldTarget.hasPointerCapture(playlistCollapseHoldPointerId)
+      ) {
+        playlistCollapseHoldTarget.releasePointerCapture(playlistCollapseHoldPointerId);
+      }
+    } catch (err) {
+      // ignore pointer capture release errors
+    }
+  }
+
+  clearPlaylistCollapsePendingVisual();
+  removePlaylistCollapseHoldListeners();
+  playlistCollapseHoldPointerId = null;
+  playlistCollapseHoldStartX = 0;
+  playlistCollapseHoldStartY = 0;
+  playlistCollapseHoldPlaylistIndex = null;
+  playlistCollapseHoldTarget = null;
+  playlistCollapseHoldZone = null;
+  if (resetTriggered) {
+    playlistCollapseHoldTriggered = false;
+  }
+}
+
+function onPlaylistCollapseHoldPointerMove(event) {
+  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
+  if (playlistCollapseHoldTriggered) {
+    event.preventDefault();
+    return;
+  }
+
+  const deltaX = event.clientX - playlistCollapseHoldStartX;
+  const deltaY = event.clientY - playlistCollapseHoldStartY;
+  if (Math.hypot(deltaX, deltaY) <= PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX) return;
+  clearPlaylistCollapseHold();
+}
+
+function onPlaylistCollapseHoldPointerEnd(event) {
+  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
+  const shouldCollapse = playlistCollapseHoldTriggered;
+  const collapsePlaylistIndex = playlistCollapseHoldPlaylistIndex;
+  clearPlaylistCollapseHold();
+  if (!shouldCollapse) return;
+  event.preventDefault();
+  event.stopPropagation();
+  collapsePlaylistForLocalView(collapsePlaylistIndex);
+}
+
+function onPlaylistCollapseHoldPointerCancel(event) {
+  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
+  const shouldCollapse = playlistCollapseHoldTriggered;
+  const collapsePlaylistIndex = playlistCollapseHoldPlaylistIndex;
+  clearPlaylistCollapseHold();
+  if (!shouldCollapse) return;
+  collapsePlaylistForLocalView(collapsePlaylistIndex);
+}
+
+function startPlaylistCollapseHold(event, playlistIndex) {
+  if (!isTouchPlaylistCollapseEnabled()) return;
+  const pointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
+  if (pointerType && pointerType !== 'touch' && pointerType !== 'pen') return;
+  if (touchCopyDragActive || draggingCard) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+
+  const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  clearPlaylistCollapseHold();
+  playlistCollapseHoldPointerId = event.pointerId;
+  playlistCollapseHoldStartX = event.clientX;
+  playlistCollapseHoldStartY = event.clientY;
+  playlistCollapseHoldPlaylistIndex = playlistIndex;
+  playlistCollapseHoldTarget = target;
+  playlistCollapseHoldZone = target ? target.closest('.zone') : null;
+  playlistCollapseHoldTriggered = false;
+
+  if (target && typeof target.setPointerCapture === 'function') {
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // ignore pointer capture errors
+    }
+  }
+
+  window.addEventListener('pointermove', onPlaylistCollapseHoldPointerMove, true);
+  window.addEventListener('pointerup', onPlaylistCollapseHoldPointerEnd, true);
+  window.addEventListener('pointercancel', onPlaylistCollapseHoldPointerCancel, true);
+
+  playlistCollapseHoldTimer = setTimeout(() => {
+    playlistCollapseHoldTimer = null;
+    const targetPlaylistIndex = playlistCollapseHoldPlaylistIndex;
+    if (
+      !Number.isInteger(targetPlaylistIndex) ||
+      targetPlaylistIndex < 0 ||
+      targetPlaylistIndex >= layout.length ||
+      collapsedPlaylistIndices.has(targetPlaylistIndex)
+    ) {
+      clearPlaylistCollapseHold();
+      return;
+    }
+
+    playlistCollapseHoldTriggered = true;
+    if (playlistCollapseHoldZone && playlistCollapseHoldZone.isConnected) {
+      playlistCollapseHoldZone.classList.add('zone--collapse-pending');
+    }
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement) {
+      focused.blur();
+    }
+  }, PLAYLIST_COLLAPSE_HOLD_MS);
+}
+
 function normalizeTrackTitleMode(value) {
   return value === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_ATTRIBUTES : TRACK_TITLE_MODE_FILE;
 }
@@ -2287,6 +2446,142 @@ function waitMs(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, timeoutMs);
   });
+}
+
+function isTouchPlaylistCollapseEnabled() {
+  return isTouchFullscreenPreferredDevice();
+}
+
+function pruneCollapsedPlaylistIndices(expectedLength = layout.length) {
+  const length = Number.isInteger(expectedLength) && expectedLength >= 0 ? expectedLength : 0;
+  for (const playlistIndex of Array.from(collapsedPlaylistIndices)) {
+    if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= length) {
+      collapsedPlaylistIndices.delete(playlistIndex);
+    }
+  }
+}
+
+function getCollapsedPlaylistIndicesInRenderOrder() {
+  pruneCollapsedPlaylistIndices(layout.length);
+  if (!collapsedPlaylistIndices.size) return [];
+  const renderOrder = buildPlaylistRenderOrder(layout.length, dapConfig);
+  const indices = renderOrder.filter((playlistIndex) => collapsedPlaylistIndices.has(playlistIndex));
+  if (indices.length === collapsedPlaylistIndices.size) return indices;
+
+  const unknown = Array.from(collapsedPlaylistIndices).filter((playlistIndex) => !indices.includes(playlistIndex));
+  unknown.sort((left, right) => left - right);
+  return indices.concat(unknown);
+}
+
+function isPlaylistCollapsedForLocalView(playlistIndex) {
+  if (!isTouchPlaylistCollapseEnabled()) return false;
+  return collapsedPlaylistIndices.has(playlistIndex);
+}
+
+function removeCollapsedPlaylistsHint() {
+  if (collapsedPlaylistsHintTimer !== null) {
+    clearTimeout(collapsedPlaylistsHintTimer);
+    collapsedPlaylistsHintTimer = null;
+  }
+  if (collapsedPlaylistsHintEl) {
+    collapsedPlaylistsHintEl.remove();
+    collapsedPlaylistsHintEl = null;
+  }
+}
+
+function showCollapsedPlaylistsHint(message) {
+  if (typeof message !== 'string' || !message.trim()) return;
+  removeCollapsedPlaylistsHint();
+
+  const hintEl = document.createElement('div');
+  hintEl.className = 'collapsed-playlists-hint';
+  hintEl.textContent = message.trim();
+  document.body.appendChild(hintEl);
+  collapsedPlaylistsHintEl = hintEl;
+
+  requestAnimationFrame(() => {
+    if (!collapsedPlaylistsHintEl) return;
+    collapsedPlaylistsHintEl.classList.add('is-visible');
+  });
+
+  collapsedPlaylistsHintTimer = setTimeout(() => {
+    if (!collapsedPlaylistsHintEl) return;
+    collapsedPlaylistsHintEl.classList.remove('is-visible');
+    collapsedPlaylistsHintTimer = setTimeout(() => {
+      removeCollapsedPlaylistsHint();
+    }, 180);
+  }, COLLAPSED_PLAYLIST_HINT_DURATION_MS);
+}
+
+function hideCollapsedPlaylistsOverlay() {
+  if (!collapsedPlaylistsOverlayEl) return;
+  collapsedPlaylistsOverlayEl.remove();
+  collapsedPlaylistsOverlayEl = null;
+}
+
+function restoreCollapsedPlaylistForLocalView(playlistIndex) {
+  if (!collapsedPlaylistIndices.has(playlistIndex)) return false;
+  collapsedPlaylistIndices.delete(playlistIndex);
+  hideCollapsedPlaylistsOverlay();
+  renderZones();
+  return true;
+}
+
+function collapsePlaylistForLocalView(playlistIndex) {
+  if (!isTouchPlaylistCollapseEnabled()) return false;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return false;
+  if (collapsedPlaylistIndices.has(playlistIndex)) return false;
+  collapsedPlaylistIndices.add(playlistIndex);
+  hideCollapsedPlaylistsOverlay();
+  renderZones();
+  const title = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+  showCollapsedPlaylistsHint(`Свернут: ${title}`);
+  return true;
+}
+
+function showCollapsedPlaylistsOverlay() {
+  if (!isTouchPlaylistCollapseEnabled()) return;
+  const collapsedIndices = getCollapsedPlaylistIndicesInRenderOrder();
+  if (!collapsedIndices.length) {
+    hideCollapsedPlaylistsOverlay();
+    showCollapsedPlaylistsHint('Скрытых плей-листов нет.');
+    return;
+  }
+
+  hideCollapsedPlaylistsOverlay();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'collapsed-playlists-overlay';
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) {
+      hideCollapsedPlaylistsOverlay();
+    }
+  });
+
+  const panel = document.createElement('div');
+  panel.className = 'collapsed-playlists-panel';
+
+  const title = document.createElement('p');
+  title.className = 'collapsed-playlists-panel__title';
+  title.textContent = 'Скрытые плей-листы';
+  panel.appendChild(title);
+
+  collapsedIndices.forEach((playlistIndex) => {
+    const restoreButton = document.createElement('button');
+    restoreButton.type = 'button';
+    restoreButton.className = 'collapsed-playlists-panel__item';
+    restoreButton.textContent = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+    restoreButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      restoreCollapsedPlaylistForLocalView(playlistIndex);
+    });
+    panel.appendChild(restoreButton);
+  });
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  collapsedPlaylistsOverlayEl = overlay;
 }
 
 function isTouchFullscreenPreferredDevice() {
@@ -4521,6 +4816,117 @@ function getTouchMidpoint(touches) {
   };
 }
 
+function resetZonesFreeAreaTapTracking({ resetTapCount = false } = {}) {
+  zonesFreeAreaTapCandidate = null;
+  if (!resetTapCount) return;
+  zonesFreeAreaTapCount = 0;
+  zonesFreeAreaLastTapAt = 0;
+  zonesFreeAreaLastTapX = 0;
+  zonesFreeAreaLastTapY = 0;
+}
+
+function onZonesFreeAreaTapStart(event) {
+  if (!isTouchPlaylistCollapseEnabled()) return;
+  if (!event || !event.touches) return;
+  if (event.touches.length !== 1) {
+    resetZonesFreeAreaTapTracking({ resetTapCount: event.touches.length > 1 });
+    return;
+  }
+
+  const target = event.target instanceof Element ? event.target : null;
+  if (!isZonesPanFreeAreaTarget(target)) {
+    resetZonesFreeAreaTapTracking();
+    return;
+  }
+
+  const touch = event.touches[0];
+  if (!touch) {
+    resetZonesFreeAreaTapTracking();
+    return;
+  }
+
+  zonesFreeAreaTapCandidate = {
+    identifier: touch.identifier,
+    startX: touch.clientX,
+    startY: touch.clientY,
+    startedAt: Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now(),
+  };
+}
+
+function onZonesFreeAreaTapMove(event) {
+  if (!zonesFreeAreaTapCandidate || !event || !event.touches) return;
+  if (event.touches.length !== 1) {
+    resetZonesFreeAreaTapTracking({ resetTapCount: event.touches.length > 1 });
+    return;
+  }
+
+  const candidateTouch = Array.from(event.touches).find(
+    (touch) => touch.identifier === zonesFreeAreaTapCandidate.identifier,
+  );
+  if (!candidateTouch) {
+    resetZonesFreeAreaTapTracking();
+    return;
+  }
+
+  const deltaX = candidateTouch.clientX - zonesFreeAreaTapCandidate.startX;
+  const deltaY = candidateTouch.clientY - zonesFreeAreaTapCandidate.startY;
+  if (Math.hypot(deltaX, deltaY) > COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX) {
+    resetZonesFreeAreaTapTracking();
+  }
+}
+
+function registerZonesFreeAreaTap(clientX, clientY, eventTime, event) {
+  const timestamp = Number.isFinite(eventTime) ? eventTime : performance.now();
+  const withinWindow = timestamp - zonesFreeAreaLastTapAt <= COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS;
+  const nearPreviousTap =
+    Math.hypot(clientX - zonesFreeAreaLastTapX, clientY - zonesFreeAreaLastTapY) <=
+    COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX;
+  zonesFreeAreaTapCount = withinWindow && nearPreviousTap ? zonesFreeAreaTapCount + 1 : 1;
+  zonesFreeAreaLastTapAt = timestamp;
+  zonesFreeAreaLastTapX = clientX;
+  zonesFreeAreaLastTapY = clientY;
+
+  if (zonesFreeAreaTapCount < 3) return;
+
+  resetZonesFreeAreaTapTracking({ resetTapCount: true });
+  if (collapsedPlaylistsOverlayEl) {
+    hideCollapsedPlaylistsOverlay();
+  } else {
+    showCollapsedPlaylistsOverlay();
+  }
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+}
+
+function onZonesFreeAreaTapEnd(event) {
+  if (!isTouchPlaylistCollapseEnabled()) return;
+  if (!zonesFreeAreaTapCandidate || !event || !event.changedTouches) return;
+  if (zonesTouchPanActive || zonesPanActive || draggingCard || touchCopyDragActive) {
+    resetZonesFreeAreaTapTracking();
+    return;
+  }
+
+  const completedTouch = Array.from(event.changedTouches).find(
+    (touch) => touch.identifier === zonesFreeAreaTapCandidate.identifier,
+  );
+  const candidate = zonesFreeAreaTapCandidate;
+  zonesFreeAreaTapCandidate = null;
+  if (!completedTouch) return;
+
+  const finishedAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  if (finishedAt - candidate.startedAt > COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS) return;
+  const deltaX = completedTouch.clientX - candidate.startX;
+  const deltaY = completedTouch.clientY - candidate.startY;
+  if (Math.hypot(deltaX, deltaY) > COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX) return;
+
+  registerZonesFreeAreaTap(completedTouch.clientX, completedTouch.clientY, finishedAt, event);
+}
+
+function onZonesFreeAreaTapCancel() {
+  resetZonesFreeAreaTapTracking();
+}
+
 function cleanupZonesTouchPanInteraction() {
   if (zonesContainer) {
     zonesContainer.classList.remove('is-pan-scrolling');
@@ -4539,8 +4945,14 @@ function cleanupZonesTouchPanInteraction() {
 function onZonesTouchStart(event) {
   if (!zonesContainer) return;
   if (!event || !event.touches) return;
+  if (draggingCard || touchCopyDragActive) {
+    resetZonesFreeAreaTapTracking();
+    return;
+  }
+
+  onZonesFreeAreaTapStart(event);
+
   if (!canPanZonesContainer()) return;
-  if (draggingCard || touchCopyDragActive) return;
   if (event.touches.length !== 2) return;
 
   const target = event.target instanceof Element ? event.target : null;
@@ -4565,7 +4977,9 @@ function onZonesTouchStart(event) {
 }
 
 function onZonesTouchMove(event) {
-  if (!zonesTouchPanActive || !event || !event.touches) return;
+  if (!event || !event.touches) return;
+  onZonesFreeAreaTapMove(event);
+  if (!zonesTouchPanActive) return;
   if (!zonesContainer) return;
 
   if (event.touches.length < 2) {
@@ -4609,6 +5023,7 @@ function onZonesTouchMove(event) {
 }
 
 function onZonesTouchEnd(event) {
+  onZonesFreeAreaTapEnd(event);
   if (!zonesTouchPanActive) return;
   const hasEnoughTouches = Boolean(event && event.touches && event.touches.length >= 2);
   if (hasEnoughTouches) return;
@@ -4621,6 +5036,7 @@ function onZonesTouchEnd(event) {
 }
 
 function onZonesTouchCancel() {
+  onZonesFreeAreaTapCancel();
   if (!zonesTouchPanActive) return;
   cleanupZonesTouchPanInteraction();
 }
@@ -8154,16 +8570,34 @@ function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 }
 
 function renderZones() {
+  if (!zonesContainer) return;
+  hideCollapsedPlaylistsOverlay();
   zonesContainer.innerHTML = '';
   resetTrackReferences();
   layout = ensurePlaylists(layout);
   playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
+  if (isTouchPlaylistCollapseEnabled()) {
+    if (collapsedPlaylistLayoutLength !== null && collapsedPlaylistLayoutLength !== layout.length) {
+      collapsedPlaylistIndices.clear();
+      hideCollapsedPlaylistsOverlay();
+    }
+    collapsedPlaylistLayoutLength = layout.length;
+    pruneCollapsedPlaylistIndices(layout.length);
+  } else {
+    collapsedPlaylistLayoutLength = null;
+    if (collapsedPlaylistIndices.size) {
+      collapsedPlaylistIndices.clear();
+    }
+    hideCollapsedPlaylistsOverlay();
+    removeCollapsedPlaylistsHint();
+  }
   applyDapConstraintsForCurrentLayout();
   updateDapSettingsUi(currentRole);
   const trackOccurrence = buildTrackOccurrenceMap(layout);
   const renderOrder = buildPlaylistRenderOrder(layout.length, dapConfig);
+  const visibleRenderOrder = renderOrder.filter((playlistIndex) => !isPlaylistCollapsedForLocalView(playlistIndex));
 
-  renderOrder.forEach((playlistIndex) => {
+  visibleRenderOrder.forEach((playlistIndex) => {
     const playlistFiles = Array.isArray(layout[playlistIndex]) ? layout[playlistIndex] : [];
     const metaEntry = playlistMeta[playlistIndex] || defaultPlaylistMeta();
     const isDapPlaylist = isDapPlaylistIndex(playlistIndex);
@@ -8212,6 +8646,13 @@ function renderZones() {
         titleInput.value = normalized;
       }
     });
+    const bindCollapseTouchHold = (targetElement) => {
+      if (!(targetElement instanceof HTMLElement)) return;
+      targetElement.addEventListener('pointerdown', (event) => {
+        startPlaylistCollapseHold(event, playlistIndex);
+      });
+    };
+    bindCollapseTouchHold(titleInput);
 
     if (metaEntry.type === PLAYLIST_TYPE_FOLDER) {
       const folderIcon = document.createElement('span');
@@ -8221,6 +8662,7 @@ function renderZones() {
       const originalFolderName = sanitizeFolderOriginalName(metaEntry.folderOriginalName, metaEntry.folderKey);
       folderIcon.title = originalFolderName || metaEntry.folderKey || 'Папка';
       folderIcon.setAttribute('aria-label', 'Плей-лист папки');
+      bindCollapseTouchHold(folderIcon);
       titleWrap.appendChild(folderIcon);
     }
 
@@ -9749,6 +10191,10 @@ async function bootstrap() {
     stopZonesWheelSmoothScroll();
     cleanupZonesPanInteraction();
     cleanupZonesTouchPanInteraction();
+    onZonesFreeAreaTapCancel();
+    clearPlaylistCollapseHold();
+    hideCollapsedPlaylistsOverlay();
+    removeCollapsedPlaylistsHint();
     clearTouchCopyHold();
     if (touchCopyDragActive) {
       cleanupTouchCopyDrag({ restoreLayout: false });
