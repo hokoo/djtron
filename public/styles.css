@@ -1243,6 +1243,11 @@ body[data-role='co-host'] .playlist-folder-icon {
   mask-size: contain;
   filter: drop-shadow(0 0 3px var(--shadow-accent-strong));
   animation: reel-spin 1.8s linear infinite;
+  animation-play-state: paused;
+}
+
+.playlist-active-reel.is-rotating::before {
+  animation-play-state: running;
 }
 
 .zone.zone--dap .playlist-active-reel {
@@ -1258,6 +1263,16 @@ body[data-role='co-host'] .playlist-folder-icon {
 
 .playlist-active-reel.playlist-active-reel--dap.is-rotating::before {
   animation: reel-spin 1.8s linear infinite;
+}
+
+body[data-role='slave'] .playlist-active-reel.is-host-source {
+  color: #fd3636;
+  border-color: #7f1d1d;
+  box-shadow: 0 0 10px rgba(185, 28, 28, 0.45);
+}
+
+body[data-role='slave'] .playlist-active-reel.is-host-source::before {
+  filter: drop-shadow(0 0 4px rgba(252, 165, 165, 0.58));
 }
 
 .zone-body {
@@ -1313,6 +1328,10 @@ body[data-role='co-host'] .playlist-folder-icon {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   color: var(--track-title);
+}
+
+.zone.zone--dap .track-name {
+  color: #9ed3d9;
 }
 
 .track-duration {
@@ -1487,6 +1506,27 @@ button.sidebar-toggle:focus-visible {
 .track-card.is-paused button.play {
   color: var(--text);
   background: rgba(0, 0, 0, 0.3);
+}
+
+body[data-role='slave'] .track-card.is-host-playing button.play,
+body[data-role='co-host'] .track-card.is-host-playing button.play {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.3);
+}
+
+body[data-role='slave'] .track-card.is-host-playing button.play::before,
+body[data-role='co-host'] .track-card.is-host-playing button.play::before {
+  width: 10px;
+  height: 12px;
+  border: 0;
+  background: linear-gradient(
+    to right,
+    currentColor 0 3px,
+    transparent 3px 7px,
+    currentColor 7px 10px
+  );
+  border-radius: 0;
+  margin-left: 0;
 }
 
 .zone.zone--dap button.play {
@@ -1977,6 +2017,17 @@ body[data-role='co-host'] .track-card.is-host-paused .track-name,
 body[data-role='co-host'] .track-card.is-host-paused .track-order,
 body[data-role='co-host'] .track-card.is-host-paused .track-duration {
   color: #ede9fe;
+}
+
+body[data-role='slave'] .zone.zone--dap .track-card.is-host-playing .track-name,
+body[data-role='slave'] .zone.zone--dap .track-card.is-host-playing .track-duration,
+body[data-role='slave'] .zone.zone--dap .track-card.is-host-paused .track-name,
+body[data-role='slave'] .zone.zone--dap .track-card.is-host-paused .track-duration,
+body[data-role='co-host'] .zone.zone--dap .track-card.is-host-playing .track-name,
+body[data-role='co-host'] .zone.zone--dap .track-card.is-host-playing .track-duration,
+body[data-role='co-host'] .zone.zone--dap .track-card.is-host-paused .track-name,
+body[data-role='co-host'] .zone.zone--dap .track-card.is-host-paused .track-duration {
+  color: #dffcff;
 }
 
 body[data-role='slave'] .track-card:is(.is-host-playing, .is-host-paused) .track-order {

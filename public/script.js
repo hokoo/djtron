@@ -831,6 +831,9 @@ function updatePrereleaseSettingUi(role = currentRole) {
   if (allowPrereleaseInput) {
     allowPrereleaseInput.disabled = !isHost;
   }
+  if (!isHost) {
+    showUpdateBlock(false);
+  }
 }
 
 function setDspSetupStatus(message) {
@@ -4854,6 +4857,8 @@ function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
       }
     }
   }
+
+  syncPlaylistHeaderActiveState();
 }
 
 function setTrackPaused(fileKey, isPaused, playbackContext = null) {
@@ -7656,7 +7661,7 @@ function buildPlaylistCoverage(layoutState) {
 }
 
 function getLiveLockedPlaylistIndex() {
-  if (isHostRole() && currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
+  if (currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
     const currentPlaylistIndex = normalizePlaylistTrackIndex(currentTrack.playlistIndex);
     if (currentPlaylistIndex !== null) {
       return currentPlaylistIndex;
@@ -7680,6 +7685,15 @@ function syncPlaylistHeaderActiveState() {
 
   const activePlaylistIndex = getLiveLockedPlaylistIndex();
   const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
+  const currentPlaybackIndex =
+    currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()
+      ? normalizePlaylistTrackIndex(currentTrack.playlistIndex)
+      : null;
+  const isCurrentPlaybackPaused = Boolean(currentTrack && currentAudio && currentAudio.paused);
+  const hostPlaybackIndex =
+    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
+      ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
+      : null;
   const zones = zonesContainer.querySelectorAll('.zone');
   zones.forEach((zone) => {
     if (!(zone instanceof HTMLElement)) return;
@@ -7692,16 +7706,22 @@ function syncPlaylistHeaderActiveState() {
 
     const isActive = activePlaylistIndex !== null && activePlaylistIndex === playlistIndex;
     const isDapPlaylist = dapPlaylistIndex !== null && dapPlaylistIndex === playlistIndex;
+    const isActiveFromCurrent = isActive && currentPlaybackIndex !== null && currentPlaybackIndex === playlistIndex;
+    const isActiveFromHost = isActive && !isActiveFromCurrent && hostPlaybackIndex !== null && hostPlaybackIndex === playlistIndex;
+    const isPaused = (isActiveFromCurrent && isCurrentPlaybackPaused) || (isActiveFromHost && Boolean(hostPlaybackState.paused));
+    const isHostSourceOnSlave =
+      isSlaveRole() && !isDapPlaylist && isActive && hostPlaybackIndex !== null && hostPlaybackIndex === playlistIndex;
+    activeReel.classList.toggle('is-host-source', isHostSourceOnSlave);
     if (isDapPlaylist) {
       deleteButton.style.display = 'none';
       activeReel.style.display = 'inline-flex';
-      activeReel.classList.toggle('is-rotating', isActive);
+      activeReel.classList.toggle('is-rotating', isActive && !isPaused);
       return;
     }
 
     deleteButton.style.display = isActive ? 'none' : 'inline-flex';
     activeReel.style.display = isActive ? 'inline-flex' : 'none';
-    activeReel.classList.remove('is-rotating');
+    activeReel.classList.toggle('is-rotating', isActive && !isPaused);
   });
 }
 
@@ -9245,7 +9265,7 @@ async function loadVersion() {
 
 function showUpdateBlock(isVisible) {
   if (!updateInfoEl) return;
-  updateInfoEl.hidden = !isVisible;
+  updateInfoEl.hidden = !(isVisible && isHostRole());
 }
 
 function resetUpdateUi() {
@@ -9304,6 +9324,10 @@ function startShutdownCountdown(seconds = 20) {
 
 async function checkForUpdates() {
   if (!updateInfoEl || !updateMessageEl || !updateButton) return;
+  if (!isHostRole()) {
+    resetUpdateUi();
+    return;
+  }
 
   resetUpdateUi();
 
@@ -9335,6 +9359,10 @@ async function checkForUpdates() {
 
 async function applyUpdate() {
   if (!updateButton) return;
+  if (!isHostRole()) {
+    resetUpdateUi();
+    return;
+  }
 
   updateButton.disabled = true;
   setUpdateStatus('Скачиваем и устанавливаем обновление...');
