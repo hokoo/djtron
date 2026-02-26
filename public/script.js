@@ -8227,8 +8227,12 @@ function renderZones() {
 
     titleWrap.appendChild(titleInput);
 
-    const count = document.createElement('span');
-    count.className = 'playlist-count';
+    const count = document.createElement('button');
+    count.type = 'button';
+    count.className = 'playlist-header-control playlist-count';
+    count.disabled = true;
+    count.tabIndex = -1;
+    count.setAttribute('aria-hidden', 'true');
     count.textContent = getPlaylistDurationText(playlistIndex);
     playlistDurationLabelsByIndex.set(playlistIndex, count);
 
@@ -8237,7 +8241,7 @@ function renderZones() {
 
     const autoplayButton = document.createElement('button');
     autoplayButton.type = 'button';
-    autoplayButton.className = 'playlist-autoplay-toggle';
+    autoplayButton.className = 'playlist-header-control playlist-autoplay-toggle';
     autoplayButton.textContent = 'A';
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
@@ -8261,8 +8265,11 @@ function renderZones() {
       togglePlaylistAutoplay(playlistIndex);
     });
 
-    const dapButton = document.createElement('span');
-    dapButton.className = 'playlist-dap-toggle';
+    const dapButton = document.createElement('button');
+    dapButton.type = 'button';
+    dapButton.className = 'playlist-header-control playlist-dap-toggle';
+    dapButton.disabled = true;
+    dapButton.tabIndex = -1;
     dapButton.textContent = 'DAP';
     const isDapEnabledForPlaylist = isDapPlaylist;
     dapButton.dataset.state = isDapEnabledForPlaylist ? 'on' : 'off';
@@ -8272,7 +8279,7 @@ function renderZones() {
 
     const dspButton = document.createElement('button');
     dspButton.type = 'button';
-    dspButton.className = 'playlist-dsp-toggle';
+    dspButton.className = 'playlist-header-control playlist-dsp-toggle';
     dspButton.textContent = 'DSP';
     dspButton.setAttribute('aria-label', 'DSP переходы для плей-листа');
     dspButton.dataset.state = isDspEnabled ? 'on' : 'off';
@@ -8327,7 +8334,10 @@ function renderZones() {
     if (!isDapPlaylist) {
       headerMeta.append(autoplayButton);
     }
-    headerMeta.append(dapButton, dspButton, count, deleteButton, activeReel);
+    if (isDapPlaylist) {
+      headerMeta.append(dapButton);
+    }
+    headerMeta.append(dspButton, count, deleteButton, activeReel);
     header.append(titleWrap, headerMeta);
 
     const body = document.createElement('div');
