@@ -766,6 +766,68 @@ body[data-role='slave'] .now-playing-control--host .now-playing-control__reel {
   opacity: 0.82;
 }
 
+.track-card.is-relocated::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 0 14px var(--shadow-accent);
+  animation: track-relocated-highlight 3s ease-out 1 both;
+}
+
+.zone.zone--dap .track-card.is-relocated::before {
+  border-color: var(--dap-border);
+  box-shadow: 0 0 14px var(--dap-shadow);
+}
+
+.track-relocation-undo {
+  position: relative;
+  grid-column: 2;
+  justify-self: start;
+  align-self: center;
+  z-index: 1;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.84);
+  color: var(--border-strong);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 0 8px var(--shadow-accent);
+  transition: border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease, opacity 0.14s ease;
+}
+
+.track-card.has-relocation-undo .track-name {
+  display: none;
+}
+
+.track-relocation-undo:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+body[data-role='host'] .track-relocation-undo:hover:not(:disabled),
+body[data-role='co-host'] .track-relocation-undo:hover:not(:disabled),
+body[data-role='slave'] .track-relocation-undo:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: #fff;
+  box-shadow: 0 0 12px var(--shadow-accent-strong);
+}
+
+.zone.zone--dap .track-relocation-undo {
+  border-color: var(--dap-border);
+  color: var(--dap-border);
+  box-shadow: 0 0 8px var(--dap-shadow);
+}
+
 .desktop-drag-ghost {
   position: fixed;
   top: 0;
@@ -2387,6 +2449,18 @@ body[data-role='co-host'] .track-card.is-host-paused {
   }
   50% {
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.24), 0 0 18px rgba(124, 244, 255, 0.62);
+  }
+}
+
+@keyframes track-relocated-highlight {
+  0% {
+    opacity: 1;
+  }
+  65% {
+    opacity: 0.8;
+  }
+  100% {
+    opacity: 0;
   }
 }
 

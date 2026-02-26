@@ -107,6 +107,7 @@ const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
 const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
 const DAP_NO_SILENCE_GUARD_INTERVAL_MS = 320;
 const QUEUE_NEXT_CHAIN_WINDOW_MS = 10000;
+const TRACK_RELOCATE_HIGHLIGHT_MS = 3000;
 const TOUCH_COPY_HOLD_MS = 360;
 const PLAYLIST_COLLAPSE_HOLD_MS = 480;
 const PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX = 24;
@@ -324,6 +325,10 @@ let queueNextDropzoneEl = null;
 let queueNextChainAnchor = null;
 let queueNextChainExpiresAt = 0;
 let queueNextCountdownTimer = null;
+let trackRelocationHighlights = new Map();
+let trackRelocationHighlightTimer = null;
+let trackRelocationUndoActions = new Map();
+let trackRelocationUndoSeq = 0;
 let nowPlayingSeekActive = false;
 let nowPlayingSeekMoved = false;
 let nowPlayingSeekPointerId = null;
@@ -5877,6 +5882,281 @@ function getTrackCardByContext(fileKey, playbackContext = null) {
   return getFirstFromSet(cards);
 }
 
+function normalizeTrackRelocationHighlightContext(trackContext) {
+  if (!trackContext || typeof trackContext !== 'object') return null;
+  const file = typeof trackContext.file === 'string' ? trackContext.file.trim() : '';
+  const playlistIndex = normalizePlaylistTrackIndex(trackContext.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(trackContext.playlistPosition);
+  if (!file || playlistIndex === null || playlistPosition === null) return null;
+
+  const fileKey = trackKey(file, '/audio');
+  return {
+    key: `${fileKey}|${playlistIndex}|${playlistPosition}`,
+    fileKey,
+    playbackContext: {
+      playlistIndex,
+      playlistPosition,
+    },
+  };
+}
+
+function createTrackRelocationUndoSnapshot({
+  layoutState = layout,
+  namesState = playlistNames,
+  metaState = playlistMeta,
+  autoplayState = playlistAutoplay,
+  dspState = playlistDsp,
+  dapState = dapConfig,
+} = {}) {
+  return {
+    layout: cloneLayoutState(layoutState),
+    playlistNames: Array.isArray(namesState) ? namesState.slice() : [],
+    playlistMeta: clonePlaylistMetaState(Array.isArray(metaState) ? metaState : []),
+    playlistAutoplay: Array.isArray(autoplayState) ? autoplayState.slice() : [],
+    playlistDsp: Array.isArray(dspState) ? dspState.slice() : [],
+    dapConfig: dapState && typeof dapState === 'object' ? { ...dapState } : { ...DEFAULT_DAP_CONFIG },
+  };
+}
+
+function clearTrackRelocationHighlightTimer() {
+  if (trackRelocationHighlightTimer === null) return;
+  clearTimeout(trackRelocationHighlightTimer);
+  trackRelocationHighlightTimer = null;
+}
+
+function scheduleTrackRelocationHighlightTimer() {
+  clearTrackRelocationHighlightTimer();
+  if (!trackRelocationHighlights.size) return;
+
+  const now = Date.now();
+  let nextExpiresAt = Number.POSITIVE_INFINITY;
+  for (const entry of trackRelocationHighlights.values()) {
+    if (Number.isFinite(entry.expiresAt) && entry.expiresAt < nextExpiresAt) {
+      nextExpiresAt = entry.expiresAt;
+    }
+  }
+
+  if (!Number.isFinite(nextExpiresAt)) return;
+
+  const delay = Math.max(0, nextExpiresAt - now) + 20;
+  trackRelocationHighlightTimer = setTimeout(() => {
+    trackRelocationHighlightTimer = null;
+    syncTrackRelocationHighlights();
+    scheduleTrackRelocationHighlightTimer();
+  }, delay);
+}
+
+function applyTrackRelocationUndoSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+
+  layout = ensurePlaylists(cloneLayoutState(snapshot.layout));
+  playlistNames = normalizePlaylistNames(snapshot.playlistNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(snapshot.playlistMeta, layout.length);
+  dapConfig = normalizeDapConfig(snapshot.dapConfig, layout.length, snapshot.dapConfig);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshot.playlistAutoplay, dapConfig, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(snapshot.playlistDsp, playlistAutoplay, layout.length);
+}
+
+function renderTrackRelocationUndoButton(card, action) {
+  if (!(card instanceof HTMLElement) || !action) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'track-relocation-undo';
+  button.textContent = action.restoring ? 'Отмена...' : 'Отменить действие';
+  button.disabled = Boolean(action.restoring);
+  button.title = 'Отменить последнее перемещение/копирование';
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (button.disabled) return;
+    undoTrackRelocationAction(action.id).catch((err) => {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось отменить действие.');
+    });
+  });
+  card.classList.add('has-relocation-undo');
+  const nameEl = card.querySelector('.track-name');
+  if (nameEl && nameEl.parentElement === card) {
+    card.insertBefore(button, nameEl);
+  } else {
+    card.appendChild(button);
+  }
+}
+
+function syncTrackRelocationHighlights() {
+  const now = Date.now();
+  for (const [key, entry] of trackRelocationHighlights.entries()) {
+    if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+      if (entry && typeof entry.undoId === 'string' && entry.undoId) {
+        trackRelocationUndoActions.delete(entry.undoId);
+      }
+      trackRelocationHighlights.delete(key);
+    }
+  }
+
+  const activeUndoIds = new Set();
+  for (const entry of trackRelocationHighlights.values()) {
+    if (entry && typeof entry.undoId === 'string' && entry.undoId) {
+      activeUndoIds.add(entry.undoId);
+    }
+  }
+  for (const actionId of trackRelocationUndoActions.keys()) {
+    if (!activeUndoIds.has(actionId)) {
+      trackRelocationUndoActions.delete(actionId);
+    }
+  }
+
+  document.querySelectorAll('.track-relocation-undo').forEach((button) => {
+    button.remove();
+  });
+
+  document.querySelectorAll('.track-card.has-relocation-undo').forEach((card) => {
+    card.classList.remove('has-relocation-undo');
+  });
+
+  document.querySelectorAll('.track-card.is-relocated').forEach((card) => {
+    card.classList.remove('is-relocated');
+  });
+
+  if (!trackRelocationHighlights.size) {
+    clearTrackRelocationHighlightTimer();
+    return;
+  }
+
+  for (const entry of trackRelocationHighlights.values()) {
+    const card = getTrackCardByContext(entry.fileKey, entry.playbackContext);
+    if (card) {
+      card.classList.add('is-relocated');
+      if (typeof entry.undoId === 'string' && entry.undoId) {
+        const action = trackRelocationUndoActions.get(entry.undoId);
+        if (action) {
+          renderTrackRelocationUndoButton(card, action);
+        }
+      }
+    }
+  }
+}
+
+function scheduleTrackRelocationHighlight(trackContext, durationMs = TRACK_RELOCATE_HIGHLIGHT_MS, { undoId = null } = {}) {
+  const normalized = normalizeTrackRelocationHighlightContext(trackContext);
+  if (!normalized) return;
+
+  const duration = Number.isFinite(durationMs) ? Math.max(120, durationMs) : TRACK_RELOCATE_HIGHLIGHT_MS;
+  trackRelocationHighlights.set(normalized.key, {
+    ...normalized,
+    expiresAt: Date.now() + duration,
+    undoId: typeof undoId === 'string' && undoId ? undoId : null,
+  });
+  syncTrackRelocationHighlights();
+  scheduleTrackRelocationHighlightTimer();
+}
+
+function clearTrackRelocationHighlight(trackContext) {
+  const normalized = normalizeTrackRelocationHighlightContext(trackContext);
+  if (!normalized) return;
+
+  const removed = trackRelocationHighlights.get(normalized.key);
+  if (trackRelocationHighlights.delete(normalized.key)) {
+    if (removed && typeof removed.undoId === 'string' && removed.undoId) {
+      trackRelocationUndoActions.delete(removed.undoId);
+    }
+    syncTrackRelocationHighlights();
+    scheduleTrackRelocationHighlightTimer();
+  }
+}
+
+function clearTrackRelocationUndoAction(actionId, { clearHighlights = true } = {}) {
+  if (typeof actionId !== 'string' || !actionId) return;
+  trackRelocationUndoActions.delete(actionId);
+  if (!clearHighlights) return;
+
+  let changed = false;
+  for (const [key, entry] of trackRelocationHighlights.entries()) {
+    if (entry && entry.undoId === actionId) {
+      trackRelocationHighlights.delete(key);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    syncTrackRelocationHighlights();
+    scheduleTrackRelocationHighlightTimer();
+  }
+}
+
+function registerTrackRelocationUndoAction(trackContext, undoSnapshot, durationMs = TRACK_RELOCATE_HIGHLIGHT_MS) {
+  const normalized = normalizeTrackRelocationHighlightContext(trackContext);
+  if (!normalized || !undoSnapshot || typeof undoSnapshot !== 'object') return null;
+
+  const normalizedUndoSnapshot = createTrackRelocationUndoSnapshot({
+    layoutState: undoSnapshot.layout,
+    namesState: undoSnapshot.playlistNames,
+    metaState: undoSnapshot.playlistMeta,
+    autoplayState: undoSnapshot.playlistAutoplay,
+    dspState: undoSnapshot.playlistDsp,
+    dapState: undoSnapshot.dapConfig,
+  });
+
+  const duration = Number.isFinite(durationMs) ? Math.max(120, durationMs) : TRACK_RELOCATE_HIGHLIGHT_MS;
+  const id = `relocate:${Date.now().toString(36)}:${(trackRelocationUndoSeq += 1)}`;
+  trackRelocationUndoActions.set(id, {
+    id,
+    expiresAt: Date.now() + duration,
+    restoring: false,
+    trackContext: {
+      file: trackContext.file,
+      playlistIndex: normalized.playbackContext.playlistIndex,
+      playlistPosition: normalized.playbackContext.playlistPosition,
+    },
+    snapshot: normalizedUndoSnapshot,
+  });
+  scheduleTrackRelocationHighlight(trackContext, duration, { undoId: id });
+  return id;
+}
+
+async function undoTrackRelocationAction(actionId) {
+  if (typeof actionId !== 'string' || !actionId) return false;
+  const action = trackRelocationUndoActions.get(actionId);
+  if (!action) return false;
+  if (action.restoring) return false;
+  if (!action.snapshot) {
+    clearTrackRelocationUndoAction(actionId);
+    return false;
+  }
+
+  action.restoring = true;
+  syncTrackRelocationHighlights();
+
+  const rollbackSnapshot = createTrackRelocationUndoSnapshot({
+    layoutState: layout,
+    namesState: playlistNames,
+    metaState: playlistMeta,
+    autoplayState: playlistAutoplay,
+    dspState: playlistDsp,
+    dapState: dapConfig,
+  });
+
+  applyTrackRelocationUndoSnapshot(action.snapshot);
+  renderZones();
+
+  try {
+    await pushSharedLayout();
+    clearTrackRelocationUndoAction(actionId);
+    setStatus('Действие отменено и синхронизировано.');
+    return true;
+  } catch (err) {
+    console.error(err);
+    applyTrackRelocationUndoSnapshot(rollbackSnapshot);
+    action.restoring = false;
+    if (!trackRelocationUndoActions.has(actionId)) {
+      trackRelocationUndoActions.set(actionId, action);
+    }
+    renderZones();
+    setStatus('Не удалось отменить действие.');
+    return false;
+  }
+}
+
 function getTrackButtonByContext(fileKey, playbackContext = null) {
   const buttons = buttonsByFile.get(fileKey);
   if (!buttons || !buttons.size) return null;
@@ -7167,6 +7447,14 @@ async function handleDragQueueNextFromContext(event = null) {
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
   const previousDap = { ...dapConfig };
+  const undoSnapshot = createTrackRelocationUndoSnapshot({
+    layoutState: previousLayout,
+    namesState: previousNames,
+    metaState: previousMeta,
+    autoplayState: previousAutoplay,
+    dspState: previousDsp,
+    dapState: previousDap,
+  });
 
   layout = ensurePlaylists(snapshotLayout);
   playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
@@ -7179,6 +7467,7 @@ async function handleDragQueueNextFromContext(event = null) {
   clearDragModeBadge();
   clearDragPreviewCard();
   renderZones();
+  const undoActionId = queuedTrackAnchor ? registerTrackRelocationUndoAction(queuedTrackAnchor, undoSnapshot) : null;
 
   try {
     await pushSharedLayout();
@@ -7194,6 +7483,11 @@ async function handleDragQueueNextFromContext(event = null) {
     playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
     playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
+    if (undoActionId) {
+      clearTrackRelocationUndoAction(undoActionId);
+    } else if (queuedTrackAnchor) {
+      clearTrackRelocationHighlight(queuedTrackAnchor);
+    }
     setStatus(isCopyDrop ? 'Не удалось синхронизировать "следующую" копию трека.' : 'Не удалось синхронизировать трек как следующий.');
     return false;
   }
@@ -9620,6 +9914,7 @@ function renderZones() {
 
   syncPlaylistHeaderActiveState();
   syncCurrentTrackState();
+  syncTrackRelocationHighlights();
 }
 
 function syncCurrentTrackState() {
@@ -9692,8 +9987,17 @@ async function handleDrop(event, targetZoneIndex) {
   const previousAutoplay = playlistAutoplay.slice();
   const previousDsp = playlistDsp.slice();
   const previousDap = { ...dapConfig };
+  const undoSnapshot = createTrackRelocationUndoSnapshot({
+    layoutState: previousLayout,
+    namesState: previousNames,
+    metaState: previousMeta,
+    autoplayState: previousAutoplay,
+    dspState: previousDsp,
+    dapState: previousDap,
+  });
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
   const targetBody = targetZone.querySelector('.zone-body');
+  let relocatedTrackContext = null;
 
   let nextLayout = cloneLayoutState(dragContext.snapshotLayout);
   if (!Array.isArray(nextLayout[targetZoneIndex])) {
@@ -9713,6 +10017,11 @@ async function handleDrop(event, targetZoneIndex) {
     let insertIndex = resolveDropInsertIndex(targetBody, targetZoneIndex, nextLayout);
     insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
     nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+    relocatedTrackContext = {
+      file: dragContext.file,
+      playlistIndex: targetZoneIndex,
+      playlistPosition: insertIndex,
+    };
   } else {
     clearDragPreviewCard();
     const resolution = resolveTrackIndexByContext(nextLayout, dragContext);
@@ -9747,6 +10056,11 @@ async function handleDrop(event, targetZoneIndex) {
 
     insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
     nextLayout[targetZoneIndex].splice(insertIndex, 0, movedFile);
+    relocatedTrackContext = {
+      file: movedFile,
+      playlistIndex: targetZoneIndex,
+      playlistPosition: insertIndex,
+    };
   }
 
   hideTrashDropzone();
@@ -9759,6 +10073,9 @@ async function handleDrop(event, targetZoneIndex) {
   playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
   playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
   renderZones();
+  const undoActionId = relocatedTrackContext
+    ? registerTrackRelocationUndoAction(relocatedTrackContext, undoSnapshot)
+    : null;
   try {
     await pushSharedLayout();
     setStatus(isCopyDrop ? 'Трек продублирован и синхронизирован.' : 'Плей-листы обновлены и синхронизированы.');
@@ -9771,6 +10088,11 @@ async function handleDrop(event, targetZoneIndex) {
     playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
     playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
     renderZones();
+    if (undoActionId) {
+      clearTrackRelocationUndoAction(undoActionId);
+    } else if (relocatedTrackContext) {
+      clearTrackRelocationHighlight(relocatedTrackContext);
+    }
     setStatus(isCopyDrop ? 'Не удалось синхронизировать копирование трека.' : 'Не удалось синхронизировать плей-листы.');
   }
 }
