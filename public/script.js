@@ -3895,13 +3895,20 @@ function syncNowPlayingPanelForCoHost() {
     if (nowPlayingSeekActive) {
       cleanupNowPlayingSeekInteraction();
     }
+    const dapPlaybackState = sanitizeIncomingDapPlaybackState(
+      hostPlaybackState && typeof hostPlaybackState === 'object' ? hostPlaybackState.dapPlayback : null,
+    );
     nowPlayingTitleEl.textContent = '';
     nowPlayingControlLabelEl.textContent = '▶';
     nowPlayingControlBtn.disabled = true;
     setNowPlayingReelActive(false);
     setNowPlayingProgress(0);
     setNowPlayingTime(null);
-    stopCoHostProgressLoop();
+    if (dapPlaybackState.trackFile && !dapPlaybackState.paused) {
+      startCoHostProgressLoop();
+    } else {
+      stopCoHostProgressLoop();
+    }
     return;
   }
 
