@@ -57,6 +57,7 @@ const localVolumePresetsEl = document.getElementById('localVolumePresets');
 let localVolumePresetButtons = localVolumePresetsEl
   ? Array.from(localVolumePresetsEl.querySelectorAll('.volume-presets__button'))
   : [];
+let volumePresetButtonsSignature = '';
 const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
 const hostNowPlayingControlEl = document.getElementById('hostNowPlayingControl');
 const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingControlLabel');
@@ -396,22 +397,56 @@ function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
   return normalized;
 }
 
-function getActiveVolumePresetValue(volume = livePlaybackVolume) {
+function isVolumePresetMatch(left, right) {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  return Math.abs(left - right) < 0.0001;
+}
+
+function getActiveVolumePresetValue(volume = livePlaybackVolume, presets = LIVE_VOLUME_PRESET_VALUES) {
   const normalized = normalizeLiveVolumePreset(volume, DEFAULT_LIVE_VOLUME);
-  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
-    if (Math.abs(normalized - preset) < 0.0001) {
+  const source = Array.isArray(presets) ? presets : [];
+  for (const preset of source) {
+    if (isVolumePresetMatch(normalized, preset)) {
       return preset;
     }
   }
   return null;
 }
 
+function getDapVolumePresetValue(config = dapConfig) {
+  return clampVolume(normalizeDapVolumePercent(config ? config.volumePercent : null, DAP_DEFAULT_VOLUME_PERCENT) / 100);
+}
+
+function isDapVolumePresetPlaybackActive(role = currentRole, config = dapConfig) {
+  if (!isDapEnabled(config)) return false;
+
+  if (isHostRole(role)) {
+    return Boolean(currentTrack && currentAudio && !currentAudio.paused && isDapTrackContext(currentTrack, config));
+  }
+
+  if (isCoHostRole(role)) {
+    const hasLiveTrack =
+      hostPlaybackState &&
+      typeof hostPlaybackState.trackFile === 'string' &&
+      hostPlaybackState.trackFile.trim();
+    if (!hasLiveTrack) return false;
+    return Boolean(!hostPlaybackState.paused && isDapTrackContext(hostPlaybackState, config));
+  }
+
+  return false;
+}
+
 function formatVolumePresetLabel(volume) {
   return `${Math.round(clampVolume(volume) * 100)}%`;
 }
 
+function hasActiveStandardVolumePreset(volume = livePlaybackVolume) {
+  if (isDapVolumePresetPlaybackActive()) return false;
+  return getActiveVolumePresetValue(volume) !== null;
+}
+
 function canDisableVolumePresetsSetting(volume = livePlaybackVolume) {
-  return getActiveVolumePresetValue(volume) === null;
+  return !hasActiveStandardVolumePreset(volume);
 }
 
 function normalizePlaybackSeekRatio(value) {
@@ -633,27 +668,18 @@ function preventContextMenu(event) {
 function rebuildVolumePresetButtons() {
   if (!localVolumePresetsEl) {
     localVolumePresetButtons = [];
+    volumePresetButtonsSignature = '';
     return;
   }
 
-  localVolumePresetsEl.textContent = '';
-  localVolumePresetButtons = LIVE_VOLUME_PRESET_VALUES.map((presetValue) => {
-    const button = document.createElement('button');
-    button.className = 'volume-presets__button';
-    button.type = 'button';
-    button.dataset.volume = String(presetValue);
-    button.textContent = formatVolumePresetLabel(presetValue);
-    button.addEventListener('click', onVolumePresetButtonClick);
-    localVolumePresetsEl.append(button);
-    return button;
-  });
+  volumePresetButtonsSignature = '';
+  updateVolumePresetsUi();
 }
 
 function applyRuntimeClientConfig() {
   setContextMenuBlocked(!runtimeAllowContextMenu);
   LIVE_VOLUME_PRESET_VALUES = normalizeVolumePresetValues(LIVE_VOLUME_PRESET_VALUES);
   rebuildVolumePresetButtons();
-  updateVolumePresetsUi();
 }
 
 function applyRuntimeConfigFromSources(serverConfig = null) {
@@ -753,7 +779,6 @@ function setShowVolumePresetsEnabled(
   if (!normalized && !canDisableVolumePresetsSetting()) {
     normalized = true;
   }
-
   const changed = normalized !== showVolumePresetsEnabled;
   showVolumePresetsEnabled = normalized;
 
@@ -1079,22 +1104,81 @@ function updateVolumePresetsUi() {
     showVolumePresetsToggleRow.style.display = canManagePresets ? 'flex' : 'none';
   }
 
+  const dapPresetActive = isDapVolumePresetPlaybackActive();
+  const dapPresetVolume = getDapVolumePresetValue();
+  const basePresetSource =
+    Array.isArray(LIVE_VOLUME_PRESET_VALUES) && LIVE_VOLUME_PRESET_VALUES.length
+      ? LIVE_VOLUME_PRESET_VALUES
+      : DEFAULT_LIVE_VOLUME_PRESET_VALUES;
+  const basePresets = basePresetSource
+    .map((value) => normalizeLiveVolumePreset(value, null))
+    .filter((value, index, source) => Number.isFinite(value) && value > 0 && value < 1 && source.indexOf(value) === index);
+  const visibleBasePresets = dapPresetActive
+    ? basePresets.filter((presetValue) => !isVolumePresetMatch(presetValue, dapPresetVolume))
+    : basePresets.slice();
+  const visiblePresetItems = visibleBasePresets.map((presetValue) => ({
+    key: `base:${presetValue.toFixed(3)}`,
+    kind: 'base',
+    volume: presetValue,
+    label: formatVolumePresetLabel(presetValue),
+  }));
+  if (dapPresetActive) {
+    visiblePresetItems.push({
+      key: `dap:${dapPresetVolume.toFixed(3)}`,
+      kind: 'dap',
+      volume: dapPresetVolume,
+      label: formatVolumePresetLabel(dapPresetVolume),
+    });
+  }
+
   const shouldShow = showVolumePresetsEnabled && canManagePresets;
   localVolumePresetsEl.hidden = !shouldShow;
+  const activePreset = getActiveVolumePresetValue();
   if (showVolumePresetsToggle) {
     showVolumePresetsToggle.checked = showVolumePresetsEnabled;
-    const hasActivePreset = !canDisableVolumePresetsSetting();
-    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(showVolumePresetsEnabled && hasActivePreset);
+    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(showVolumePresetsEnabled && !canDisableVolumePresetsSetting());
   }
+
+  const layoutSignature = visiblePresetItems.map((item) => item.key).join('|');
+  if (layoutSignature !== volumePresetButtonsSignature) {
+    localVolumePresetsEl.textContent = '';
+    localVolumePresetButtons = visiblePresetItems.map((item) => {
+      const button = document.createElement('button');
+      button.className = 'volume-presets__button';
+      button.type = 'button';
+      button.dataset.volume = String(item.volume);
+      button.dataset.presetKind = item.kind;
+      button.textContent = item.label;
+      button.addEventListener('click', onVolumePresetButtonClick);
+      localVolumePresetsEl.append(button);
+      return button;
+    });
+    volumePresetButtonsSignature = layoutSignature;
+  }
+
   if (!localVolumePresetButtons.length) return;
 
-  const activePreset = getActiveVolumePresetValue();
   for (const button of localVolumePresetButtons) {
     const buttonVolume = normalizeLiveVolumePreset(button.dataset.volume, null);
-    const isActive = buttonVolume !== null && activePreset !== null && Math.abs(buttonVolume - activePreset) < 0.0001;
+    const presetKind = button.dataset.presetKind === 'dap' ? 'dap' : 'base';
+    const isDapButton = presetKind === 'dap';
+    const isActive = isDapButton
+      ? dapPresetActive
+      : !dapPresetActive && buttonVolume !== null && activePreset !== null && isVolumePresetMatch(buttonVolume, activePreset);
+    const isLocked = dapPresetActive;
+
+    button.classList.toggle('is-dap', isDapButton);
     button.classList.toggle('is-active', isActive);
+    button.classList.toggle('is-locked', isLocked);
+    button.disabled = isLocked;
     button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-    button.title = `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)}`;
+    if (isDapButton) {
+      button.title = `DAP громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : dapPresetVolume)} (зафиксировано)`;
+    } else {
+      button.title = dapPresetActive
+        ? `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)} (временно недоступно)`
+        : `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)}`;
+    }
   }
 }
 
@@ -4231,6 +4315,7 @@ function syncNowPlayingPanel() {
   const isPauseLocked = isDapPauseLocked(currentTrack, currentAudio, dapConfig);
   nowPlayingControlBtn.classList.toggle('is-pause-locked', isPauseLocked);
   syncDapNowPlayingPanel();
+  updateVolumePresetsUi();
 
   if (isCoHostRole()) {
     setDspTransitionReelReverse(false);
@@ -7521,6 +7606,13 @@ async function executeIncomingPlaybackCommand(commandPayload) {
     }
 
     if (command.type === PLAYBACK_COMMAND_SET_VOLUME) {
+      if (isDapVolumePresetPlaybackActive(ROLE_HOST)) {
+        updateVolumePresetsUi();
+        if (sourceTag) {
+          setStatus(`Live управление${sourceTag}: громкость зафиксирована во время DAP.`);
+        }
+        return;
+      }
       setLivePlaybackVolume(command.volume, { sync: true, announce: false });
       if (sourceTag) {
         setStatus(`Live управление${sourceTag}: громкость ${formatVolumePresetLabel(command.volume)}.`);
@@ -8211,6 +8303,7 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
   }
   updateDapSettingsUi(currentRole);
   renderZones();
+  updateVolumePresetsUi();
 
   try {
     await pushSharedLayout();
@@ -8229,6 +8322,7 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
     dapInterruptedPlaybackSnapshot = previousDapInterruptedPlaybackSnapshot;
     updateDapSettingsUi(currentRole);
     renderZones();
+    updateVolumePresetsUi();
     setStatus('Не удалось синхронизировать DAP.');
     return false;
   }
@@ -9849,11 +9943,23 @@ function initPlaylistControls() {
 
 async function onVolumePresetButtonClick(event) {
   const button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const presetKind = button && button.dataset.presetKind === 'dap' ? 'dap' : 'base';
   const presetVolume = normalizeLiveVolumePreset(button ? button.dataset.volume : null, null);
   if (presetVolume === null) return;
+  const dapPresetActive = isDapVolumePresetPlaybackActive();
+  if (dapPresetActive) {
+    if (presetKind === 'dap') {
+      setStatus(`DAP громкость ${formatVolumePresetLabel(presetVolume)} зафиксирована во время воспроизведения.`);
+    } else {
+      setStatus('Во время воспроизведения DAP доступен только DAP пресет громкости.');
+    }
+    updateVolumePresetsUi();
+    return;
+  }
+  if (presetKind === 'dap') return;
 
   const activePreset = getActiveVolumePresetValue();
-  const shouldTurnOffPreset = activePreset !== null && Math.abs(activePreset - presetVolume) < 0.0001;
+  const shouldTurnOffPreset = activePreset !== null && isVolumePresetMatch(activePreset, presetVolume);
   const targetVolume = shouldTurnOffPreset ? DEFAULT_LIVE_VOLUME : presetVolume;
 
   if (isHostRole()) {

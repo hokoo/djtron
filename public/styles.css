@@ -255,6 +255,10 @@ body[data-role='co-host'] #dapNowPlaying:not([hidden]) {
   transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+.volume-presets__button:disabled {
+  cursor: not-allowed;
+}
+
 .volume-presets__button:hover,
 .volume-presets__button:focus-visible {
   outline: none;
@@ -267,6 +271,26 @@ body[data-role='co-host'] #dapNowPlaying:not([hidden]) {
   border-color: var(--border-strong);
   background: var(--primary);
   box-shadow: 0 0 10px var(--shadow-accent);
+}
+
+.volume-presets__button.is-dap {
+  border-color: var(--dap-border);
+  color: var(--dap-accent-strong);
+}
+
+.volume-presets__button.is-dap.is-active {
+  color: #fff;
+  border-color: var(--dap-accent-strong);
+  background: rgba(45, 231, 255, 0.24);
+  box-shadow: 0 0 12px var(--dap-shadow);
+}
+
+.volume-presets__button.is-locked:not(.is-active) {
+  opacity: 0.68;
+}
+
+.volume-presets__button.is-locked.is-active {
+  opacity: 0.96;
 }
 
 body[data-role='slave'] #localVolumePresets {
