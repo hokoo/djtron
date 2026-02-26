@@ -129,6 +129,8 @@ const PLAYLIST_VIRTUALIZATION_MIN_ITEMS = 120;
 const PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX = 45;
 const PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS = 8;
 const PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX = 420;
+const MOBILE_PROGRESS_UI_MAX_FPS = 30;
+const MOBILE_PROGRESS_UI_MIN_INTERVAL_MS = Math.round(1000 / MOBILE_PROGRESS_UI_MAX_FPS);
 const TRACK_TITLE_MODE_FILE = 'file';
 const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
 const PLAYLIST_TYPE_MANUAL = 'manual';
@@ -3205,6 +3207,11 @@ function getHostPlaybackElapsedSeconds() {
   return elapsed;
 }
 
+function getProgressUiFrameIntervalMs() {
+  if (typeof window !== 'object' || typeof window.matchMedia !== 'function') return 0;
+  return window.matchMedia('(pointer: coarse)').matches ? MOBILE_PROGRESS_UI_MIN_INTERVAL_MS : 0;
+}
+
 function stopHostProgressLoop() {
   if (hostProgressRaf === null) return;
   cancelAnimationFrame(hostProgressRaf);
@@ -3213,8 +3220,21 @@ function stopHostProgressLoop() {
 
 function startHostProgressLoop() {
   if (hostProgressRaf !== null) return;
-  const tick = () => {
+  const minFrameIntervalMs = getProgressUiFrameIntervalMs();
+  let lastRenderTimestamp = 0;
+
+  const tick = (timestamp) => {
     if (hostProgressRaf === null) return;
+    const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
+    if (
+      minFrameIntervalMs > 0 &&
+      lastRenderTimestamp > 0 &&
+      nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
+    ) {
+      hostProgressRaf = requestAnimationFrame(tick);
+      return;
+    }
+    lastRenderTimestamp = nowTimestamp;
     syncHostNowPlayingPanel();
     if (hostProgressRaf === null) return;
     hostProgressRaf = requestAnimationFrame(tick);
@@ -3828,8 +3848,21 @@ function stopCoHostProgressLoop() {
 
 function startCoHostProgressLoop() {
   if (cohostProgressRaf !== null) return;
-  const tick = () => {
+  const minFrameIntervalMs = getProgressUiFrameIntervalMs();
+  let lastRenderTimestamp = 0;
+
+  const tick = (timestamp) => {
     if (cohostProgressRaf === null) return;
+    const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
+    if (
+      minFrameIntervalMs > 0 &&
+      lastRenderTimestamp > 0 &&
+      nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
+    ) {
+      cohostProgressRaf = requestAnimationFrame(tick);
+      return;
+    }
+    lastRenderTimestamp = nowTimestamp;
     syncNowPlayingPanel();
     if (cohostProgressRaf === null) return;
     cohostProgressRaf = requestAnimationFrame(tick);
@@ -5007,14 +5040,26 @@ function startProgressLoop(audio, fileKey) {
   if (!audio) return;
   progressAudio = audio;
   syncNowPlayingPanel();
+  const minFrameIntervalMs = getProgressUiFrameIntervalMs();
+  let lastRenderTimestamp = 0;
+  updateProgress(fileKey, progressAudio.currentTime, getDuration(progressAudio));
 
-  const tick = () => {
+  const tick = (timestamp) => {
     if (!progressAudio || progressAudio.paused) return;
+    const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
+    if (
+      minFrameIntervalMs > 0 &&
+      lastRenderTimestamp > 0 &&
+      nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
+    ) {
+      progressRaf = requestAnimationFrame(tick);
+      return;
+    }
+    lastRenderTimestamp = nowTimestamp;
     updateProgress(fileKey, progressAudio.currentTime, getDuration(progressAudio));
     progressRaf = requestAnimationFrame(tick);
   };
-
-  tick();
+  progressRaf = requestAnimationFrame(tick);
 }
 
 function buildTrackCard(
