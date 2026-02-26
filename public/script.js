@@ -131,6 +131,7 @@ const COHOST_SEEK_COMMAND_INTERVAL_MS = 40;
 const HOST_LIVE_SEEK_SYNC_INTERVAL_MS = 40;
 const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
 const ZONES_PAN_TOUCH_GAIN = 2.4;
+const ZONES_TWO_FINGER_PAN_TOUCH_GAIN = 2.0;
 const ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS = 0.16;
 const ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS = 0.02;
 const ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME = 0.92;
@@ -5188,8 +5189,7 @@ function onZonesTouchStart(event) {
   if (!canPanZonesContainer()) return;
   if (event.touches.length !== 2) return;
 
-  const target = event.target instanceof Element ? event.target : null;
-  if (!isZonesPanFreeAreaTarget(target)) return;
+  if (!areZonesTouchPanTouchesEligible(event.touches)) return;
 
   const midpoint = getTouchMidpoint(event.touches);
   if (!midpoint) return;
@@ -5209,6 +5209,16 @@ function onZonesTouchStart(event) {
   event.preventDefault();
 }
 
+function areZonesTouchPanTouchesEligible(touches) {
+  if (!zonesContainer || !touches || touches.length < 2) return false;
+  for (let index = 0; index < touches.length; index += 1) {
+    const touch = typeof touches.item === 'function' ? touches.item(index) : touches[index];
+    if (!touch || !(touch.target instanceof Element)) return false;
+    if (!zonesContainer.contains(touch.target)) return false;
+  }
+  return true;
+}
+
 function onZonesTouchMove(event) {
   if (!event || !event.touches) return;
   onZonesFreeAreaTapMove(event);
@@ -5216,7 +5226,7 @@ function onZonesTouchMove(event) {
   if (!zonesContainer) return;
 
   if (event.touches.length < 2) {
-    const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_PAN_TOUCH_GAIN : 0;
+    const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
     cleanupZonesTouchPanInteraction();
     if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
       startZonesPanMomentum(momentumVelocity);
@@ -5252,7 +5262,7 @@ function onZonesTouchMove(event) {
   zonesTouchPanMoved = true;
   zonesContainer.classList.add('is-pan-scrolling');
   event.preventDefault();
-  zonesContainer.scrollLeft = zonesTouchPanStartScrollLeft - deltaX * ZONES_PAN_TOUCH_GAIN;
+  zonesContainer.scrollLeft = zonesTouchPanStartScrollLeft - deltaX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN;
 }
 
 function onZonesTouchEnd(event) {
@@ -5261,7 +5271,7 @@ function onZonesTouchEnd(event) {
   const hasEnoughTouches = Boolean(event && event.touches && event.touches.length >= 2);
   if (hasEnoughTouches) return;
 
-  const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_PAN_TOUCH_GAIN : 0;
+  const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
   cleanupZonesTouchPanInteraction();
   if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
     startZonesPanMomentum(momentumVelocity);
