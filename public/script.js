@@ -113,6 +113,8 @@ const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
 const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
+const DESKTOP_TRACK_DRAG_HOLD_MS = 400;
+const DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX = 8;
 const TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX = 54;
 const TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME = 0.8;
 const TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME = 7;
@@ -284,6 +286,13 @@ let touchHoldStartX = 0;
 let touchHoldStartY = 0;
 let touchHoldStartedAt = 0;
 let touchHoldCard = null;
+let desktopDragHoldTimer = null;
+let desktopDragHoldPointerId = null;
+let desktopDragHoldStartedAt = 0;
+let desktopDragHoldStartX = 0;
+let desktopDragHoldStartY = 0;
+let desktopDragHoldCard = null;
+let desktopDragHoldReady = false;
 let touchCopyDragActive = false;
 let touchCopyDragPointerId = null;
 let touchCopyDragGhost = null;
@@ -1679,6 +1688,85 @@ function isLikelyTouchNativeDragEvent(event) {
     return true;
   }
   return Date.now() - lastTouchPointerDownAt < TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS;
+}
+
+function removeDesktopDragHoldListeners() {
+  window.removeEventListener('pointermove', onDesktopDragHoldPointerMove, true);
+  window.removeEventListener('pointerup', onDesktopDragHoldPointerEnd, true);
+  window.removeEventListener('pointercancel', onDesktopDragHoldPointerEnd, true);
+}
+
+function clearDesktopDragHold() {
+  if (desktopDragHoldTimer !== null) {
+    clearTimeout(desktopDragHoldTimer);
+    desktopDragHoldTimer = null;
+  }
+  desktopDragHoldPointerId = null;
+  desktopDragHoldStartedAt = 0;
+  desktopDragHoldStartX = 0;
+  desktopDragHoldStartY = 0;
+  desktopDragHoldCard = null;
+  desktopDragHoldReady = false;
+  removeDesktopDragHoldListeners();
+}
+
+function onDesktopDragHoldPointerMove(event) {
+  if (desktopDragHoldPointerId === null || event.pointerId !== desktopDragHoldPointerId) return;
+  if (desktopDragHoldReady) return;
+
+  const deltaX = event.clientX - desktopDragHoldStartX;
+  const deltaY = event.clientY - desktopDragHoldStartY;
+  if (Math.hypot(deltaX, deltaY) <= DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX) return;
+
+  clearDesktopDragHold();
+}
+
+function onDesktopDragHoldPointerEnd(event) {
+  if (desktopDragHoldPointerId === null || event.pointerId !== desktopDragHoldPointerId) return;
+  clearDesktopDragHold();
+}
+
+function startDesktopDragHold(card, event) {
+  if (!card || !event) return;
+  clearDesktopDragHold();
+
+  desktopDragHoldPointerId = Number.isInteger(event.pointerId) ? event.pointerId : null;
+  desktopDragHoldStartedAt = Date.now();
+  desktopDragHoldStartX = event.clientX;
+  desktopDragHoldStartY = event.clientY;
+  desktopDragHoldCard = card;
+  desktopDragHoldReady = false;
+
+  if (desktopDragHoldPointerId !== null) {
+    window.addEventListener('pointermove', onDesktopDragHoldPointerMove, true);
+    window.addEventListener('pointerup', onDesktopDragHoldPointerEnd, true);
+    window.addEventListener('pointercancel', onDesktopDragHoldPointerEnd, true);
+  }
+
+  desktopDragHoldTimer = setTimeout(() => {
+    desktopDragHoldTimer = null;
+    if (!desktopDragHoldCard || !desktopDragHoldCard.isConnected) {
+      clearDesktopDragHold();
+      return;
+    }
+    desktopDragHoldReady = true;
+  }, DESKTOP_TRACK_DRAG_HOLD_MS);
+}
+
+function isDesktopDragHoldReadyForPointer(pointerId) {
+  return (
+    desktopDragHoldReady &&
+    desktopDragHoldPointerId !== null &&
+    pointerId === desktopDragHoldPointerId &&
+    !!desktopDragHoldCard
+  );
+}
+
+function isDesktopDragHoldReadyForCard(card) {
+  if (!card || desktopDragHoldCard !== card) return false;
+  if (desktopDragHoldReady) return true;
+  if (!desktopDragHoldStartedAt) return false;
+  return Date.now() - desktopDragHoldStartedAt >= DESKTOP_TRACK_DRAG_HOLD_MS;
 }
 
 function removeTouchHoldListeners() {
@@ -5326,6 +5414,7 @@ function cleanupZonesPanInteraction() {
 function onZonesPanPointerMove(event) {
   if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
   if (!zonesContainer) return;
+  if (isDesktopDragHoldReadyForPointer(event.pointerId)) return;
 
   const deltaX = event.clientX - zonesPanStartX;
   const deltaY = event.clientY - zonesPanStartY;
@@ -5379,7 +5468,7 @@ function onZonesPanPointerDown(event) {
   if (event.button !== undefined && event.button !== 0) return;
   if (!canPanZonesContainer()) return;
   if (draggingCard || touchCopyDragActive) return;
-  if (!isZonesPanFreeAreaTarget(event.target instanceof Element ? event.target : null)) return;
+  if (!isZonesPointerPanTarget(event.target instanceof Element ? event.target : null)) return;
 
   stopZonesPanMomentum();
   stopZonesWheelSmoothScroll();
@@ -5398,7 +5487,7 @@ function onZonesPanPointerDown(event) {
   zonesPanPreferHorizontal = Boolean(
     targetElement &&
       targetElement.closest('.zone-body') &&
-      !targetElement.closest('.track-card, .playlist-header, button, input, textarea, select, a, label'),
+      !targetElement.closest('.playlist-header, button, input, textarea, select, a, label'),
   );
   zonesPanPointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
   zonesPanMoveGain =
@@ -5409,7 +5498,9 @@ function onZonesPanPointerDown(event) {
   zonesPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
   zonesPanVelocityX = 0;
 
-  if (typeof zonesContainer.setPointerCapture === 'function') {
+  const shouldCapturePointer =
+    !(targetElement && targetElement.closest('.track-card')) && typeof zonesContainer.setPointerCapture === 'function';
+  if (shouldCapturePointer) {
     try {
       zonesContainer.setPointerCapture(event.pointerId);
     } catch (err) {
@@ -5420,6 +5511,13 @@ function onZonesPanPointerDown(event) {
   window.addEventListener('pointermove', onZonesPanPointerMove, true);
   window.addEventListener('pointerup', onZonesPanPointerUp, true);
   window.addEventListener('pointercancel', onZonesPanPointerCancel, true);
+}
+
+function isZonesPointerPanTarget(target) {
+  if (!(target instanceof Element)) return false;
+  if (!zonesContainer || !zonesContainer.contains(target)) return false;
+  if (target.closest('button, input, textarea, select, a, label, .track-order')) return false;
+  return true;
 }
 
 async function toggleNowPlayingPlayback() {
@@ -5879,11 +5977,15 @@ function buildTrackCard(
 
 function attachDragHandlers(card) {
   card.addEventListener('pointerdown', (event) => {
-    if (!isTouchPointerEvent(event)) return;
     if (event.isPrimary === false) return;
-
     const target = event.target instanceof Element ? event.target : null;
     if (target && target.closest('button, input, textarea, select, a, .track-order')) return;
+
+    if (!isTouchPointerEvent(event)) {
+      if (event.button !== undefined && event.button !== 0) return;
+      startDesktopDragHold(card, event);
+      return;
+    }
 
     if (isTrackCardDragBlocked(card)) {
       setStatus('Активный трек нельзя перемещать или копировать.');
@@ -5898,6 +6000,16 @@ function attachDragHandlers(card) {
       e.preventDefault();
       return;
     }
+
+    if (!isDesktopDragHoldReadyForCard(card)) {
+      e.preventDefault();
+      return;
+    }
+    clearDesktopDragHold();
+    if (zonesPanActive) {
+      cleanupZonesPanInteraction();
+    }
+    stopZonesPanMomentum();
 
     if (isTrackCardDragBlocked(card)) {
       e.preventDefault();
@@ -5937,6 +6049,7 @@ function attachDragHandlers(card) {
   });
 
   card.addEventListener('dragend', () => {
+    clearDesktopDragHold();
     hideTrashDropzone();
     clearDesktopDragGhost();
     clearDragModeBadge();
