@@ -1679,6 +1679,10 @@ function isLikelyTouchNativeDragEvent(event) {
   return Date.now() - lastTouchPointerDownAt < TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS;
 }
 
+function shouldPreventNativeDragStart(event) {
+  return touchCopyDragActive || touchHoldPointerId !== null || isLikelyTouchNativeDragEvent(event);
+}
+
 function removeTouchHoldListeners() {
   window.removeEventListener('pointermove', onTouchHoldPointerMove, true);
   window.removeEventListener('pointerup', onTouchHoldPointerEnd, true);
@@ -5842,7 +5846,7 @@ function attachDragHandlers(card) {
   });
 
   card.addEventListener('dragstart', (e) => {
-    if (touchCopyDragActive || touchHoldPointerId !== null || isLikelyTouchNativeDragEvent(e)) {
+    if (shouldPreventNativeDragStart(e)) {
       e.preventDefault();
       return;
     }
