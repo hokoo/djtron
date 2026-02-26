@@ -1102,6 +1102,10 @@ body[data-role='slave'] .track-relocation-undo:hover:not(:disabled) {
   cursor: grabbing;
 }
 
+.zones.is-playlist-reordering {
+  cursor: grabbing;
+}
+
 .collapsed-playlists-overlay {
   position: fixed;
   inset: 0;
@@ -1221,11 +1225,32 @@ body[data-role='slave'] .track-relocation-undo:hover:not(:disabled) {
   opacity: 0.16;
 }
 
+.zone.zone--playlist-reorder-source {
+  opacity: 1;
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--shadow-accent-strong);
+}
+
+.zone.zone--playlist-reorder-target {
+  border-color: transparent;
+  box-shadow: none;
+}
+
 .playlist-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.playlist-header--reorder-enabled {
+  cursor: grab;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.zones.is-playlist-reordering .playlist-header--reorder-enabled,
+.playlist-header--reorder-enabled:active {
+  cursor: grabbing;
 }
 
 .playlist-title-wrap {

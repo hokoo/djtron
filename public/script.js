@@ -111,6 +111,8 @@ const TRACK_RELOCATE_HIGHLIGHT_MS = 3000;
 const TOUCH_COPY_HOLD_MS = 360;
 const PLAYLIST_COLLAPSE_HOLD_MS = 480;
 const PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX = 24;
+const PLAYLIST_REORDER_HOLD_MS = 420;
+const PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX = 20;
 const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
 const TOUCH_DRAG_START_MOVE_PX = 12;
 const TOUCH_DRAG_COMMIT_PX = 6;
@@ -314,6 +316,21 @@ let playlistCollapseHoldPlaylistIndex = null;
 let playlistCollapseHoldTarget = null;
 let playlistCollapseHoldZone = null;
 let playlistCollapseHoldTriggered = false;
+let playlistReorderHoldTimer = null;
+let playlistReorderHoldPointerId = null;
+let playlistReorderHoldStartX = 0;
+let playlistReorderHoldStartY = 0;
+let playlistReorderHoldPlaylistIndex = null;
+let playlistReorderHoldTarget = null;
+let playlistReorderHoldSourceZone = null;
+let playlistReorderHoldTargetZone = null;
+let playlistReorderHoldTargetPlaylistIndex = null;
+let playlistReorderHoldInitialVisibleOrder = null;
+let playlistReorderHoldCandidateOrder = null;
+let playlistReorderHoldCandidateCenters = null;
+let playlistReorderHoldCurrentSlot = null;
+let playlistReorderHoldPreviewSignature = '';
+let playlistReorderHoldTriggered = false;
 let lastTouchPointerDownAt = 0;
 let dragPreviewCard = null;
 let desktopDragGhost = null;
@@ -2555,6 +2572,7 @@ function onPlaylistCollapseHoldPointerCancel(event) {
 }
 
 function startPlaylistCollapseHold(event, playlistIndex) {
+  if (isHostRole()) return;
   if (!isTouchPlaylistCollapseEnabled()) return;
   const pointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
   if (pointerType && pointerType !== 'touch' && pointerType !== 'pen') return;
@@ -2605,6 +2623,501 @@ function startPlaylistCollapseHold(event, playlistIndex) {
       focused.blur();
     }
   }, PLAYLIST_COLLAPSE_HOLD_MS);
+}
+
+function moveArrayItem(items, fromIndex, toIndex) {
+  const list = Array.isArray(items) ? items.slice() : [];
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return list;
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= list.length || toIndex >= list.length) return list;
+  if (fromIndex === toIndex) return list;
+  const [moved] = list.splice(fromIndex, 1);
+  list.splice(toIndex, 0, moved);
+  return list;
+}
+
+function remapPlaylistIndexAfterMove(index, fromIndex, toIndex) {
+  if (!Number.isInteger(index) || !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return index;
+  if (fromIndex === toIndex) return index;
+  if (index === fromIndex) return toIndex;
+  if (fromIndex < toIndex && index > fromIndex && index <= toIndex) {
+    return index - 1;
+  }
+  if (fromIndex > toIndex && index >= toIndex && index < fromIndex) {
+    return index + 1;
+  }
+  return index;
+}
+
+function remapCollapsedPlaylistIndicesAfterMove(fromIndex, toIndex, expectedLength = layout.length) {
+  if (!collapsedPlaylistIndices.size) return;
+  const length = Number.isInteger(expectedLength) && expectedLength >= 0 ? expectedLength : 0;
+  const remapped = new Set();
+  for (const playlistIndex of collapsedPlaylistIndices) {
+    const normalizedIndex = normalizePlaylistTrackIndex(playlistIndex);
+    if (normalizedIndex === null || normalizedIndex < 0 || normalizedIndex >= length) continue;
+    const nextIndex = remapPlaylistIndexAfterMove(normalizedIndex, fromIndex, toIndex);
+    if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= length) continue;
+    remapped.add(nextIndex);
+  }
+  collapsedPlaylistIndices.clear();
+  remapped.forEach((playlistIndex) => collapsedPlaylistIndices.add(playlistIndex));
+}
+
+async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistIndex) {
+  if (!isHostRole()) {
+    setStatus('Порядок плей-листов может менять только хост.');
+    return;
+  }
+
+  layout = ensurePlaylists(layout);
+  const sourceIndex = normalizePlaylistTrackIndex(sourcePlaylistIndex);
+  const normalizedTargetIndex =
+    targetPlaylistIndex === null || targetPlaylistIndex === undefined
+      ? null
+      : normalizePlaylistTrackIndex(targetPlaylistIndex);
+  if (sourceIndex === null) return;
+  if (sourceIndex < 0 || sourceIndex >= layout.length) return;
+  if (normalizedTargetIndex !== null && (normalizedTargetIndex < 0 || normalizedTargetIndex >= layout.length)) return;
+
+  const destinationIndex =
+    normalizedTargetIndex === null
+      ? layout.length - 1
+      : sourceIndex < normalizedTargetIndex
+        ? normalizedTargetIndex - 1
+        : normalizedTargetIndex;
+  if (!Number.isInteger(destinationIndex) || destinationIndex < 0 || destinationIndex >= layout.length) return;
+  if (sourceIndex === destinationIndex) return;
+
+  const previousLayout = cloneLayoutState(layout);
+  const previousNames = playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(playlistMeta);
+  const previousAutoplay = playlistAutoplay.slice();
+  const previousDsp = playlistDsp.slice();
+  const previousDap = { ...dapConfig };
+  const previousCollapsedIndices = new Set(collapsedPlaylistIndices);
+  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
+  const previousCurrentTrackContext =
+    currentTrack && typeof currentTrack === 'object'
+      ? {
+          playlistIndex: currentTrack.playlistIndex,
+          playlistPosition: currentTrack.playlistPosition,
+        }
+      : null;
+  const previousDapInterruptedSnapshot = dapInterruptedPlaybackSnapshot
+    ? { ...dapInterruptedPlaybackSnapshot }
+    : null;
+
+  const nextLayout = moveArrayItem(previousLayout, sourceIndex, destinationIndex);
+  const nextNames = moveArrayItem(previousNames, sourceIndex, destinationIndex);
+  const nextMeta = moveArrayItem(previousMeta, sourceIndex, destinationIndex);
+  const nextAutoplay = moveArrayItem(previousAutoplay, sourceIndex, destinationIndex);
+  const nextDsp = moveArrayItem(previousDsp, sourceIndex, destinationIndex);
+
+  const previousDapIndex = normalizePlaylistTrackIndex(previousDap.playlistIndex);
+  const nextDapRaw = {
+    ...previousDap,
+    playlistIndex:
+      previousDapIndex === null ? null : remapPlaylistIndexAfterMove(previousDapIndex, sourceIndex, destinationIndex),
+  };
+
+  layout = ensurePlaylists(nextLayout);
+  playlistNames = normalizePlaylistNames(nextNames, layout.length);
+  playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
+  dapConfig = normalizeDapConfig(nextDapRaw, layout.length, nextDapRaw);
+  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
+  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
+  remapCollapsedPlaylistIndicesAfterMove(sourceIndex, destinationIndex, layout.length);
+
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+    preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
+  });
+  const dapSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
+  if ((currentTrackContextChanged || dapSnapshotContextChanged) && currentAudio) {
+    applyLiveVolumeToCurrentAudio();
+  }
+
+  updateDapSettingsUi(currentRole);
+  renderZones();
+  if (currentTrackContextChanged && isHostRole()) {
+    requestHostPlaybackSync(true);
+  }
+
+  try {
+    await pushSharedLayout();
+    const movedTitle = sanitizePlaylistName(playlistNames[destinationIndex], destinationIndex);
+    setStatus(`Плей-лист "${movedTitle}" перемещен и синхронизирован.`);
+  } catch (err) {
+    console.error(err);
+    layout = previousLayout;
+    playlistNames = previousNames;
+    playlistMeta = previousMeta;
+    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
+    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
+    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    collapsedPlaylistIndices.clear();
+    previousCollapsedIndices.forEach((playlistIndex) => collapsedPlaylistIndices.add(playlistIndex));
+    if (currentTrack && previousCurrentTrackContext) {
+      currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
+      currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
+    }
+    dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
+    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
+    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+      preferredPlaylistIndex: rollbackPreferredIndex,
+    });
+    const rollbackSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
+    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && currentAudio) {
+      applyLiveVolumeToCurrentAudio();
+    }
+    updateDapSettingsUi(currentRole);
+    renderZones();
+    setStatus(err && err.message ? err.message : 'Не удалось синхронизировать порядок плей-листов.');
+  }
+}
+
+function removePlaylistReorderHoldListeners() {
+  window.removeEventListener('pointermove', onPlaylistReorderHoldPointerMove, true);
+  window.removeEventListener('pointerup', onPlaylistReorderHoldPointerEnd, true);
+  window.removeEventListener('pointercancel', onPlaylistReorderHoldPointerCancel, true);
+}
+
+function clearPlaylistReorderTargetVisual() {
+  if (!playlistReorderHoldTargetZone) return;
+  playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
+  playlistReorderHoldTargetZone = null;
+}
+
+function getPlaylistReorderVisibleOrderFromDom() {
+  if (!zonesContainer) return [];
+  return Array.from(zonesContainer.querySelectorAll('.zone'))
+    .map((zone) => Number.parseInt(zone.dataset.zoneIndex || '', 10))
+    .filter((playlistIndex) => Number.isInteger(playlistIndex) && playlistIndex >= 0);
+}
+
+function getPlaylistReorderPointerContentX(clientX) {
+  if (!zonesContainer) return null;
+  const rect = zonesContainer.getBoundingClientRect();
+  return clientX - rect.left + zonesContainer.scrollLeft;
+}
+
+function resolvePlaylistReorderSlotFromPointer(clientX) {
+  const centers = Array.isArray(playlistReorderHoldCandidateCenters) ? playlistReorderHoldCandidateCenters : [];
+  if (!centers.length) return 0;
+  const pointerContentX = getPlaylistReorderPointerContentX(clientX);
+  if (!Number.isFinite(pointerContentX)) {
+    return Number.isInteger(playlistReorderHoldCurrentSlot) ? playlistReorderHoldCurrentSlot : 0;
+  }
+
+  let slot = 0;
+  while (slot < centers.length && pointerContentX > centers[slot]) {
+    slot += 1;
+  }
+  return slot;
+}
+
+function getPlaylistReorderTargetPlaylistBySlot(slotIndex) {
+  const candidateOrder = Array.isArray(playlistReorderHoldCandidateOrder) ? playlistReorderHoldCandidateOrder : [];
+  if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= candidateOrder.length) return null;
+  return candidateOrder[slotIndex];
+}
+
+function applyPlaylistReorderPreviewOrder(slotIndex = playlistReorderHoldCurrentSlot) {
+  if (!zonesContainer) return;
+  const sourcePlaylistIndex = normalizePlaylistTrackIndex(playlistReorderHoldPlaylistIndex);
+  if (sourcePlaylistIndex === null) return;
+
+  const initialOrder = Array.isArray(playlistReorderHoldInitialVisibleOrder)
+    ? playlistReorderHoldInitialVisibleOrder
+    : [];
+  if (!initialOrder.length || !initialOrder.includes(sourcePlaylistIndex)) return;
+
+  const orderWithoutSource = initialOrder.filter((playlistIndex) => playlistIndex !== sourcePlaylistIndex);
+  const normalizedSlot = Number.isInteger(slotIndex)
+    ? Math.max(0, Math.min(slotIndex, orderWithoutSource.length))
+    : 0;
+  const nextOrder = orderWithoutSource.slice();
+  nextOrder.splice(normalizedSlot, 0, sourcePlaylistIndex);
+  const nextSignature = nextOrder.join('|');
+  if (nextSignature === playlistReorderHoldPreviewSignature) return;
+  playlistReorderHoldPreviewSignature = nextSignature;
+
+  const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
+  const zoneByIndex = new Map();
+  zones.forEach((zone) => {
+    const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (!Number.isInteger(zoneIndex) || zoneIndex < 0) return;
+    zoneByIndex.set(zoneIndex, zone);
+  });
+
+  const appended = new Set();
+  const fragment = document.createDocumentFragment();
+  nextOrder.forEach((playlistIndex) => {
+    const zone = zoneByIndex.get(playlistIndex);
+    if (!zone) return;
+    fragment.appendChild(zone);
+    appended.add(playlistIndex);
+  });
+
+  zones.forEach((zone) => {
+    const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (Number.isInteger(zoneIndex) && appended.has(zoneIndex)) return;
+    fragment.appendChild(zone);
+  });
+
+  zonesContainer.appendChild(fragment);
+}
+
+function restorePlaylistReorderPreviewOrder() {
+  if (!zonesContainer) return;
+  const initialOrder = Array.isArray(playlistReorderHoldInitialVisibleOrder)
+    ? playlistReorderHoldInitialVisibleOrder
+    : [];
+  if (!initialOrder.length) return;
+  const initialSignature = initialOrder.join('|');
+  if (initialSignature === playlistReorderHoldPreviewSignature) return;
+
+  const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
+  const zoneByIndex = new Map();
+  zones.forEach((zone) => {
+    const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (!Number.isInteger(zoneIndex) || zoneIndex < 0) return;
+    zoneByIndex.set(zoneIndex, zone);
+  });
+
+  const appended = new Set();
+  const fragment = document.createDocumentFragment();
+  initialOrder.forEach((playlistIndex) => {
+    const zone = zoneByIndex.get(playlistIndex);
+    if (!zone) return;
+    fragment.appendChild(zone);
+    appended.add(playlistIndex);
+  });
+
+  zones.forEach((zone) => {
+    const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
+    if (Number.isInteger(zoneIndex) && appended.has(zoneIndex)) return;
+    fragment.appendChild(zone);
+  });
+
+  zonesContainer.appendChild(fragment);
+  playlistReorderHoldPreviewSignature = initialSignature;
+}
+
+function clearPlaylistReorderHold({ resetTriggered = true, preservePreview = false } = {}) {
+  if (playlistReorderHoldTimer !== null) {
+    clearTimeout(playlistReorderHoldTimer);
+    playlistReorderHoldTimer = null;
+  }
+
+  if (
+    playlistReorderHoldTarget &&
+    playlistReorderHoldPointerId !== null &&
+    typeof playlistReorderHoldTarget.releasePointerCapture === 'function'
+  ) {
+    try {
+      if (
+        playlistReorderHoldTarget.hasPointerCapture &&
+        playlistReorderHoldTarget.hasPointerCapture(playlistReorderHoldPointerId)
+      ) {
+        playlistReorderHoldTarget.releasePointerCapture(playlistReorderHoldPointerId);
+      }
+    } catch (err) {
+      // ignore pointer capture release errors
+    }
+  }
+
+  if (zonesContainer) {
+    zonesContainer.classList.remove('is-playlist-reordering');
+  }
+  if (!preservePreview) {
+    restorePlaylistReorderPreviewOrder();
+  }
+  if (playlistReorderHoldSourceZone) {
+    playlistReorderHoldSourceZone.classList.remove('zone--playlist-reorder-source');
+  }
+  clearPlaylistReorderTargetVisual();
+  removePlaylistReorderHoldListeners();
+  playlistReorderHoldPointerId = null;
+  playlistReorderHoldStartX = 0;
+  playlistReorderHoldStartY = 0;
+  playlistReorderHoldPlaylistIndex = null;
+  playlistReorderHoldTarget = null;
+  playlistReorderHoldSourceZone = null;
+  playlistReorderHoldTargetPlaylistIndex = null;
+  playlistReorderHoldInitialVisibleOrder = null;
+  playlistReorderHoldCandidateOrder = null;
+  playlistReorderHoldCandidateCenters = null;
+  playlistReorderHoldCurrentSlot = null;
+  playlistReorderHoldPreviewSignature = '';
+  if (resetTriggered) {
+    playlistReorderHoldTriggered = false;
+  }
+}
+
+function updatePlaylistReorderHoldTarget(clientX) {
+  const nextSlot = resolvePlaylistReorderSlotFromPointer(clientX);
+  const nextTargetPlaylistIndex = getPlaylistReorderTargetPlaylistBySlot(nextSlot);
+  const nextTargetZone =
+    zonesContainer && nextTargetPlaylistIndex !== null
+      ? zonesContainer.querySelector(`.zone[data-zone-index="${nextTargetPlaylistIndex}"]`)
+      : null;
+  if (playlistReorderHoldTargetZone && playlistReorderHoldTargetZone !== nextTargetZone) {
+    playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
+  }
+
+  playlistReorderHoldCurrentSlot = nextSlot;
+  playlistReorderHoldTargetZone = nextTargetZone;
+  playlistReorderHoldTargetPlaylistIndex = nextTargetPlaylistIndex;
+  if (nextTargetZone) {
+    nextTargetZone.classList.add('zone--playlist-reorder-target');
+  }
+  applyPlaylistReorderPreviewOrder(nextSlot);
+}
+
+function onPlaylistReorderHoldPointerMove(event) {
+  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
+  if (!playlistReorderHoldTriggered) {
+    const deltaX = event.clientX - playlistReorderHoldStartX;
+    const deltaY = event.clientY - playlistReorderHoldStartY;
+    if (Math.hypot(deltaX, deltaY) <= PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX) return;
+    clearPlaylistReorderHold();
+    return;
+  }
+
+  event.preventDefault();
+  if (zonesPanActive) {
+    cleanupZonesPanInteraction();
+  }
+  if (zonesContainer) {
+    const rect = zonesContainer.getBoundingClientRect();
+    const edgeThreshold = 52;
+    if (event.clientX <= rect.left + edgeThreshold) {
+      zonesContainer.scrollLeft -= 8;
+    } else if (event.clientX >= rect.right - edgeThreshold) {
+      zonesContainer.scrollLeft += 8;
+    }
+  }
+  updatePlaylistReorderHoldTarget(event.clientX);
+}
+
+function onPlaylistReorderHoldPointerEnd(event) {
+  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
+  const shouldReorder = playlistReorderHoldTriggered;
+  const sourcePlaylistIndex = playlistReorderHoldPlaylistIndex;
+  const targetPlaylistIndex = playlistReorderHoldTargetPlaylistIndex;
+  clearPlaylistReorderHold({ preservePreview: true });
+  if (!shouldReorder) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!Number.isInteger(sourcePlaylistIndex)) return;
+  if (targetPlaylistIndex !== null && !Number.isInteger(targetPlaylistIndex)) return;
+  reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistIndex).catch((err) => {
+    console.error(err);
+    setStatus('Не удалось изменить порядок плей-листов.');
+  });
+}
+
+function onPlaylistReorderHoldPointerCancel(event) {
+  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
+  clearPlaylistReorderHold();
+}
+
+function startPlaylistReorderHold(event, playlistIndex) {
+  if (!isHostRole()) return;
+  if (event.isPrimary === false) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (touchCopyDragActive || draggingCard) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+
+  const targetElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (!targetElement) return;
+
+  const eventTarget = event.target instanceof Element ? event.target : null;
+  if (eventTarget && eventTarget.closest('.playlist-header-control, .playlist-delete-btn')) return;
+
+  clearPlaylistReorderHold();
+  playlistReorderHoldPointerId = event.pointerId;
+  playlistReorderHoldStartX = event.clientX;
+  playlistReorderHoldStartY = event.clientY;
+  playlistReorderHoldPlaylistIndex = playlistIndex;
+  playlistReorderHoldTarget = targetElement;
+  playlistReorderHoldSourceZone = targetElement.closest('.zone');
+  playlistReorderHoldTargetPlaylistIndex = null;
+  playlistReorderHoldInitialVisibleOrder = null;
+  playlistReorderHoldCandidateOrder = null;
+  playlistReorderHoldCandidateCenters = null;
+  playlistReorderHoldCurrentSlot = null;
+  playlistReorderHoldPreviewSignature = '';
+  playlistReorderHoldTriggered = false;
+
+  if (typeof targetElement.setPointerCapture === 'function') {
+    try {
+      targetElement.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // ignore pointer capture errors
+    }
+  }
+
+  window.addEventListener('pointermove', onPlaylistReorderHoldPointerMove, true);
+  window.addEventListener('pointerup', onPlaylistReorderHoldPointerEnd, true);
+  window.addEventListener('pointercancel', onPlaylistReorderHoldPointerCancel, true);
+
+  playlistReorderHoldTimer = setTimeout(() => {
+    playlistReorderHoldTimer = null;
+    const sourceIndex = playlistReorderHoldPlaylistIndex;
+    if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= layout.length) {
+      clearPlaylistReorderHold();
+      return;
+    }
+    const initialOrder = getPlaylistReorderVisibleOrderFromDom();
+    if (!initialOrder.includes(sourceIndex)) {
+      clearPlaylistReorderHold();
+      return;
+    }
+    playlistReorderHoldInitialVisibleOrder = initialOrder;
+    const candidateOrder = initialOrder.filter((playlistIdx) => playlistIdx !== sourceIndex);
+    const pointerContentX = getPlaylistReorderPointerContentX(playlistReorderHoldStartX);
+    if (!Number.isFinite(pointerContentX) && !candidateOrder.length) {
+      clearPlaylistReorderHold();
+      return;
+    }
+    const candidateCenters = candidateOrder.map((playlistIdx) => {
+      if (!zonesContainer) return null;
+      const zone = zonesContainer.querySelector(`.zone[data-zone-index="${playlistIdx}"]`);
+      if (!(zone instanceof HTMLElement)) return null;
+      const rect = zone.getBoundingClientRect();
+      const containerRect = zonesContainer.getBoundingClientRect();
+      return rect.left - containerRect.left + zonesContainer.scrollLeft + rect.width / 2;
+    });
+    if (candidateCenters.some((centerX) => !Number.isFinite(centerX))) {
+      clearPlaylistReorderHold();
+      return;
+    }
+    playlistReorderHoldCandidateOrder = candidateOrder;
+    playlistReorderHoldCandidateCenters = candidateCenters;
+    const sourceSlot = initialOrder.indexOf(sourceIndex);
+    playlistReorderHoldCurrentSlot = sourceSlot >= 0 ? Math.min(sourceSlot, candidateOrder.length) : 0;
+    playlistReorderHoldTargetPlaylistIndex = getPlaylistReorderTargetPlaylistBySlot(playlistReorderHoldCurrentSlot);
+
+    playlistReorderHoldTriggered = true;
+    if (zonesPanActive) {
+      cleanupZonesPanInteraction();
+    }
+    stopZonesPanMomentum();
+    if (zonesContainer) {
+      zonesContainer.classList.add('is-playlist-reordering');
+    }
+    if (playlistReorderHoldSourceZone && playlistReorderHoldSourceZone.isConnected) {
+      playlistReorderHoldSourceZone.classList.add('zone--playlist-reorder-source');
+    }
+    updatePlaylistReorderHoldTarget(playlistReorderHoldStartX);
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement) {
+      focused.blur();
+    }
+    setStatus('Режим переноса: перетащите плей-лист влево или вправо.');
+  }, PLAYLIST_REORDER_HOLD_MS);
 }
 
 function normalizeTrackTitleMode(value) {
@@ -8254,6 +8767,7 @@ function resetTrackReferences() {
   clearDragModeBadge();
   clearDragPreviewCard();
   clearTouchCopyHold();
+  clearPlaylistReorderHold();
   if (touchCopyDragActive) {
     cleanupTouchCopyDrag({ restoreLayout: false });
   }
@@ -9744,6 +10258,12 @@ function renderZones() {
 
     const header = document.createElement('div');
     header.className = 'playlist-header';
+    if (isHostRole()) {
+      header.classList.add('playlist-header--reorder-enabled');
+      header.addEventListener('pointerdown', (event) => {
+        startPlaylistReorderHold(event, playlistIndex);
+      });
+    }
     const titleWrap = document.createElement('div');
     titleWrap.className = 'playlist-title-wrap';
     const titleInput = document.createElement('input');
