@@ -8,7 +8,7 @@
 # false -> keep context menu blocked
 # allow_context_menu=false
 
-# Custom live volume presets (percent form: 0-100)
+# Custom live volume presets (percent or ratio form)
 # localStorage override is allowed only for Host role
 # Examples:
 # volume_presets=10,30,50

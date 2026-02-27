@@ -530,11 +530,19 @@ function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRES
   const seen = new Set();
 
   for (const rawValue of source) {
-    const percentValue = Number(rawValue);
-    if (!Number.isFinite(percentValue)) continue;
-    if (percentValue < 1 || percentValue >= 100) continue;
+    const numericValue = Number(rawValue);
+    if (!Number.isFinite(numericValue)) continue;
 
-    const rounded = Math.round((percentValue / 100) * 1000) / 1000;
+    let ratioValue = null;
+    if (numericValue > 0 && numericValue < 1) {
+      ratioValue = numericValue;
+    } else if (numericValue >= 1 && numericValue < 100) {
+      ratioValue = numericValue / 100;
+    }
+    if (!Number.isFinite(ratioValue)) continue;
+
+    const rounded = Math.round(ratioValue * 1000) / 1000;
+    if (rounded <= 0 || rounded >= 1) continue;
     const dedupeKey = rounded.toFixed(3);
     if (seen.has(dedupeKey)) continue;
 
