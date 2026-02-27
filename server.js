@@ -170,7 +170,11 @@ function parseVolumePresetsConfigValue(value, fallback = DEFAULT_LIVE_VOLUME_PRE
 }
 
 function serializeVolumePresetPercentValues(values) {
-  return normalizeVolumePresetValues(values, []).map((value) => Math.round(value * 1000) / 10);
+  const source = Array.isArray(values) && values.length ? values : DEFAULT_LIVE_VOLUME_PRESET_VALUES;
+  return source
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0 && value < 1)
+    .map((value) => Math.round(value * 1000) / 10);
 }
 
 function parsePortCandidate(value) {
