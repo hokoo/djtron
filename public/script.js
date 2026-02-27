@@ -8508,7 +8508,7 @@ function resolveDspSourceSegmentSeconds(sliceSeconds, transitionDetails = null) 
 
 function resolveDspRelativeCompensationSeconds(durationSeconds, compensationPercent) {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0;
-  if (!Number.isFinite(compensationPercent) || compensationPercent <= 0) return 0;
+  if (!Number.isFinite(compensationPercent) || compensationPercent < 0) return 0;
   return (durationSeconds * compensationPercent) / 100;
 }
 
@@ -8617,7 +8617,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
   const resolveAdjustedTransitionStartOffsetSeconds = () => {
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
     const entryCompensationSeconds =
-      Number.isFinite(liveDspEntryCompensationPercent) && liveDspEntryCompensationPercent > 0
+      Number.isFinite(liveDspEntryCompensationPercent) && Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
         ? resolveDspRelativeCompensationSeconds(sourceDurationSeconds, liveDspEntryCompensationPercent)
         : liveDspEntryCompensationSeconds;
     const rawOffset = Math.max(
@@ -8768,7 +8768,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
       if (Number.isFinite(activeDuration) && activeDuration > 0) {
         const remaining = Math.max(0, activeDuration - currentTime);
         const exitCompensationSeconds =
-          Number.isFinite(liveDspExitCompensationPercent) && liveDspExitCompensationPercent > 0
+          Number.isFinite(liveDspExitCompensationPercent) && Number.isFinite(targetDurationSeconds) && targetDurationSeconds > 0
             ? resolveDspRelativeCompensationSeconds(targetDurationSeconds, liveDspExitCompensationPercent)
             : liveDspExitCompensationSeconds;
         const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + exitCompensationSeconds);
