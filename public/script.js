@@ -8543,15 +8543,9 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
   }
 
+  const previousAudio = currentAudio;
   resetFadeState();
   stopProgressLoop();
-  if (currentAudio) {
-    try {
-      currentAudio.pause();
-    } catch (err) {
-      // ignore pause errors while switching to DSP transition
-    }
-  }
   currentAudio = null;
   currentTrack = null;
 
@@ -8675,6 +8669,11 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
     try {
       preparedAudio.volume = getEffectiveLiveVolume(targetTrack);
+      try {
+        transitionAudio.pause();
+      } catch (err) {
+        // ignore pause errors while switching from DSP transition
+      }
       await preparedAudio.play();
     } catch (err) {
       await fallbackToRegularNextTrackStart();
@@ -8760,6 +8759,13 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     }
     if (dspTransitionPlayback && dspTransitionPlayback.audio === transitionAudio) {
       dspTransitionPlayback.startOffsetSeconds = adjustedTransitionStartOffsetSeconds;
+    }
+    if (previousAudio) {
+      try {
+        previousAudio.pause();
+      } catch (err) {
+        // ignore pause errors while switching to DSP transition
+      }
     }
     await transitionAudio.play();
     setStatus(`Переход: ${finishedTrack.file} -> ${nextTrack.file}`);
