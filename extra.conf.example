@@ -22,6 +22,8 @@
 # dsp_slice_seconds=15
 # dsp_live_entry_compensation_ms=22
 # dsp_live_exit_compensation_ms=19
+# dsp_live_entry_compensation_percent=0.0
+# dsp_live_exit_compensation_percent=0.0
 # dsp_tempo_align_enabled=true
 # dsp_tempo_max_adjust_percent=12
 # dsp_tempo_glide_enabled=true
