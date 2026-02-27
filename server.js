@@ -292,6 +292,8 @@ const RUNTIME_CONFIG_SCHEMA = Object.freeze({
   volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
   dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
   dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspEntryCompensationPercent: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspExitCompensationPercent: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
 });
 const DEFAULT_LIVE_VOLUME = 1;
 const DSP_ENABLED = parseBooleanConfigValue(
@@ -483,6 +485,16 @@ const LIVE_DSP_ENTRY_COMPENSATION_MS = Math.trunc(
     { min: 0, max: 250 },
   ),
 );
+const LIVE_DSP_ENTRY_COMPENSATION_PERCENT = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, [
+    'dsp_live_entry_compensation_percent',
+    'dsp_entry_compensation_percent',
+    'live_dsp_entry_compensation_percent',
+    'entry_compensation_percent',
+  ]),
+  null,
+  { min: 0, max: 100 },
+);
 const LIVE_DSP_EXIT_COMPENSATION_MS = Math.trunc(
   parseBoundedNumberConfigValue(
     pickConfigValue(ROOT_CONFIG, [
@@ -494,6 +506,16 @@ const LIVE_DSP_EXIT_COMPENSATION_MS = Math.trunc(
     19,
     { min: 0, max: 250 },
   ),
+);
+const LIVE_DSP_EXIT_COMPENSATION_PERCENT = parseBoundedNumberConfigValue(
+  pickConfigValue(ROOT_CONFIG, [
+    'dsp_live_exit_compensation_percent',
+    'dsp_exit_compensation_percent',
+    'live_dsp_exit_compensation_percent',
+    'exit_compensation_percent',
+  ]),
+  null,
+  { min: 0, max: 100 },
 );
 const DSP_TEMPO_FRAME_SAMPLES = 1024;
 const DSP_TEMPO_HOP_SAMPLES = 512;
@@ -4854,6 +4876,8 @@ function handleApiConfig(req, res) {
     volumePresets: serializeVolumePresetPercentValues(LIVE_VOLUME_PRESET_VALUES),
     dspEntryCompensationMs: LIVE_DSP_ENTRY_COMPENSATION_MS,
     dspExitCompensationMs: LIVE_DSP_EXIT_COMPENSATION_MS,
+    dspEntryCompensationPercent: LIVE_DSP_ENTRY_COMPENSATION_PERCENT,
+    dspExitCompensationPercent: LIVE_DSP_EXIT_COMPENSATION_PERCENT,
   };
 
   sendJson(res, 200, {
