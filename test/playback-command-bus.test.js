@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PlaybackCommandBus } = require('../lib/playback/commandBus');
+const { PlaybackCommandBus, createLivePlaybackCommandBus } = require('../lib/playback/commandBus');
 
 test('command bus executes commands in dispatch order', async () => {
   const seen = [];
@@ -35,4 +35,24 @@ test('command bus rejects command when policy denies access', async () => {
   assert.equal(result.reason, 'ACCESS_DENIED');
   assert.equal(result.message, 'denied');
   assert.equal(seen.length, 0);
+});
+
+test('live command bus routes allowed command to playback controller', async () => {
+  const seen = [];
+  const bus = createLivePlaybackCommandBus({
+    sourceRole: 'co-host',
+    isServer: false,
+    controller: {
+      handleCommand: (payload) => {
+        seen.push(payload.type);
+      },
+    },
+  });
+
+  const allowed = await bus.dispatch({ commandType: 'play-track', target: 'host' }, { type: 'play-track' });
+  const denied = await bus.dispatch({ commandType: 'toggle-dsp', target: 'host' }, { type: 'toggle-dsp' });
+
+  assert.equal(allowed.ok, true);
+  assert.equal(denied.ok, false);
+  assert.deepEqual(seen, ['play-track']);
 });

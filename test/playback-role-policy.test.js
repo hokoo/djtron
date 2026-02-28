@@ -11,7 +11,7 @@ test('host commands are always allowed', () => {
   assert.equal(decision.allowed, true);
 });
 
-test('co-host can send play-track and toggle-current only', () => {
+test('co-host can send play-track and stop only', () => {
   assert.equal(
     canDispatchLivePlaybackCommand({
       sourceRole: 'co-host',
@@ -23,7 +23,7 @@ test('co-host can send play-track and toggle-current only', () => {
   assert.equal(
     canDispatchLivePlaybackCommand({
       sourceRole: 'co-host',
-      commandType: 'toggle-current',
+      commandType: 'stop',
       isServer: false,
     }).allowed,
     true,
@@ -38,9 +38,30 @@ test('co-host can send play-track and toggle-current only', () => {
   );
 });
 
-test('non host/co-host users are rejected', () => {
+test('slave can send play-next-request to host only', () => {
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'slave',
+      commandType: 'play-next-request',
+      target: 'host',
+      isServer: false,
+    }).allowed,
+    true,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'slave',
+      commandType: 'play-next-request',
+      target: 'self',
+      isServer: false,
+    }).allowed,
+    false,
+  );
+});
+
+test('non host/co-host/slave users are rejected', () => {
   const decision = canDispatchLivePlaybackCommand({
-    sourceRole: 'slave',
+    sourceRole: 'guest',
     commandType: 'play-track',
     isServer: false,
   });
