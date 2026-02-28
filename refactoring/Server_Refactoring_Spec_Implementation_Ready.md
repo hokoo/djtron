@@ -277,7 +277,7 @@ class UpdateService {
 - `session` — проходит через `requireAuthorizedRequest`;
 - `host` — только host (`requireHostRequest` или `auth.isServer`);
 - `host|cohost` — доступ host и co-host;
-- `session + host-only fields` — endpoint доступен по session, но часть полей меняет только host.
+- `session (host-restricted fields)` — endpoint доступен для любой валидной сессии, но часть полей может менять только host (проверка на уровне service-layer).
 
 | Endpoint | Method | Auth (as-is) | Текущий handler | Handler → Service (target) | Notes |
 |---|---|---|---|---|---|
@@ -302,12 +302,12 @@ class UpdateService {
 | `/api/dsp/transitions/file/:id` | GET, HEAD | session | `handleApiDspTransitionFile` | `DspJobManager.getTransition` + `StaticFilesService.stream` | Выдача подготовленного transition файла |
 | `/api/config` | GET | session | `handleApiConfig` | `ConfigManager.getAll` | Runtime config/schema для UI |
 | `/api/version` | GET | session | `handleApiVersion` | `ConfigManager.get('version')` | Текущая версия приложения |
-| `/api/update/check` | GET | session | `handleUpdateCheck` | `UpdateService.check` | Проверка обновлений |
-| `/api/update/apply` | POST | session | `handleUpdateApply` | `UpdateService.apply` | Применение обновления; блокировка parallel apply |
+| `/api/update/check` | GET | session | `handleUpdateCheck` | `UpdateService.check` | Проверка обновлений (as-is). Риск: endpoint доступен любой авторизованной сессии, hardening до `host` вынести в отдельный security PR/task. |
+| `/api/update/apply` | POST | session | `handleUpdateApply` | `UpdateService.apply` | Применение обновления (as-is); блокировка parallel apply. Риск: privileged операция доступна любой сессии. Обязательный follow-up security task: либо `auth:host`, либо временные меры (rate limit + audit log вызовов update). |
 | `/audio/:filePath*` | GET, HEAD | session | `handleAudioFile` | `StaticFilesService.serveAudio` | Стрим треков с range support |
 | `/*` (public files) | GET, HEAD | none | `handlePublic` | `StaticFilesService.servePublic` | `index.html`/статика из `public/` |
 
-> Примечание: `ServerControlService` формально не описан в п.5, но endpoint `/api/shutdown` уже существует. Для PR1 маршрут сохраняется как есть, а в PR2+ можно решить: оставить как отдельный adapter/service или встроить в Auth/Config bounded context.
+> Примечание: `ServerControlService` формально не описан в разделе 5 (описания сервисов), но endpoint `/api/shutdown` уже существует. Для PR1 маршрут сохраняется как есть, а в PR2+ можно либо добавить явный подпункт `5.9 ServerControlService`, либо встроить shutdown-функциональность в существующий bounded context.
 
 ---
 
@@ -334,7 +334,7 @@ class UpdateService {
   - [ ] `GET /api/layout/stream` (`auth:session`)
   - [ ] `POST /api/layout/reset` (`auth:host`)
   - [ ] `GET /api/layout` (`auth:session`)
-  - [ ] `POST /api/layout` (`auth:session`, сохранить host-only логику внутри сервиса)
+  - [ ] `POST /api/layout` (`auth:session`, сохранить field-level host restrictions внутри сервиса; в follow-up PR стандартизировать правила для `dapConfig`, `playlistAutoplay`, `playlistDsp`)
   - [ ] `GET /api/playback` (`auth:session`)
   - [ ] `POST /api/playback` (`auth:host`)
   - [ ] `POST /api/playback/command` (`auth:host|cohost`)
@@ -347,8 +347,8 @@ class UpdateService {
   - [ ] `GET|HEAD /api/dsp/transitions/file/:id` (`auth:session`)
   - [ ] `GET /api/config` (`auth:session`)
   - [ ] `GET /api/version` (`auth:session`)
-  - [ ] `GET /api/update/check` (`auth:session`)
-  - [ ] `POST /api/update/apply` (`auth:session`)
+  - [ ] `GET /api/update/check` (`auth:session`, сохранить текущую политику в PR1; potential hardening до `host` вынести отдельно)
+  - [ ] `POST /api/update/apply` (`auth:session`, сохранить текущую политику в PR1; potential hardening до `host` вынести отдельно)
 - [ ] Зарегистрировать non-API маршруты:
   - [ ] `GET|HEAD /audio/:filePath*` (`auth:session`)
   - [ ] `GET|HEAD /*` (`auth:none`, public static)
