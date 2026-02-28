@@ -4,6 +4,7 @@
   "description": "djTRON player for discos and music events with per-track controls and overlay transitions.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   }
 }

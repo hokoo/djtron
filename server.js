@@ -8,6 +8,8 @@ const { execFile } = require('child_process');
 const { pipeline } = require('stream');
 const { promisify } = require('util');
 const { version: appVersion } = require('./package.json');
+const { PlaybackCommandBus } = require('./lib/playback/commandBus');
+const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
@@ -1237,6 +1239,18 @@ function broadcastPlaybackCommand(commandPayload) {
     }
   }
 }
+
+const livePlaybackCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole, commandType, isServer }) =>
+    canDispatchLivePlaybackCommand({
+      sourceRole,
+      commandType,
+      isServer,
+    }),
+  execute: (payload) => {
+    broadcastPlaybackCommand(payload);
+  },
+});
 
 function keepLayoutStreamAlive() {
   for (const res of layoutSubscribers) {
@@ -5263,11 +5277,6 @@ async function handleApiPlaybackCommand(req, res) {
     return;
   }
 
-  if (command.type === 'set-live-seek-enabled' && !auth.isServer) {
-    sendJson(res, 403, { error: 'Только хост может менять настройку live seek' });
-    return;
-  }
-
   const payload = {
     ...command,
     issuedAt: Date.now(),
@@ -5275,7 +5284,18 @@ async function handleApiPlaybackCommand(req, res) {
     sourceRole: auth.isServer ? ROLE_HOST : sanitizeSessionRole(auth.role),
     sourceUsername: auth.username,
   };
-  broadcastPlaybackCommand(payload);
+  const commandResult = await livePlaybackCommandBus.dispatch(
+    {
+      sourceRole: payload.sourceRole,
+      commandType: payload.type,
+      isServer: auth.isServer,
+    },
+    payload,
+  );
+  if (!commandResult.ok) {
+    sendJson(res, 403, { error: commandResult.message });
+    return;
+  }
 
   sendJson(res, 200, {
     ok: true,
