@@ -10,6 +10,9 @@ const { promisify } = require('util');
 const { version: appVersion } = require('./package.json');
 const { PlaybackCommandBus } = require('./lib/playback/commandBus');
 const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
+const { HttpRouter } = require('./src/http/HttpRouter');
+const { AuthService } = require('./src/auth/AuthService');
+const { createAuthGuard } = require('./src/http/middlewares/auth');
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
@@ -4261,11 +4264,6 @@ async function handleApiDspTransitionsGet(req, res, requestUrl) {
 }
 
 async function handleApiDspTransitionsPost(req, res) {
-  const auth = getAuthState(req);
-  if (!auth.isServer) {
-    sendJson(res, 403, { error: 'Только хост может запускать DSP-подготовку.' });
-    return;
-  }
   if (!DSP_ENABLED) {
     sendJson(res, 503, { error: 'DSP отключен в extra.conf (dsp_enabled=false).' });
     return;
@@ -4882,9 +4880,6 @@ function handleApiLayoutGet(req, res) {
 }
 
 function handleApiLayoutReset(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   sharedLayoutState = {
     ...getDefaultLayoutState(),
     version: sharedLayoutState.version + 1,
@@ -4908,7 +4903,7 @@ function handleApiPlaybackGet(req, res) {
 }
 
 async function handleApiLayoutUpdate(req, res) {
-  const auth = getAuthState(req);
+  const auth = req.auth;
   let body;
   try {
     body = await readJsonBody(req, LAYOUT_BODY_LIMIT_BYTES);
@@ -5027,12 +5022,6 @@ async function handleApiLayoutUpdate(req, res) {
 }
 
 async function handleApiPlaybackUpdate(req, res) {
-  const auth = getAuthState(req);
-  if (!auth.isServer) {
-    sendJson(res, 403, { error: 'Только хост может обновлять состояние воспроизведения' });
-    return;
-  }
-
   let body;
   try {
     body = await readJsonBody(req, PLAYBACK_BODY_LIMIT_BYTES);
@@ -5083,17 +5072,16 @@ function handleApiLayoutStream(req, res) {
 }
 
 function handleAuthSession(req, res) {
-  const auth = getAuthState(req);
   sendJson(res, 200, {
-    authenticated: auth.authenticated,
-    isServer: auth.isServer,
-    role: auth.role,
-    username: auth.username,
+    authenticated: req.auth.authenticated,
+    isServer: req.auth.isServer,
+    role: req.auth.role,
+    username: req.auth.username,
   });
 }
 
 async function handleAuthLogin(req, res) {
-  if (isServerRequest(req)) {
+  if (req.auth.isServer) {
     sendJson(res, 200, { authenticated: true, isServer: true, role: ROLE_HOST, username: 'server' });
     return;
   }
@@ -5150,16 +5138,10 @@ function handleAuthLogout(req, res) {
 }
 
 function handleAuthClientsGet(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   sendJson(res, 200, buildAuthUsersPayload(null));
 }
 
 async function handleAuthClientsRoleUpdate(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   let body;
   try {
     body = await readJsonBody(req);
@@ -5203,9 +5185,6 @@ async function handleAuthClientsRoleUpdate(req, res) {
 }
 
 async function handleAuthClientsDisconnect(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   let body;
   try {
     body = await readJsonBody(req);
@@ -5246,12 +5225,7 @@ async function handleAuthClientsDisconnect(req, res) {
 }
 
 async function handleApiPlaybackCommand(req, res) {
-  const auth = getAuthState(req);
-  const canControlLivePlayback = Boolean(auth.isServer || auth.role === ROLE_COHOST);
-  if (!canControlLivePlayback) {
-    sendJson(res, 403, { error: 'Только хост или co-host может отправлять live-команды' });
-    return;
-  }
+  const auth = req.auth;
 
   let body;
   try {
@@ -5414,274 +5388,48 @@ function handlePublic(req, res, pathname) {
   serveFile(req, res, filePath, getContentType(filePath));
 }
 
+
+// --- HttpRouter + AuthService wiring (PR1) ---
+const authService = new AuthService({ getAuthStateFn: getAuthState });
+const authGuard = createAuthGuard(authService);
+const router = new HttpRouter({ authGuard });
+
+// Auth endpoints
+router.register('GET', '/api/auth/session', handleAuthSession, { auth: 'none' });
+router.register('POST', '/api/auth/login', handleAuthLogin, { auth: 'none' });
+router.register('POST', '/api/auth/logout', handleAuthLogout, { auth: 'none' });
+router.register('GET', '/api/auth/clients', handleAuthClientsGet, { auth: 'host' });
+router.register('POST', '/api/auth/clients/role', handleAuthClientsRoleUpdate, { auth: 'host' });
+router.register('POST', '/api/auth/clients/disconnect', handleAuthClientsDisconnect, { auth: 'host' });
+
+// Layout/playback endpoints
+router.register('GET', '/api/layout/stream', handleApiLayoutStream, { auth: 'session' });
+router.register('POST', '/api/layout/reset', handleApiLayoutReset, { auth: 'host' });
+router.register('GET', '/api/layout', handleApiLayoutGet, { auth: 'session' });
+router.register('POST', '/api/layout', handleApiLayoutUpdate, { auth: 'session' });
+router.register('GET', '/api/playback', handleApiPlaybackGet, { auth: 'session' });
+router.register('POST', '/api/playback', handleApiPlaybackUpdate, { auth: 'host' });
+router.register('POST', '/api/playback/command', handleApiPlaybackCommand, { auth: 'host|cohost' });
+router.register('POST', '/api/shutdown', handleShutdown, { auth: 'host' });
+
+// Catalog/DSP/config/update endpoints
+router.register('GET', '/api/audio', handleApiAudio, { auth: 'session' });
+router.register('GET', '/api/audio/attributes', (req, res) => handleApiAudioAttributes(req, res, req.parsedUrl), { auth: 'session' });
+router.register('GET', '/api/dsp/transitions', (req, res) => handleApiDspTransitionsGet(req, res, req.parsedUrl), { auth: 'session' });
+router.register('POST', '/api/dsp/transitions', handleApiDspTransitionsPost, { auth: 'host' });
+router.register('GET|HEAD', '/api/dsp/transitions/file/:id', (req, res) => handleApiDspTransitionFile(req, res, req.pathname), { auth: 'session' });
+router.register('GET', '/api/config', handleApiConfig, { auth: 'session' });
+router.register('GET', '/api/version', handleApiVersion, { auth: 'session' });
+router.register('GET', '/api/update/check', handleUpdateCheck, { auth: 'session' });
+router.register('POST', '/api/update/apply', handleUpdateApply, { auth: 'session' });
+
+// Wildcard routes (catch-alls, order matters: more specific first)
+router.register('GET|HEAD', '/api/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'session' });
+router.register('GET|HEAD', '/audio/*', (req, res) => handleAudioFile(req, res, req.pathname, AUDIO_DIR_RESOLVED, '/audio/'), { auth: 'session', authResponseKind: 'text' });
+router.register('GET|HEAD', '/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'none' });
+
 const server = http.createServer((req, res) => {
-  let pathname = '/';
-  let requestUrl = null;
-
-  try {
-    requestUrl = new URL(req.url, `http://${req.headers.host}`);
-    pathname = decodeURIComponent(requestUrl.pathname);
-  } catch (e) {
-    res.writeHead(400);
-    res.end('Bad Request');
-    return;
-  }
-
-  if (pathname === '/api/auth/session') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthSession(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/login') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthLogin(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/logout') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthLogout(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsGet(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients/role') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsRoleUpdate(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients/disconnect') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsDisconnect(req, res);
-    return;
-  }
-
-  if (pathname.startsWith('/api/')) {
-    const auth = requireAuthorizedRequest(req, res, 'json');
-    if (!auth) return;
-  }
-
-  if (pathname.startsWith('/audio/')) {
-    const auth = requireAuthorizedRequest(req, res, 'text');
-    if (!auth) return;
-  }
-
-  if (pathname === '/api/layout/stream') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiLayoutStream(req, res);
-    return;
-  }
-
-  if (pathname === '/api/layout/reset') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-
-    handleApiLayoutReset(req, res);
-    return;
-  }
-
-  if (pathname === '/api/layout') {
-    if (req.method === 'GET') {
-      handleApiLayoutGet(req, res);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiLayoutUpdate(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname === '/api/playback') {
-    if (req.method === 'GET') {
-      handleApiPlaybackGet(req, res);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiPlaybackUpdate(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname === '/api/playback/command') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiPlaybackCommand(req, res);
-    return;
-  }
-
-  if (pathname === '/api/shutdown') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-
-    const auth = getAuthState(req);
-    if (!auth.isServer) {
-      sendJson(res, 403, { error: 'Только хост может останавливать сервер' });
-      return;
-    }
-
-    handleShutdown(req, res);
-    return;
-  }
-
-  if (pathname === '/api/audio') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiAudio(req, res);
-    return;
-  }
-
-  if (pathname === '/api/audio/attributes') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiAudioAttributes(req, res, requestUrl);
-    return;
-  }
-
-  if (pathname === '/api/dsp/transitions') {
-    if (req.method === 'GET') {
-      handleApiDspTransitionsGet(req, res, requestUrl);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiDspTransitionsPost(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname.startsWith('/api/dsp/transitions/file/')) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiDspTransitionFile(req, res, pathname);
-    return;
-  }
-
-  if (pathname === '/api/config') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiConfig(req, res);
-    return;
-  }
-
-  if (pathname === '/api/version') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiVersion(req, res);
-    return;
-  }
-
-  if (pathname === '/api/update/check') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleUpdateCheck(req, res);
-    return;
-  }
-
-  if (pathname === '/api/update/apply') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleUpdateApply(req, res);
-    return;
-  }
-
-  if (pathname.startsWith('/audio/')) {
-    // Allow GET and HEAD for proper metadata fetching.
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAudioFile(req, res, pathname, AUDIO_DIR_RESOLVED, '/audio/');
-    return;
-  }
-
-  // Public files: allow GET and HEAD.
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  handlePublic(req, res, pathname);
+  router.dispatch(req, res);
 });
 
 if (DSP_ENABLED) {
