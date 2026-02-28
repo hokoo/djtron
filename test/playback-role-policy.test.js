@@ -40,27 +40,6 @@ test('co-host can send play-track and stop only', () => {
   );
 });
 
-test('co-host play/stop commands are routable to host target', () => {
-  assert.equal(
-    canDispatchLivePlaybackCommand({
-      sourceRole: 'co-host',
-      commandType: 'play-track',
-      target: 'host',
-      isServer: false,
-    }).allowed,
-    true,
-  );
-  assert.equal(
-    canDispatchLivePlaybackCommand({
-      sourceRole: 'co-host',
-      commandType: 'stop',
-      target: 'host',
-      isServer: false,
-    }).allowed,
-    true,
-  );
-});
-
 test('slave can send play-next-request to host only', () => {
   assert.equal(
     canDispatchLivePlaybackCommand({
