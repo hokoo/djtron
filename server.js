@@ -5293,7 +5293,7 @@ async function handleApiPlaybackCommand(req, res) {
     payload,
   );
   if (!commandResult.ok) {
-    sendJson(res, 403, { error: commandResult.message || 'Команда отклонена' });
+    sendJson(res, 403, { error: commandResult.message });
     return;
   }
 
