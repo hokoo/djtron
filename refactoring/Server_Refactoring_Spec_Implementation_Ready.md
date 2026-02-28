@@ -268,29 +268,46 @@ class UpdateService {
 
 ---
 
-## 6) API surface: карта эндпоинтов (заполнить)
+## 6) API surface: полная карта endpoint’ов (as-is → to-be service)
 
-Чтобы документ был “готов к работе”, нужен **перечень текущих endpoint’ов** и их маппинг на новые сервисы.
+Источник: фактические роуты в `server.js` (ветка `http.createServer(...)` + соответствующие `handle*` функции).
 
-Заполнить таблицу (минимум):
+Обозначения auth:
+- `none` — без предварительной авторизации;
+- `session` — проходит через `requireAuthorizedRequest`;
+- `host` — только host (`requireHostRequest` или `auth.isServer`);
+- `host|cohost` — доступ host и co-host;
+- `session + host-only fields` — endpoint доступен по session, но часть полей меняет только host.
 
-| Endpoint | Method | Auth | Handler → Service | Notes |
-|---|---|---|---|---|
-| `/api/login` | POST | none | AuthService.login | |
-| `/api/logout` | POST | session | AuthService.logout | |
-| `/api/layout/state` | GET | session | LayoutStateService.getState | |
-| `/api/layout/patch` | POST | session | LayoutStateService.applyPatch | |
-| `/api/playback/command` | POST | host | PlaybackGateway.dispatchCommand | |
-| `/api/playback/state` | GET | session | PlaybackGateway.getSnapshot | |
-| `/api/dsp/enqueue` | POST | host | DspJobManager.enqueue | |
-| `/api/dsp/status/:id` | GET | session | DspJobManager.getStatus | |
-| `/api/dsp/transition/:id` | GET | session | DspJobManager.getTransition | |
-| `/api/catalog` | GET | session | AudioCatalogService.getCatalog | |
-| `/api/update/check` | POST | host | UpdateService.check | |
-| `/api/update/apply` | POST | host | UpdateService.apply | |
-| ... | ... | ... | ... | ... |
+| Endpoint | Method | Auth (as-is) | Текущий handler | Handler → Service (target) | Notes |
+|---|---|---|---|---|---|
+| `/api/auth/session` | GET | none | `handleAuthSession` | `AuthService.getAuthState` | Проверка текущей сессии/роли |
+| `/api/auth/login` | POST | none | `handleAuthLogin` | `AuthService.login` | Логин + выдача session cookie |
+| `/api/auth/logout` | POST | none | `handleAuthLogout` | `AuthService.logout` | Логаут по cookie token |
+| `/api/auth/clients` | GET | host | `handleAuthClientsGet` | `AuthService.getClients` | Список активных сессий |
+| `/api/auth/clients/role` | POST | host | `handleAuthClientsRoleUpdate` | `AuthService.setClientRole` | Переключение роли active-сессий |
+| `/api/auth/clients/disconnect` | POST | host | `handleAuthClientsDisconnect` | `AuthService.disconnectUserSessions` | Принудительный disconnect |
+| `/api/layout/stream` | GET | session | `handleApiLayoutStream` | `LayoutStateService.subscribe` | SSE stream (`layout`/`playback`/`auth-users`) |
+| `/api/layout/reset` | POST | host | `handleApiLayoutReset` | `LayoutStateService.reset` | Сброс layout + broadcast + DSP schedule |
+| `/api/layout` | GET | session | `handleApiLayoutGet` | `LayoutStateService.getState` | Snapshot layout state |
+| `/api/layout` | POST | session + host-only fields | `handleApiLayoutUpdate` | `LayoutStateService.applyPatch` | Обновление layout; DAP/autoplay/DSP флаги полноценно меняет host |
+| `/api/playback` | GET | session | `handleApiPlaybackGet` | `PlaybackGateway.getSnapshot` | Snapshot playback state |
+| `/api/playback` | POST | host | `handleApiPlaybackUpdate` | `PlaybackGateway.updateState` | Прямое обновление playback state (host-only) |
+| `/api/playback/command` | POST | host\|cohost | `handleApiPlaybackCommand` | `PlaybackGateway.dispatchCommand` | Команды через `livePlaybackCommandBus` |
+| `/api/shutdown` | POST | host | `handleShutdown` | `ServerControlService.shutdown` | Служебный endpoint остановки процесса |
+| `/api/audio` | GET | session | `handleApiAudio` | `AudioCatalogService.getCatalog` | Каталог аудиофайлов |
+| `/api/audio/attributes` | GET | session | `handleApiAudioAttributes` | `AudioCatalogService.getTrackMeta` | Метаданные/название трека |
+| `/api/dsp/transitions` | GET | session | `handleApiDspTransitionsGet` | `DspJobManager.getStatus/list` | Список/поиск transitions + queue summary |
+| `/api/dsp/transitions` | POST | host | `handleApiDspTransitionsPost` | `DspJobManager.enqueue` | enqueue DSP transitions |
+| `/api/dsp/transitions/file/:id` | GET, HEAD | session | `handleApiDspTransitionFile` | `DspJobManager.getTransition` + `StaticFilesService.stream` | Выдача подготовленного transition файла |
+| `/api/config` | GET | session | `handleApiConfig` | `ConfigManager.getAll` | Runtime config/schema для UI |
+| `/api/version` | GET | session | `handleApiVersion` | `ConfigManager.get('version')` | Текущая версия приложения |
+| `/api/update/check` | GET | session | `handleUpdateCheck` | `UpdateService.check` | Проверка обновлений |
+| `/api/update/apply` | POST | session | `handleUpdateApply` | `UpdateService.apply` | Применение обновления; блокировка parallel apply |
+| `/audio/:filePath*` | GET, HEAD | session | `handleAudioFile` | `StaticFilesService.serveAudio` | Стрим треков с range support |
+| `/*` (public files) | GET, HEAD | none | `handlePublic` | `StaticFilesService.servePublic` | `index.html`/статика из `public/` |
 
-> Если фактические пути другие — заменить на реальные. Важна сама карта: endpoint → auth policy → сервис.
+> Примечание: `ServerControlService` формально не описан в п.5, но endpoint `/api/shutdown` уже существует. Для PR1 маршрут сохраняется как есть, а в PR2+ можно решить: оставить как отдельный adapter/service или встроить в Auth/Config bounded context.
 
 ---
 
@@ -299,8 +316,43 @@ class UpdateService {
 План “без большого взрыва”:
 
 ### PR1 — HttpRouter + AuthService
-- Ввести `HttpRouter` и зарегистрировать **существующие** маршруты.
+- Ввести `HttpRouter` и зарегистрировать **все существующие** маршруты.
 - Вынести проверку сессий/ролей в `AuthService` и auth middleware.
+
+**PR1 checklist (implementation-ready, route-by-route)**
+
+- [ ] Добавить `HttpRouter.register(method, path, handler, { auth, bodyLimitBytes })` и `dispatch(req, res)` без изменения payload-контрактов.
+- [ ] Добавить auth middleware (`none|session|host|cohost`) поверх `AuthService.getAuthState()` и убрать inline-проверки в router-ветке `server.js`.
+- [ ] Зарегистрировать auth endpoints:
+  - [ ] `GET /api/auth/session` → `AuthService.getAuthState` (`auth:none`)
+  - [ ] `POST /api/auth/login` → `AuthService.login` (`auth:none`)
+  - [ ] `POST /api/auth/logout` → `AuthService.logout` (`auth:none`)
+  - [ ] `GET /api/auth/clients` → `AuthService.getClients` (`auth:host`)
+  - [ ] `POST /api/auth/clients/role` → `AuthService.setClientRole` (`auth:host`)
+  - [ ] `POST /api/auth/clients/disconnect` → `AuthService.disconnectUserSessions` (`auth:host`)
+- [ ] Зарегистрировать layout/playback endpoints:
+  - [ ] `GET /api/layout/stream` (`auth:session`)
+  - [ ] `POST /api/layout/reset` (`auth:host`)
+  - [ ] `GET /api/layout` (`auth:session`)
+  - [ ] `POST /api/layout` (`auth:session`, сохранить host-only логику внутри сервиса)
+  - [ ] `GET /api/playback` (`auth:session`)
+  - [ ] `POST /api/playback` (`auth:host`)
+  - [ ] `POST /api/playback/command` (`auth:host|cohost`)
+  - [ ] `POST /api/shutdown` (`auth:host`)
+- [ ] Зарегистрировать catalog/DSP/config/update endpoints:
+  - [ ] `GET /api/audio` (`auth:session`)
+  - [ ] `GET /api/audio/attributes` (`auth:session`)
+  - [ ] `GET /api/dsp/transitions` (`auth:session`)
+  - [ ] `POST /api/dsp/transitions` (`auth:host`)
+  - [ ] `GET|HEAD /api/dsp/transitions/file/:id` (`auth:session`)
+  - [ ] `GET /api/config` (`auth:session`)
+  - [ ] `GET /api/version` (`auth:session`)
+  - [ ] `GET /api/update/check` (`auth:session`)
+  - [ ] `POST /api/update/apply` (`auth:session`)
+- [ ] Зарегистрировать non-API маршруты:
+  - [ ] `GET|HEAD /audio/:filePath*` (`auth:session`)
+  - [ ] `GET|HEAD /*` (`auth:none`, public static)
+- [ ] Добавить интеграционные тесты PR1: dispatch(method/path), auth guard, body-limit и 405/401/403 parity с текущим поведением.
 
 **Acceptance PR1**
 - Поведение endpoint’ов не изменилось (интеграционные тесты/ручные проверки).
