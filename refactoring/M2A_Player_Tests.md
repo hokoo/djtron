@@ -5,6 +5,30 @@
 
 ---
 
+## Статус покрытия A–I (на текущем инкременте)
+
+- [x] **A) Роли и права** — покрыто частично и целевым минимумом:
+  - `test/playback-role-policy.test.js` (host/co-host/slave rules)
+  - `test/playback-command-bus.test.js` (routing allow/deny)
+- [x] **B) Тумблеры и режимы** — покрыт основной сценарий переключения active mode:
+  - `test/playback-controller.test.js` (`playback controller switches mode...`)
+- [x] **C) DSP fragment A→B** — покрыт обязательный переход на B:
+  - `test/playback-controller.test.js` (`dsp fragment completion always continues with B track`)
+- [x] **D) Play Next v3 стратегия A** — покрыты LIFO/FIFO вставки:
+  - `test/playback-controller.test.js` (`play-next strategy A supports LIFO and FIFO insertion`)
+- [x] **E) Play Next v3 стратегия B** — покрыты создание quick-build playlist и scheduled switch:
+  - `test/playback-controller.test.js` (`play-next strategy B creates quick build playlist and scheduled switch`)
+- [x] **F) DAP** — покрыт минимум для состояния STOP/clear (`dapState` сбрасывается при полной остановке):
+  - `test/playback-controller.test.js` (`stop performs full stop and clears play-next and dap state`)
+- [x] **G) Overlap/Fade инварианты** — покрыты ограничения Track→Track и запрет на DSP fragment:
+  - `test/audio-engine.test.js`
+- [x] **H) STOP как полная остановка** — покрыт полный reset:
+  - `test/playback-controller.test.js` (`stop performs full stop...`)
+- [x] **I) PlaylistEditor регрессия** — покрыты copy и quick build commit:
+  - `test/playlist-editor.test.js`
+
+---
+
 ## A) Роли и права (RolePolicy + CommandBus)
 
 ### A1. Co-Host может только play/stop host
