@@ -1,5 +1,6 @@
 # Ignore audio folder
 audio/
+*.zip
 update-state.json
 layout-state.json
 sessions-state.json
