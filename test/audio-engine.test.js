@@ -10,7 +10,7 @@ test('audio engine disables overlap/fade flags for dsp fragments', () => {
   assert.equal(source.fadeAllowed, false);
 });
 
-test('audio engine applies overlap/fade only for track to track transition', () => {
+test('audio engine applies overlap on track-to-track and never on dsp fragment transition', () => {
   const engine = new AudioEngine();
   const trackPlan = engine.planTransition(
     { kind: 'track', trackId: 'a' },
@@ -18,7 +18,7 @@ test('audio engine applies overlap/fade only for track to track transition', () 
     { overlapEnabled: true, fadeEnabled: true },
   );
   assert.equal(trackPlan.overlapApplied, true);
-  assert.equal(trackPlan.fadeApplied, true);
+  assert.equal(trackPlan.fadeApplied, false);
 
   const dspPlan = engine.planTransition(
     { kind: 'track', trackId: 'a' },
@@ -27,4 +27,21 @@ test('audio engine applies overlap/fade only for track to track transition', () 
   );
   assert.equal(dspPlan.overlapApplied, false);
   assert.equal(dspPlan.fadeApplied, false);
+});
+
+test('audio engine applies fade only on silence to track boundaries', () => {
+  const engine = new AudioEngine();
+  const silenceToTrack = engine.planTransition(
+    { kind: 'silence' },
+    { kind: 'track', trackId: 'a' },
+    { overlapEnabled: true, fadeEnabled: true },
+  );
+  assert.equal(silenceToTrack.fadeApplied, true);
+
+  const trackToSilence = engine.planTransition(
+    { kind: 'track', trackId: 'a' },
+    { kind: 'silence' },
+    { overlapEnabled: true, fadeEnabled: true },
+  );
+  assert.equal(trackToSilence.fadeApplied, true);
 });

@@ -38,3 +38,24 @@ test('playlist editor commitQuickBuild clears quick build marker', () => {
   const updated = editor.commitQuickBuild('playnext-1');
   assert.equal(updated.uiState, null);
 });
+
+test('playlist editor moveTrack removes source and inserts into destination', () => {
+  const repository = new PlaylistRepository([
+    {
+      id: 'a',
+      name: 'A',
+      tracks: [{ id: 't1', src: '1.mp3' }, { id: 't2', src: '2.mp3' }],
+      settings: {},
+    },
+    {
+      id: 'b',
+      name: 'B',
+      tracks: [{ id: 'u1', src: 'u.mp3' }],
+      settings: {},
+    },
+  ]);
+  const editor = new PlaylistEditor({ playlistRepository: repository });
+  editor.moveTrack({ fromPlaylistId: 'a', trackId: 't2', toPlaylistId: 'b', index: 1 });
+  assert.deepEqual(repository.getPlaylist('a').tracks.map((item) => item.id), ['t1']);
+  assert.deepEqual(repository.getPlaylist('b').tracks.map((item) => item.id), ['u1', 't2']);
+});

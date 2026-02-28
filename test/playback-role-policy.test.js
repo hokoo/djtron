@@ -16,6 +16,7 @@ test('co-host can send play-track and stop only', () => {
     canDispatchLivePlaybackCommand({
       sourceRole: 'co-host',
       commandType: 'play-track',
+      target: 'host',
       isServer: false,
     }).allowed,
     true,
@@ -24,6 +25,7 @@ test('co-host can send play-track and stop only', () => {
     canDispatchLivePlaybackCommand({
       sourceRole: 'co-host',
       commandType: 'stop',
+      target: 'host',
       isServer: false,
     }).allowed,
     true,
@@ -35,6 +37,27 @@ test('co-host can send play-track and stop only', () => {
       isServer: false,
     }).allowed,
     false,
+  );
+});
+
+test('co-host play/stop commands are routable to host target', () => {
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'co-host',
+      commandType: 'play-track',
+      target: 'host',
+      isServer: false,
+    }).allowed,
+    true,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'co-host',
+      commandType: 'stop',
+      target: 'host',
+      isServer: false,
+    }).allowed,
+    true,
   );
 });
 

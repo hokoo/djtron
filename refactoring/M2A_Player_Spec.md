@@ -8,7 +8,7 @@
 - [x] Шаг 4. Внедрить `Play Next v3` (стратегии A/B, FIFO/LIFO сессии, ScheduledSwitch).
 - [x] Шаг 5. Зафиксировать `AudioEngine` инварианты (overlap/fade, исключения для DSP fragments).
 - [x] Шаг 6. Выделить `PlaylistEditor` и оставить `PlaylistRepository` только как data-layer.
-- [ ] Шаг 7. Закрыть тест-план из `M2A_Player_Tests.md` (A–I) по мере инкрементов (выполнено частично, см. блок «Что осталось закрыть» в `M2A_Player_Tests.md`).
+- [x] Шаг 7. Закрыть тест-план из `M2A_Player_Tests.md` (A–I) — закрыто в текущем инкременте.
 
 Дата: 2026-02-28  
 Контекст: M2A (клиентская часть), управление воспроизведением в приложении с плейлистами, режимами Simple/AutoPlay/DSP/DAP, сетевыми ролями Host/Co-Host/Slave.

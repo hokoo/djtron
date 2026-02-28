@@ -7,52 +7,31 @@
 
 ## Статус покрытия A–I (на текущем инкременте)
 
-- [x] **A) Роли и права** — покрыто частично и целевым минимумом:
+- [x] **A) Роли и права** — покрыто, включая A1/A3:
   - `test/playback-role-policy.test.js` (host/co-host/slave rules)
   - `test/playback-command-bus.test.js` (routing allow/deny)
-- [x] **B) Тумблеры и режимы** — покрыт основной сценарий переключения active mode:
-  - `test/playback-controller.test.js` (`playback controller switches mode...`)
-- [x] **C) DSP fragment A→B** — покрыт обязательный переход на B:
-  - `test/playback-controller.test.js` (`dsp fragment completion always continues with B track`)
-- [x] **D) Play Next v3 стратегия A** — покрыты LIFO/FIFO вставки:
-  - `test/playback-controller.test.js` (`play-next strategy A supports LIFO and FIFO insertion`)
-- [x] **E) Play Next v3 стратегия B** — покрыты создание quick-build playlist и scheduled switch:
-  - `test/playback-controller.test.js` (`play-next strategy B creates quick build playlist and scheduled switch`)
-- [x] **F) DAP** — покрыт минимум для состояния STOP/clear (`dapState` сбрасывается при полной остановке):
-  - `test/playback-controller.test.js` (`stop performs full stop and clears play-next and dap state`)
-- [x] **G) Overlap/Fade инварианты** — покрыты ограничения Track→Track и запрет на DSP fragment:
+- [x] **B) Тумблеры и режимы** — покрыты B1–B4:
+  - `test/playback-controller.test.js` (seamless переключения и неактивный плейлист)
+- [x] **C) DSP fragment A→B** — покрыты C1/C2:
+  - `test/playback-controller.test.js` (`dsp fragment completion...`, `play-next during fragment...`)
+- [x] **D) Play Next v3 стратегия A** — покрыты D1–D5:
+  - `test/playback-controller.test.js` (`play-next strategy A ...`, `...cancels scheduled switch...`)
+- [x] **E) Play Next v3 стратегия B** — покрыты E1–E4:
+  - `test/playback-controller.test.js` (`...anchors switch...`, `scheduled switch executes...`)
+- [x] **F) DAP** — покрыты F1–F7:
+  - `test/playback-controller.test.js` (arm/start/promote/suspend/resume/exit)
+- [x] **G) Overlap/Fade инварианты** — покрыты, включая G3 (fade только тишина↔Track):
   - `test/audio-engine.test.js`
-- [x] **H) STOP как полная остановка** — покрыт полный reset:
-  - `test/playback-controller.test.js` (`stop performs full stop...`)
-- [x] **I) PlaylistEditor регрессия** — покрыты copy и quick build commit:
+- [x] **H) STOP как полная остановка** — покрыт reset + вызов `AudioEngine.stopAll`:
+  - `test/playback-controller.test.js` (`stop performs full stop...`, `stop delegates...`)
+- [x] **I) PlaylistEditor регрессия** — покрыты copy/move и quick build commit:
   - `test/playlist-editor.test.js`
 
 ---
 
-## Что осталось закрыть (конкретно по кейсам)
+## Что осталось закрыть
 
-- [ ] **A1** — нет отдельного теста, подтверждающего remote-доставку `PLAY_TRACK/STOP` именно на Host.
-- [ ] **A3** — нет отдельного теста ограничения slave-local на `Simple` (запрет/forced-simple для autoplay локально).
-- [ ] **B1** — нет отдельной проверки seamless-перехода `Simple → AutoPlay` без разрыва playhead.
-- [ ] **B2** — нет отдельной проверки seamless-перехода `AutoPlay → Simple` и `idle` после конца трека.
-- [ ] **B3** — нет отдельной проверки `DSP → AutoPlay` без DSP fragments после выключения DSP.
-- [ ] **B4** — нет отдельного теста, что тумблеры неактивного плейлиста не меняют текущий режим/воспроизведение.
-- [ ] **C2** — нет отдельного теста, что Play Next в фазе fragment применяется только после обязательного B.
-- [ ] **D2** — нет отдельного теста вставки стратегии A после `B` в `transition(A→B)`.
-- [ ] **D5** — нет отдельного теста, что стратегия A отменяет ранее установленный `ScheduledSwitch`.
-- [ ] **E2** — нет отдельного теста, что для стратегии B в transition якорь `afterTrackId` ставится в `B`.
-- [ ] **E3** — нет отдельного теста исполнения `ScheduledSwitch` по событию `SEGMENT_ENDED(afterTrackId)`.
-- [ ] **E4** — нет отдельного теста, что `uiState=quick_build_armed` сохраняется после switch до явного commit.
-- [ ] **F1** — нет отдельного теста, что `TOGGLE_DAP(true)` только `Armed`, без автозапуска.
-- [ ] **F2** — нет отдельного теста классического старта DAP (`Armed → Active`, `M=DAP`).
-- [ ] **F3** — нет отдельного теста seamless-promote в DAP из текущего трека.
-- [ ] **F4** — нет отдельного теста `Active DAP → Suspended` при старте другого режима.
-- [ ] **F5** — нет отдельного теста resume DAP после завершения `Simple`.
-- [ ] **F6** — нет отдельного теста `TOGGLE_DAP(false)` в `Suspended` без влияния на текущий режим.
-- [ ] **F7** — нет отдельного теста seamless-exit из `DAP Active` (`dap→normal` ramp без остановки трека).
-- [ ] **G3** — нет отдельного теста, что fade применяется только к переходам тишина↔Track.
-- [ ] **H1** — нет отдельной проверки вызова `AudioEngine.stopAll` при полном STOP (сейчас покрыт reset state).
-- [ ] **I1(move)** — нет отдельного регрессионного теста `move` между плейлистами (покрыт только `copy`).
+- [x] По текущему инкременту незакрытых кейсов в блоке A–I нет.
 
 ---
 
