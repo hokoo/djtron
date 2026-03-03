@@ -46,6 +46,8 @@ npm start
 - `dsp_slice_seconds` - длина хвоста/головы треков, используемых для сборки transition.
 - `dsp_live_entry_compensation_ms` - компенсация старта transition на стыке `track -> transition` (мс).
 - `dsp_live_exit_compensation_ms` - компенсация handoff на стыке `transition -> track` (мс).
+- `dsp_live_entry_compensation_percent` - относительная компенсация старта transition в % от длительности исходного трека (приоритетнее `*_ms`).
+- `dsp_live_exit_compensation_percent` - относительная компенсация handoff в % от длительности целевого трека (приоритетнее `*_ms`).
 - `dsp_tempo_align_enabled` - `true/false`; выравнивание темпа второго трека под первый.
 - `dsp_tempo_max_adjust_percent` - предел авто-коррекции темпа (в процентах, симметрично).
 - `dsp_tempo_glide_enabled` - `true/false`; плавно доводит темп target к `1.0` к концу transition.
@@ -78,6 +80,8 @@ dsp_transition_seconds=5
 dsp_slice_seconds=15
 dsp_live_entry_compensation_ms=22
 dsp_live_exit_compensation_ms=19
+dsp_live_entry_compensation_percent=0.0
+dsp_live_exit_compensation_percent=0.0
 dsp_tempo_align_enabled=true
 dsp_tempo_max_adjust_percent=12
 dsp_tempo_glide_enabled=true
@@ -108,6 +112,8 @@ dsp_no_gap_energy_mean_multiplier=1.7
 - `volume_presets` -> `host` (`djtron:config:volumePresets`).
 - `dsp_live_entry_compensation_ms` -> `none`.
 - `dsp_live_exit_compensation_ms` -> `none`.
+- `dsp_live_entry_compensation_percent` -> `none`.
+- `dsp_live_exit_compensation_percent` -> `none`.
 
 Если ключа нет в разрешенном уровне `localStorage`, используется серверное значение из `extra.conf`.
 

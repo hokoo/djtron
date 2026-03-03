@@ -100,6 +100,8 @@ const DEFAULT_RUNTIME_CONFIG_SCHEMA = Object.freeze({
   volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
   dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
   dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspEntryCompensationPercent: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
+  dspExitCompensationPercent: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
 });
 const LAYOUT_STREAM_RETRY_MS = 1500;
 const PLAYLIST_NAME_MAX_LENGTH = 80;
@@ -178,12 +180,16 @@ const LIVE_DSP_RENDER_SOURCE = 'live-play-start';
 const LIVE_DSP_HANDOFF_LEAD_SECONDS = 0.055;
 const DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS = 22;
 const DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS = 19;
+const DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_PERCENT = null;
+const DEFAULT_LIVE_DSP_EXIT_COMPENSATION_PERCENT = null;
 const LIVE_DSP_WARMUP_TIMEOUT_MS = 12 * 1000;
 const LIVE_DSP_WARMUP_MAX_TRACKED = 64;
 const LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED = 24;
 let LIVE_VOLUME_PRESET_VALUES = DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
 let liveDspEntryCompensationSeconds = DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS / 1000;
 let liveDspExitCompensationSeconds = DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS / 1000;
+let liveDspEntryCompensationPercent = DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_PERCENT;
+let liveDspExitCompensationPercent = DEFAULT_LIVE_DSP_EXIT_COMPENSATION_PERCENT;
 const DEFAULT_LIVE_VOLUME = 1;
 const AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS = 0.04;
 const AUTOPLAY_OVERLAY_STATE_IDLE = 'idle';
@@ -262,12 +268,16 @@ let runtimeServerConfig = {
   volumePresets: DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice(),
   dspEntryCompensationMs: DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
   dspExitCompensationMs: DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
+  dspEntryCompensationPercent: DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_PERCENT,
+  dspExitCompensationPercent: DEFAULT_LIVE_DSP_EXIT_COMPENSATION_PERCENT,
   schema: {
     port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
     allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
     volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
     dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
     dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspEntryCompensationPercent: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspExitCompensationPercent: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
   },
 };
 let dspStatusState = {
@@ -611,6 +621,13 @@ function parseDspCompensationMsConfigValue(value, fallback = null) {
   return normalized;
 }
 
+function parseDspCompensationPercentConfigValue(value, fallback = null) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100) return fallback;
+  return numeric;
+}
+
 function getDefaultRuntimeConfigSchema() {
   return {
     port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
@@ -618,6 +635,8 @@ function getDefaultRuntimeConfigSchema() {
     volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
     dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
     dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspEntryCompensationPercent: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
+    dspExitCompensationPercent: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
   };
 }
 
@@ -662,6 +681,14 @@ function sanitizeRuntimeConfigPayload(rawPayload) {
     dspExitCompensationMs: parseDspCompensationMsConfigValue(
       payloadValues.dspExitCompensationMs,
       DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
+    ),
+    dspEntryCompensationPercent: parseDspCompensationPercentConfigValue(
+      payloadValues.dspEntryCompensationPercent,
+      DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_PERCENT,
+    ),
+    dspExitCompensationPercent: parseDspCompensationPercentConfigValue(
+      payloadValues.dspExitCompensationPercent,
+      DEFAULT_LIVE_DSP_EXIT_COMPENSATION_PERCENT,
     ),
     schema,
   };
@@ -752,6 +779,8 @@ function applyRuntimeConfigFromSources(serverConfig = null) {
       : runtimeServerConfig.volumePresets.slice();
   liveDspEntryCompensationSeconds = runtimeServerConfig.dspEntryCompensationMs / 1000;
   liveDspExitCompensationSeconds = runtimeServerConfig.dspExitCompensationMs / 1000;
+  liveDspEntryCompensationPercent = runtimeServerConfig.dspEntryCompensationPercent;
+  liveDspExitCompensationPercent = runtimeServerConfig.dspExitCompensationPercent;
 
   applyRuntimeClientConfig();
 }
@@ -8477,6 +8506,12 @@ function resolveDspSourceSegmentSeconds(sliceSeconds, transitionDetails = null) 
   return Math.max(0.05, normalizedSlice - safeTailTrim);
 }
 
+function resolveDspRelativeCompensationSeconds(durationSeconds, compensationPercent) {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0;
+  if (!Number.isFinite(compensationPercent) || compensationPercent < 0) return 0;
+  return (durationSeconds * compensationPercent) / 100;
+}
+
 function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds, transitionDetails = null) {
   const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
   if (normalizedSlice <= 0) return 0;
@@ -8546,6 +8581,8 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     details.transition,
   );
   const transitionOffsetPlannedAt = performance.now();
+  const sourceDurationSeconds = getDuration(currentAudio) || getKnownDurationSeconds(sourceTrack.key);
+  const targetDurationSeconds = getKnownDurationSeconds(targetTrack.key);
 
   if (isDspTransitionPlaybackActive()) {
     stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
@@ -8579,9 +8616,13 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
   const resolveAdjustedTransitionStartOffsetSeconds = () => {
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
+    const entryCompensationSeconds =
+      Number.isFinite(liveDspEntryCompensationPercent) && Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
+        ? resolveDspRelativeCompensationSeconds(sourceDurationSeconds, liveDspEntryCompensationPercent)
+        : liveDspEntryCompensationSeconds;
     const rawOffset = Math.max(
       0,
-      transitionStartOffsetSeconds + startupDelaySeconds + liveDspEntryCompensationSeconds,
+      transitionStartOffsetSeconds + startupDelaySeconds + entryCompensationSeconds,
     );
     const knownDuration =
       getDuration(transitionAudio) ||
@@ -8726,7 +8767,11 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
           : 0;
       if (Number.isFinite(activeDuration) && activeDuration > 0) {
         const remaining = Math.max(0, activeDuration - currentTime);
-        const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + liveDspExitCompensationSeconds);
+        const exitCompensationSeconds =
+          Number.isFinite(liveDspExitCompensationPercent) && Number.isFinite(targetDurationSeconds) && targetDurationSeconds > 0
+            ? resolveDspRelativeCompensationSeconds(targetDurationSeconds, liveDspExitCompensationPercent)
+            : liveDspExitCompensationSeconds;
+        const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + exitCompensationSeconds);
         if (remaining <= handoffLeadSeconds) {
           startNextTrackFromTransition({ reason: 'near-end' }).catch((err) => {
             console.error('Не удалось переключиться с DSP transition (near-end)', err);
