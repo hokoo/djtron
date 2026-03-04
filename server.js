@@ -5,8 +5,6 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { pipeline } = require('stream');
-const { promisify } = require('util');
 const { version: appVersion } = require('./package.json');
 const { PlaybackCommandBus } = require('./lib/playback/commandBus');
 const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
@@ -19,9 +17,11 @@ const { DspJobManager } = require('./src/dsp/DspJobManager');
 const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
 const { UpdateService } = require('./src/update/UpdateService');
 const { LayoutStateService } = require('./src/layout/LayoutStateService');
-const { delay, isAudioFile } = require('./src/utils');
-const { getContentType, isInside, safeResolve, serveFile, serveAudioWithRange } = require('./src/static/serve');
-const { normalizeAudioRelativePath, stripFileExtension, sanitizeAudioAttributeText, extractAudioAttributes, buildAudioAttributeDisplayName } = require('./src/audio/metadata');
+const { isAudioFile } = require('./src/utils');
+const { getContentType, isInside, safeResolve, serveAudioWithRange, createPublicHandler } = require('./src/static/serve');
+const { normalizeAudioRelativePath } = require('./src/audio/metadata');
+const { isServerRequest, parseCookies, safeCompareStrings, resolveLocalNetworkIp } = require('./src/http/network');
+const { readJsonBody } = require('./src/http/body');
 
 const configManager = new ConfigManager({ appDir: __dirname });
 configManager.materialize();
@@ -63,14 +63,6 @@ const {
   DSP_TEMPO_FRAME_SAMPLES, DSP_TEMPO_HOP_SAMPLES,
 } = cfg;
 
-function parseBoundedNumberConfigValue(value, fallback, bounds = {}) {
-  return ConfigManager.parseBoundedNumberConfigValue(value, fallback, bounds);
-}
-
-function serializeVolumePresetPercentValues(values) {
-  return ConfigManager.serializeVolumePresetPercentValues(values);
-}
-
 let shuttingDown = false;
 // authSessions managed by AuthSessionManager (instantiated after helper functions are defined)
 // layoutSubscribers moved into LayoutStateService
@@ -90,7 +82,7 @@ const layoutService = new LayoutStateService({
     TRACK_TITLE_MODE_ATTRIBUTES,
     TRACK_TITLE_KEY_MAX_LENGTH,
   },
-  deps: { fs, path, buildAuthUsersPayload },
+  deps: { fs, path, buildAuthUsersPayload: (cid) => authSessionManager.buildAuthUsersPayload(cid) },
 });
 
 const livePlaybackCommandBus = new PlaybackCommandBus({
@@ -116,9 +108,9 @@ const playbackGateway = new PlaybackGateway({
   serializeState: (s) => layoutService.serializePlaybackState(s),
   buildPayload: (cid) => layoutService.buildPlaybackPayload(cid),
   broadcastUpdate: (cid) => layoutService.broadcastPlaybackUpdate(cid),
-  sanitizeCommand: sanitizePlaybackCommand,
+  sanitizeCommand: (cmd) => PlaybackGateway.sanitizePlaybackCommand(cmd, layoutService),
   sanitizeClientId: LayoutStateService.sanitizeClientId,
-  sanitizeSessionRole,
+  sanitizeSessionRole: (v) => AuthSessionManager.sanitizeSessionRole(v, ROLE_COHOST, ROLE_SLAVE),
   commandBus: livePlaybackCommandBus,
   ROLE_HOST,
 });
@@ -128,86 +120,19 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function normalizeIpAddress(ip) {
-  if (typeof ip !== 'string') return '';
-  let normalized = ip.trim().toLowerCase();
-  const zoneIndex = normalized.indexOf('%');
-  if (zoneIndex !== -1) {
-    normalized = normalized.slice(0, zoneIndex);
+function handleBodyError(res, err) {
+  if (err.message === 'BODY_TOO_LARGE') {
+    sendJson(res, 413, { error: 'Слишком большой запрос' });
+    return;
   }
-  if (normalized.startsWith('::ffff:')) {
-    normalized = normalized.slice(7);
+  if (err.message === 'INVALID_JSON') {
+    sendJson(res, 400, { error: 'Неверный формат JSON' });
+    return;
   }
-  return normalized;
+  sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
 }
 
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1']);
-
-function isLoopbackAddress(ip) {
-  return ip !== '' && LOOPBACK_ADDRESSES.has(ip);
-}
-
-function collectForwardedAddresses(req) {
-  const result = [];
-
-  const pushHeaderValues = (headerValue) => {
-    if (typeof headerValue === 'string') {
-      headerValue
-        .split(',')
-        .map((item) => normalizeIpAddress(item))
-        .filter(Boolean)
-        .forEach((item) => result.push(item));
-      return;
-    }
-
-    if (Array.isArray(headerValue)) {
-      headerValue.forEach((entry) => pushHeaderValues(entry));
-    }
-  };
-
-  pushHeaderValues(req.headers['x-forwarded-for']);
-  pushHeaderValues(req.headers['x-real-ip']);
-  return result;
-}
-
-function isServerRequest(req) {
-  const remoteAddress = normalizeIpAddress(req.socket && req.socket.remoteAddress);
-  if (!isLoopbackAddress(remoteAddress)) return false;
-
-  const forwardedAddresses = collectForwardedAddresses(req);
-  if (forwardedAddresses.some((address) => !isLoopbackAddress(address))) {
-    return false;
-  }
-
-  return true;
-}
-
-function parseCookies(req) {
-  const header = req.headers.cookie;
-  if (!header) return {};
-
-  return header.split(';').reduce((acc, chunk) => {
-    const [rawName, ...rawValueParts] = chunk.split('=');
-    const name = rawName ? rawName.trim() : '';
-    if (!name) return acc;
-
-    const value = rawValueParts.join('=').trim();
-    try {
-      acc[name] = decodeURIComponent(value);
-    } catch (err) {
-      acc[name] = value;
-    }
-    return acc;
-  }, {});
-}
-
-function safeCompareStrings(left, right) {
-  const leftBuffer = Buffer.from(String(left || ''), 'utf8');
-  const rightBuffer = Buffer.from(String(right || ''), 'utf8');
-
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
 
 // --- Auth Session Manager ---
 const authSessionManager = new AuthSessionManager({
@@ -220,196 +145,19 @@ const authSessionManager = new AuthSessionManager({
     ROLE_SLAVE,
     SESSIONS_STATE_PATH,
     SESSION_COOKIE_NAME,
+    USERS_DIR: USERS_DIR_RESOLVED,
   },
   deps: {
     crypto,
     fs,
-    isServerRequest,
+    path,
+    isServerRequest: (req) => isServerRequest(req, LOOPBACK_ADDRESSES),
     parseCookies,
-    onSessionsChanged: () => broadcastAuthUsersUpdate(),
+    safeCompareStrings,
+    isInside,
+    onSessionsChanged: () => layoutService.broadcastAuthUsersUpdate(),
   },
 });
-
-function sanitizeSessionRole(value) {
-  return AuthSessionManager.sanitizeSessionRole(value, ROLE_COHOST, ROLE_SLAVE);
-}
-
-function collectActiveAuthUsers() {
-  return authSessionManager.collectActiveAuthUsers();
-}
-
-function buildAuthUsersPayload(sourceClientId = null) {
-  return authSessionManager.buildAuthUsersPayload(sourceClientId);
-}
-
-function createSession(username) {
-  return authSessionManager.createSession(username);
-}
-
-function destroySession(token) {
-  return authSessionManager.destroySession(token);
-}
-
-
-function setSessionCookie(res, token) {
-  return authSessionManager.setSessionCookie(res, token);
-}
-
-function clearSessionCookie(res) {
-  return authSessionManager.clearSessionCookie(res);
-}
-
-function extractPasswordFromFile(content) {
-  if (typeof content !== 'string') return null;
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    return trimmed;
-  }
-  return null;
-}
-
-async function getUserPassword(username) {
-  const candidates = [`${username}.txt`, username];
-
-  for (const fileName of candidates) {
-    const fullPath = path.resolve(USERS_DIR_RESOLVED, fileName);
-    if (!isInside(USERS_DIR_RESOLVED, fullPath)) continue;
-
-    try {
-      const stat = await fs.promises.stat(fullPath);
-      if (!stat.isFile()) continue;
-      const raw = await fs.promises.readFile(fullPath, 'utf8');
-      return extractPasswordFromFile(raw);
-    } catch (err) {
-      if (err.code !== 'ENOENT') {
-        console.error('Failed to read user file', fullPath, err);
-      }
-    }
-  }
-
-  return null;
-}
-
-function normalizeUsername(value) {
-  if (typeof value !== 'string') return null;
-  const username = value.trim();
-  if (!USERNAME_PATTERN.test(username)) return null;
-  return username;
-}
-
-function readJsonBody(req, limitBytes = AUTH_BODY_LIMIT_BYTES) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
-    let done = false;
-
-    req.on('data', (chunk) => {
-      if (done) return;
-      total += chunk.length;
-      if (total > limitBytes) {
-        done = true;
-        req.resume();
-        reject(new Error('BODY_TOO_LARGE'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-
-    req.on('end', () => {
-      if (done) return;
-      done = true;
-      if (chunks.length === 0) {
-        resolve({});
-        return;
-      }
-
-      try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        resolve(parsed && typeof parsed === 'object' ? parsed : {});
-      } catch (err) {
-        reject(new Error('INVALID_JSON'));
-      }
-    });
-
-    req.on('error', (err) => {
-      if (done) return;
-      done = true;
-      reject(err);
-    });
-  });
-}
-
-function getAuthState(req) {
-  return authSessionManager.getAuthState(req);
-}
-
-function sanitizeManagedUserRole(value) {
-  return AuthSessionManager.sanitizeManagedUserRole(value, ROLE_COHOST, ROLE_SLAVE);
-}
-
-function setRoleForActiveUserSessions(username, role) {
-  return authSessionManager.setRoleForActiveUserSessions(username, role);
-}
-
-function disconnectActiveUserSessions(username) {
-  return authSessionManager.disconnectActiveUserSessions(username);
-}
-
-function sanitizePlaybackCommand(rawCommand) {
-  if (!rawCommand || typeof rawCommand !== 'object') return null;
-
-  const commandType = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
-  if (commandType === 'toggle-current') {
-    return { type: 'toggle-current' };
-  }
-
-  if (commandType === 'set-volume') {
-    const volume = layoutService.normalizeLiveVolumePreset(rawCommand.volume, null);
-    if (volume === null) return null;
-    return { type: 'set-volume', volume };
-  }
-
-  if (commandType === 'set-volume-presets-visible') {
-    return {
-      type: 'set-volume-presets-visible',
-      showVolumePresets: Boolean(rawCommand.showVolumePresets),
-    };
-  }
-
-  if (commandType === 'set-live-seek-enabled') {
-    return {
-      type: 'set-live-seek-enabled',
-      allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
-    };
-  }
-
-  if (commandType === 'seek-current') {
-    const positionRatio = LayoutStateService.normalizePlaybackSeekRatio(rawCommand.positionRatio);
-    if (positionRatio === null) return null;
-    return {
-      type: 'seek-current',
-      positionRatio,
-      finalize: Boolean(rawCommand.finalize),
-    };
-  }
-
-  if (commandType !== 'play-track') {
-    return null;
-  }
-
-  const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
-  if (!file) return null;
-
-  return {
-    type: 'play-track',
-    file,
-    basePath: '/audio',
-    playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistIndex),
-    playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistPosition),
-  };
-}
 
 const updateService = new UpdateService({
   config: {
@@ -536,17 +284,7 @@ async function handleApiDspTransitionsPost(req, res) {
   try {
     body = await readJsonBody(req, DSP_BODY_LIMIT_BYTES);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
@@ -672,7 +410,7 @@ function handleApiConfig(req, res) {
   const values = {
     port: PORT,
     allowContextMenu: ALLOW_CONTEXT_MENU,
-    volumePresets: serializeVolumePresetPercentValues(LIVE_VOLUME_PRESET_VALUES),
+    volumePresets: ConfigManager.serializeVolumePresetPercentValues(LIVE_VOLUME_PRESET_VALUES),
     dspEntryCompensationMs: LIVE_DSP_ENTRY_COMPENSATION_MS,
     dspExitCompensationMs: LIVE_DSP_EXIT_COMPENSATION_MS,
   };
@@ -712,122 +450,26 @@ function handleApiPlaybackGet(req, res) {
 }
 
 async function handleApiLayoutUpdate(req, res) {
-  const auth = req.auth;
   let body;
   try {
     body = await readJsonBody(req, LAYOUT_BODY_LIMIT_BYTES);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
-  const nextLayout = LayoutStateService.sanitizeLayout(body.layout);
-  if (!nextLayout) {
-    sendJson(res, 400, { error: 'Неверный формат плей-листов' });
-    return;
-  }
-
-  if (layoutService.isDeletingLivePlaybackPlaylist(nextLayout)) {
-    sendJson(res, 409, { error: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' });
-    return;
-  }
-
-  const nextPlaylistNames = layoutService.normalizePlaylistNames(body.playlistNames, nextLayout.length);
-  const nextPlaylistMeta = layoutService.normalizePlaylistMeta(
-    Array.isArray(body.playlistMeta) ? body.playlistMeta : layoutService.layoutState.playlistMeta,
-    nextLayout.length,
-  );
-  let nextDapConfig = auth.isServer
-    ? layoutService.sanitizeDapConfig(
-        body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : layoutService.layoutState.dapConfig,
-        nextLayout.length,
-        layoutService.layoutState.dapConfig,
-      )
-    : layoutService.sanitizeDapConfig(layoutService.layoutState.dapConfig, nextLayout.length, layoutService.layoutState.dapConfig);
-  if (!auth.isServer) {
-    const currentDapIndex = LayoutStateService.normalizePlaylistTrackIndex(layoutService.layoutState.dapConfig && layoutService.layoutState.dapConfig.playlistIndex);
-    const isCurrentDapEnabled = Boolean(layoutService.layoutState.dapConfig && layoutService.layoutState.dapConfig.enabled);
-    const removedPlaylistIndex = LayoutStateService.detectRemovedPlaylistIndex(layoutService.layoutState.layout, nextLayout);
-    if (currentDapIndex !== null && removedPlaylistIndex !== null) {
-      if (isCurrentDapEnabled && removedPlaylistIndex === currentDapIndex) {
-        sendJson(res, 409, { error: 'Нельзя удалить плей-лист, выбранный для DAP.' });
-        return;
-      }
-
-      if (removedPlaylistIndex < currentDapIndex) {
-        nextDapConfig = layoutService.sanitizeDapConfig(
-          {
-            ...layoutService.layoutState.dapConfig,
-            enabled: isCurrentDapEnabled,
-            playlistIndex: currentDapIndex - 1,
-          },
-          nextLayout.length,
-          layoutService.layoutState.dapConfig,
-        );
-      }
-    }
-  }
-  const nextPlaylistAutoplay = auth.isServer
-    ? layoutService.normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
-    : layoutService.normalizePlaylistAutoplayWithDap(layoutService.layoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
-  const nextPlaylistDsp = auth.isServer
-    ? LayoutStateService.normalizePlaylistDspFlags(
-        body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
-          ? body.playlistDsp
-          : layoutService.layoutState.playlistDsp,
-        nextPlaylistAutoplay,
-        nextLayout.length,
-      )
-    : LayoutStateService.normalizePlaylistDspFlags(layoutService.layoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
-  const nextTrackTitleModesByTrack = layoutService.sanitizeTrackTitleModesByTrack(
-    body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
-      ? body.trackTitleModesByTrack
-      : layoutService.layoutState.trackTitleModesByTrack,
-  );
-
-  const sourceClientId = LayoutStateService.sanitizeClientId(body.clientId);
-  const hasChanged =
-    JSON.stringify(nextLayout) !== JSON.stringify(layoutService.layoutState.layout) ||
-    JSON.stringify(nextPlaylistNames) !== JSON.stringify(layoutService.layoutState.playlistNames) ||
-    JSON.stringify(nextPlaylistMeta) !== JSON.stringify(layoutService.layoutState.playlistMeta) ||
-    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(layoutService.layoutState.playlistAutoplay) ||
-    JSON.stringify(nextPlaylistDsp) !== JSON.stringify(layoutService.layoutState.playlistDsp) ||
-    JSON.stringify(nextDapConfig) !== JSON.stringify(layoutService.layoutState.dapConfig) ||
-    JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(layoutService.layoutState.trackTitleModesByTrack);
-
-  if (hasChanged) {
-    layoutService.layoutState = {
-      layout: nextLayout,
-      playlistNames: nextPlaylistNames,
-      playlistMeta: nextPlaylistMeta,
-      playlistAutoplay: nextPlaylistAutoplay,
-      playlistDsp: nextPlaylistDsp,
-      dapConfig: nextDapConfig,
-      trackTitleModesByTrack: nextTrackTitleModesByTrack,
-      version: layoutService.layoutState.version + 1,
-      updatedAt: Date.now(),
-    };
-    layoutService.persistLayoutState(layoutService.layoutState);
-    layoutService.broadcastLayoutUpdate(sourceClientId);
-    dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
-      source: 'layout-update',
-      priority: 'normal',
-      force: false,
-      playlistDspFlags: layoutService.layoutState.playlistDsp,
-    });
-  }
-
-  sendJson(res, 200, layoutService.buildLayoutPayload(sourceClientId));
+  const result = layoutService.applyLayoutUpdate(body, {
+    isServer: req.auth.isServer,
+    onLayoutChanged: (state) => {
+      dspJobManager.scheduleFromLayout(state.layout, {
+        source: 'layout-update',
+        priority: 'normal',
+        force: false,
+        playlistDspFlags: state.playlistDsp,
+      });
+    },
+  });
+  sendJson(res, result.status, result.payload);
 }
 
 async function handleApiPlaybackUpdate(req, res) {
@@ -835,17 +477,7 @@ async function handleApiPlaybackUpdate(req, res) {
   try {
     body = await readJsonBody(req, PLAYBACK_BODY_LIMIT_BYTES);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
@@ -865,7 +497,7 @@ function handleApiLayoutStream(req, res) {
   layoutService.layoutSubscribers.add(res);
   LayoutStateService.sendSseEvent(res, 'layout', layoutService.buildLayoutPayload(null));
   LayoutStateService.sendSseEvent(res, 'playback', layoutService.buildPlaybackPayload(null));
-  LayoutStateService.sendSseEvent(res, 'auth-users', buildAuthUsersPayload(null));
+  LayoutStateService.sendSseEvent(res, 'auth-users', authSessionManager.buildAuthUsersPayload(null));
 
   req.on('close', () => {
     layoutService.layoutSubscribers.delete(res);
@@ -891,55 +523,28 @@ async function handleAuthLogin(req, res) {
   try {
     body = await readJsonBody(req);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
-  const username = normalizeUsername(body.username);
-  const password = typeof body.password === 'string' ? body.password : '';
-
-  if (!username || password.length === 0) {
-    sendJson(res, 400, { error: 'Укажите логин и пароль' });
+  const result = await authSessionManager.authenticateUser(body?.username, body?.password);
+  if (!result.success) {
+    sendJson(res, result.status, { error: result.error });
     return;
   }
-
-  try {
-    const expectedPassword = await getUserPassword(username);
-    const isValid = expectedPassword !== null && safeCompareStrings(expectedPassword, password);
-
-    if (!isValid) {
-      sendJson(res, 401, { error: 'Неверный логин или пароль' });
-      return;
-    }
-
-    const session = createSession(username);
-    setSessionCookie(res, session.token);
-    sendJson(res, 200, { authenticated: true, isServer: false, role: session.role, username });
-  } catch (err) {
-    console.error('Auth login failed', err);
-    sendJson(res, 500, { error: 'Ошибка авторизации' });
-  }
+  authSessionManager.setSessionCookie(res, result.token);
+  sendJson(res, 200, { authenticated: true, isServer: false, role: result.role, username: result.username });
 }
 
 function handleAuthLogout(req, res) {
   const cookies = parseCookies(req);
-  destroySession(cookies[SESSION_COOKIE_NAME]);
-  clearSessionCookie(res);
+  authSessionManager.destroySession(cookies[SESSION_COOKIE_NAME]);
+  authSessionManager.clearSessionCookie(res);
   sendJson(res, 200, { authenticated: false });
 }
 
 function handleAuthClientsGet(req, res) {
-  sendJson(res, 200, buildAuthUsersPayload(null));
+  sendJson(res, 200, authSessionManager.buildAuthUsersPayload(null));
 }
 
 async function handleAuthClientsRoleUpdate(req, res) {
@@ -947,28 +552,18 @@ async function handleAuthClientsRoleUpdate(req, res) {
   try {
     body = await readJsonBody(req);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
-  const username = normalizeUsername(body.username);
+  const username = AuthSessionManager.normalizeUsername(body.username, USERNAME_PATTERN);
   if (!username) {
     sendJson(res, 400, { error: 'Некорректный логин пользователя' });
     return;
   }
 
-  const nextRole = sanitizeManagedUserRole(body.role);
-  const result = setRoleForActiveUserSessions(username, nextRole);
+  const nextRole = AuthSessionManager.sanitizeManagedUserRole(body.role, ROLE_COHOST, ROLE_SLAVE);
+  const result = authSessionManager.setRoleForActiveUserSessions(username, nextRole);
 
   if (result.matchedSessions < 1) {
     sendJson(res, 404, { error: 'Пользователь не найден среди активных сессий' });
@@ -976,7 +571,7 @@ async function handleAuthClientsRoleUpdate(req, res) {
   }
 
   sendJson(res, 200, {
-    users: collectActiveAuthUsers(),
+    users: authSessionManager.collectActiveAuthUsers(),
     updated: {
       username,
       role: nextRole,
@@ -990,34 +585,24 @@ async function handleAuthClientsDisconnect(req, res) {
   try {
     body = await readJsonBody(req);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
-  const username = normalizeUsername(body.username);
+  const username = AuthSessionManager.normalizeUsername(body.username, USERNAME_PATTERN);
   if (!username) {
     sendJson(res, 400, { error: 'Некорректный логин пользователя' });
     return;
   }
 
-  const result = disconnectActiveUserSessions(username);
+  const result = authSessionManager.disconnectActiveUserSessions(username);
   if (result.removedSessions < 1) {
     sendJson(res, 404, { error: 'Пользователь не найден среди активных сессий' });
     return;
   }
 
   sendJson(res, 200, {
-    users: collectActiveAuthUsers(),
+    users: authSessionManager.collectActiveAuthUsers(),
     disconnected: {
       username,
       removedSessions: result.removedSessions,
@@ -1032,17 +617,7 @@ async function handleApiPlaybackCommand(req, res) {
   try {
     body = await readJsonBody(req, PLAYBACK_COMMAND_BODY_LIMIT_BYTES);
   } catch (err) {
-    if (err.message === 'BODY_TOO_LARGE') {
-      sendJson(res, 413, { error: 'Слишком большой запрос' });
-      return;
-    }
-
-    if (err.message === 'INVALID_JSON') {
-      sendJson(res, 400, { error: 'Неверный формат JSON' });
-      return;
-    }
-
-    sendJson(res, 400, { error: 'Не удалось прочитать запрос' });
+    handleBodyError(res, err);
     return;
   }
 
@@ -1107,18 +682,7 @@ function handleAudioFile(req, res, pathname, baseResolved, basePrefix) {
   serveAudioWithRange(req, res, filePath, getContentType(filePath));
 }
 
-function handlePublic(req, res, pathname) {
-  const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-  const filePath = safeResolve(PUBLIC_DIR_RESOLVED, requested);
-
-  if (!filePath) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
-  }
-
-  serveFile(req, res, filePath, getContentType(filePath));
-}
+const handlePublic = createPublicHandler({ publicDirResolved: PUBLIC_DIR_RESOLVED });
 
 
 // --- HttpRouter + AuthSessionManager wiring ---
@@ -1201,35 +765,9 @@ if (DSP_ENABLED) {
   });
 }
 
-function isPrivateIpv4Address(address) {
-  if (typeof address !== 'string') return false;
-  if (address.startsWith('10.') || address.startsWith('192.168.')) return true;
-  if (!address.startsWith('172.')) return false;
-  const secondOctet = Number.parseInt(address.split('.')[1], 10);
-  return Number.isInteger(secondOctet) && secondOctet >= 16 && secondOctet <= 31;
-}
-
-function resolveLocalNetworkIp() {
-  let privateFallbackAddress = null;
-  let fallbackAddress = null;
-  const interfaces = os.networkInterfaces();
-
-  for (const entries of Object.values(interfaces)) {
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (!entry || entry.family !== 'IPv4' || entry.internal || entry.address.startsWith('169.254.')) continue;
-      if (entry.address.startsWith('192.168.')) return entry.address;
-      if (!privateFallbackAddress && isPrivateIpv4Address(entry.address)) privateFallbackAddress = entry.address;
-      if (!fallbackAddress) fallbackAddress = entry.address;
-    }
-  }
-
-  return privateFallbackAddress || fallbackAddress;
-}
-
 server.listen(PORT, () => {
   console.log(`Server is running at http://localhost:${PORT}`);
-  const localNetworkIp = resolveLocalNetworkIp();
+  const localNetworkIp = resolveLocalNetworkIp(os);
   if (localNetworkIp) {
     console.log(`Local network URL for slaves: http://${localNetworkIp}:${PORT}`);
   } else {

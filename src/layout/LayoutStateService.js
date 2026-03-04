@@ -702,6 +702,108 @@ class LayoutStateService {
       }
     }
   }
+
+  /**
+   * Apply a layout update from the API handler.
+   * @param {object} body - parsed request body
+   * @param {object} options
+   * @param {boolean} options.isServer - whether request comes from server
+   * @param {function} [options.onLayoutChanged] - called with layoutState after a change is persisted
+   * @returns {{ status: number, payload: object }}
+   */
+  applyLayoutUpdate(body, { isServer, onLayoutChanged } = {}) {
+    const nextLayout = LayoutStateService.sanitizeLayout(body.layout);
+    if (!nextLayout) {
+      return { status: 400, payload: { error: 'Неверный формат плей-листов' } };
+    }
+
+    if (this.isDeletingLivePlaybackPlaylist(nextLayout)) {
+      return { status: 409, payload: { error: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' } };
+    }
+
+    const nextPlaylistNames = this.normalizePlaylistNames(body.playlistNames, nextLayout.length);
+    const nextPlaylistMeta = this.normalizePlaylistMeta(
+      Array.isArray(body.playlistMeta) ? body.playlistMeta : this._layoutState.playlistMeta,
+      nextLayout.length,
+    );
+    let nextDapConfig = isServer
+      ? this.sanitizeDapConfig(
+          body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : this._layoutState.dapConfig,
+          nextLayout.length,
+          this._layoutState.dapConfig,
+        )
+      : this.sanitizeDapConfig(this._layoutState.dapConfig, nextLayout.length, this._layoutState.dapConfig);
+    if (!isServer) {
+      const currentDapIndex = LayoutStateService.normalizePlaylistTrackIndex(this._layoutState.dapConfig && this._layoutState.dapConfig.playlistIndex);
+      const isCurrentDapEnabled = Boolean(this._layoutState.dapConfig && this._layoutState.dapConfig.enabled);
+      const removedPlaylistIndex = LayoutStateService.detectRemovedPlaylistIndex(this._layoutState.layout, nextLayout);
+      if (currentDapIndex !== null && removedPlaylistIndex !== null) {
+        if (isCurrentDapEnabled && removedPlaylistIndex === currentDapIndex) {
+          return { status: 409, payload: { error: 'Нельзя удалить плей-лист, выбранный для DAP.' } };
+        }
+
+        if (removedPlaylistIndex < currentDapIndex) {
+          nextDapConfig = this.sanitizeDapConfig(
+            {
+              ...this._layoutState.dapConfig,
+              enabled: isCurrentDapEnabled,
+              playlistIndex: currentDapIndex - 1,
+            },
+            nextLayout.length,
+            this._layoutState.dapConfig,
+          );
+        }
+      }
+    }
+    const nextPlaylistAutoplay = isServer
+      ? this.normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
+      : this.normalizePlaylistAutoplayWithDap(this._layoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
+    const nextPlaylistDsp = isServer
+      ? LayoutStateService.normalizePlaylistDspFlags(
+          body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
+            ? body.playlistDsp
+            : this._layoutState.playlistDsp,
+          nextPlaylistAutoplay,
+          nextLayout.length,
+        )
+      : LayoutStateService.normalizePlaylistDspFlags(this._layoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
+    const nextTrackTitleModesByTrack = this.sanitizeTrackTitleModesByTrack(
+      body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
+        ? body.trackTitleModesByTrack
+        : this._layoutState.trackTitleModesByTrack,
+    );
+
+    const sourceClientId = LayoutStateService.sanitizeClientId(body.clientId);
+    const hasChanged =
+      JSON.stringify(nextLayout) !== JSON.stringify(this._layoutState.layout) ||
+      JSON.stringify(nextPlaylistNames) !== JSON.stringify(this._layoutState.playlistNames) ||
+      JSON.stringify(nextPlaylistMeta) !== JSON.stringify(this._layoutState.playlistMeta) ||
+      JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(this._layoutState.playlistAutoplay) ||
+      JSON.stringify(nextPlaylistDsp) !== JSON.stringify(this._layoutState.playlistDsp) ||
+      JSON.stringify(nextDapConfig) !== JSON.stringify(this._layoutState.dapConfig) ||
+      JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(this._layoutState.trackTitleModesByTrack);
+
+    if (hasChanged) {
+      this._layoutState = {
+        layout: nextLayout,
+        playlistNames: nextPlaylistNames,
+        playlistMeta: nextPlaylistMeta,
+        playlistAutoplay: nextPlaylistAutoplay,
+        playlistDsp: nextPlaylistDsp,
+        dapConfig: nextDapConfig,
+        trackTitleModesByTrack: nextTrackTitleModesByTrack,
+        version: this._layoutState.version + 1,
+        updatedAt: Date.now(),
+      };
+      this.persistLayoutState(this._layoutState);
+      this.broadcastLayoutUpdate(sourceClientId);
+      if (typeof onLayoutChanged === 'function') {
+        onLayoutChanged(this._layoutState);
+      }
+    }
+
+    return { status: 200, payload: this.buildLayoutPayload(sourceClientId) };
+  }
 }
 
 module.exports = { LayoutStateService };

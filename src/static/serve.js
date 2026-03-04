@@ -127,10 +127,28 @@ function serveAudioWithRange(req, res, filePath, contentType) {
   });
 }
 
+function createPublicHandler(config) {
+  const { publicDirResolved } = config;
+
+  return function handlePublic(req, res, pathname) {
+    const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+    const filePath = safeResolve(publicDirResolved, requested);
+
+    if (!filePath) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    serveFile(req, res, filePath, getContentType(filePath));
+  };
+}
+
 module.exports = {
   getContentType,
   isInside,
   safeResolve,
   serveFile,
   serveAudioWithRange,
+  createPublicHandler,
 };
