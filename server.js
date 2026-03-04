@@ -10,32 +10,19 @@ const { promisify } = require('util');
 const { version: appVersion } = require('./package.json');
 const { PlaybackCommandBus } = require('./lib/playback/commandBus');
 const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
+const { HttpRouter } = require('./src/http/HttpRouter');
+const { AuthService } = require('./src/auth/AuthService');
+const { createAuthGuard } = require('./src/http/middlewares/auth');
+const { ConfigManager } = require('./src/config/ConfigManager');
+const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
+const { DspJobManager } = require('./src/dsp/DspJobManager');
+const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
+const { UpdateService } = require('./src/update/UpdateService');
+
+const configManager = new ConfigManager({ appDir: __dirname });
 
 function loadEnvFile() {
-  const envPath = path.join(__dirname, '.env');
-
-  if (!fs.existsSync(envPath)) return;
-
-  const content = fs.readFileSync(envPath, 'utf8');
-  content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .forEach((line) => {
-      if (!line || line.startsWith('#')) return;
-
-      const eqIndex = line.indexOf('=');
-      if (eqIndex === -1) return;
-
-      const key = line.slice(0, eqIndex).trim();
-      let value = line.slice(eqIndex + 1).trim();
-
-      if (key && process.env[key] === undefined) {
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-          value = value.slice(1, -1);
-        }
-        process.env[key] = value;
-      }
-    });
+  configManager.loadEnvFile();
 }
 
 const DEFAULT_PORT = 3000;
@@ -43,76 +30,19 @@ const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
 const ROOT_CONF_CANDIDATES = ['extra.conf'];
 
 function stripWrappingQuotes(value) {
-  if (typeof value !== 'string') return '';
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
+  return ConfigManager.stripWrappingQuotes(value);
 }
 
 function loadRootConfig() {
-  let confPath = null;
-  for (const candidate of ROOT_CONF_CANDIDATES) {
-    const absolutePath = path.join(__dirname, candidate);
-    if (fs.existsSync(absolutePath)) {
-      confPath = absolutePath;
-      break;
-    }
-  }
-
-  if (!confPath) return {};
-
-  try {
-    const content = fs.readFileSync(confPath, 'utf8');
-    const result = {};
-
-    content.split(/\r?\n/).forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) return;
-
-      const eqIndex = trimmed.indexOf('=');
-      const colonIndex = trimmed.indexOf(':');
-      const delimiterIndex =
-        eqIndex > 0 && colonIndex > 0 ? Math.min(eqIndex, colonIndex) : Math.max(eqIndex, colonIndex);
-
-      if (delimiterIndex <= 0) return;
-
-      const rawKey = trimmed.slice(0, delimiterIndex).trim().toLowerCase();
-      if (!rawKey) return;
-
-      const rawValue = trimmed.slice(delimiterIndex + 1).trim();
-      result[rawKey] = stripWrappingQuotes(rawValue);
-    });
-
-    return result;
-  } catch (err) {
-    console.error('Failed to read extra.conf file', err);
-    return {};
-  }
+  return configManager.loadRootConfig();
 }
 
 function pickConfigValue(config, keys) {
-  if (!config || typeof config !== 'object' || !Array.isArray(keys)) return undefined;
-  for (const key of keys) {
-    if (typeof key !== 'string') continue;
-    if (Object.prototype.hasOwnProperty.call(config, key)) {
-      return config[key];
-    }
-  }
-  return undefined;
+  return ConfigManager.pickConfigValue(config, keys);
 }
 
 function parseBooleanConfigValue(value, fallback = false) {
-  if (typeof value === 'boolean') return value;
-  if (value === null || value === undefined) return fallback;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return fallback;
-  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
-  return fallback;
+  return ConfigManager.parseBooleanConfigValue(value, fallback);
 }
 
 function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
@@ -188,33 +118,19 @@ function serializeVolumePresetPercentValues(values) {
 }
 
 function parsePortCandidate(value) {
-  if (value === null || value === undefined) return null;
-  const numeric = Number.parseInt(String(value).trim(), 10);
-  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 65535) return null;
-  return numeric;
+  return ConfigManager.parsePortCandidate(value);
 }
 
 function resolvePortValue(envValue, configValue, fallback = DEFAULT_PORT) {
-  const fromEnv = parsePortCandidate(envValue);
-  if (fromEnv !== null) return fromEnv;
-  const fromConfig = parsePortCandidate(configValue);
-  if (fromConfig !== null) return fromConfig;
-  return fallback;
+  return ConfigManager.resolvePortValue(envValue, configValue, fallback);
 }
 
-function parseBoundedNumberConfigValue(value, fallback, { min = null, max = null } = {}) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  if (Number.isFinite(min) && numeric < min) return fallback;
-  if (Number.isFinite(max) && numeric > max) return fallback;
-  return numeric;
+function parseBoundedNumberConfigValue(value, fallback, bounds = {}) {
+  return ConfigManager.parseBoundedNumberConfigValue(value, fallback, bounds);
 }
 
 function parseDspTransitionOutputFormat(value, fallback = 'wav') {
-  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (normalized === 'mp3') return 'mp3';
-  if (normalized === 'wav') return 'wav';
-  return fallback;
+  return ConfigManager.parseDspTransitionOutputFormat(value, fallback);
 }
 
 loadEnvFile();
@@ -1266,6 +1182,20 @@ let sharedLayoutState = loadPersistedLayoutState();
 let sharedPlaybackState = getDefaultPlaybackState();
 setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
 
+const playbackGateway = new PlaybackGateway({
+  getState: () => sharedPlaybackState,
+  setState: (next) => { sharedPlaybackState = next; },
+  sanitizeState: sanitizePlaybackState,
+  serializeState: serializePlaybackState,
+  buildPayload: buildPlaybackPayload,
+  broadcastUpdate: broadcastPlaybackUpdate,
+  sanitizeCommand: sanitizePlaybackCommand,
+  sanitizeClientId,
+  sanitizeSessionRole,
+  commandBus: livePlaybackCommandBus,
+  ROLE_HOST,
+});
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2091,6 +2021,18 @@ async function findExtractedRoot(tempDir) {
 async function copyReleaseContents(sourceDir, targetDir) {
   await fs.promises.cp(sourceDir, targetDir, { recursive: true, force: true });
 }
+
+const updateService = new UpdateService({
+  currentVersion: appVersion,
+  getLatestReleaseInfo,
+  compareVersions,
+  downloadFile,
+  extractTarball,
+  findExtractedRoot,
+  copyReleaseContents,
+  appDir: __dirname,
+  parseBooleanParam,
+});
 
 function safeResolve(baseDirResolved, requestPath) {
   // requestPath must be without leading slashes
@@ -4170,10 +4112,22 @@ function getDspTransitionByPair(fromFile, toFile, options = {}) {
   return { ok: true, error: null, item: existing, descriptor };
 }
 
+const dspJobManager = new DspJobManager({
+  enqueue: enqueueDspTransition,
+  getTransitionByPair: getDspTransitionByPair,
+  getQueueSummary: buildDspQueueSummary,
+  serializeTransition: serializeDspTransition,
+  getTransitions: () => dspTransitions.values(),
+  scheduleFromLayout: scheduleDspTransitionsFromLayout,
+  resolveOutputPath: resolveDspTransitionOutputPathById,
+  buildOutputUrl: buildDspTransitionOutputUrl,
+  ensureReady: ensureFfmpegAvailable,
+  enabled: DSP_ENABLED,
+  STATUS_READY: DSP_STATUS_READY,
+});
+
 async function handleApiDspTransitionsGet(req, res, requestUrl) {
-  if (DSP_ENABLED) {
-    await ensureFfmpegAvailable();
-  }
+  await dspJobManager.ensureReady();
 
   const fromFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('from') : null;
   const toFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('to') : null;
@@ -4187,7 +4141,7 @@ async function handleApiDspTransitionsGet(req, res, requestUrl) {
   }
 
   if (fromFile && toFile) {
-    const lookup = getDspTransitionByPair(fromFile, toFile, {});
+    const lookup = dspJobManager.getTransitionByPair(fromFile, toFile, {});
     if (!lookup.ok) {
       sendJson(res, 400, { error: lookup.error || 'Некорректный запрос transition.' });
       return;
@@ -4195,78 +4149,30 @@ async function handleApiDspTransitionsGet(req, res, requestUrl) {
 
     let inferredReadyTransition = null;
     if (!lookup.item && lookup.descriptor && fs.existsSync(lookup.descriptor.outputPath)) {
-      inferredReadyTransition = {
-        id: lookup.descriptor.id,
-        fromFile: lookup.descriptor.fromFile,
-        toFile: lookup.descriptor.toFile,
-        status: DSP_STATUS_READY,
-        transitionSeconds: lookup.descriptor.transitionSeconds,
-        sliceSeconds: lookup.descriptor.sliceSeconds,
-        attempts: 0,
-        error: null,
-        outputUrl: buildDspTransitionOutputUrl(lookup.descriptor.id),
-        outputFileName: lookup.descriptor.outputFileName,
-        outputSizeBytes: null,
-        sourceMtimeMs: null,
-        createdAt: null,
-        updatedAt: null,
-        lastRequestedAt: null,
-      };
+      inferredReadyTransition = dspJobManager.buildInferredReadyStub(lookup.descriptor);
     }
 
     const transition =
       lookup.item ||
       inferredReadyTransition ||
-      (lookup.descriptor
-        ? {
-            id: lookup.descriptor.id,
-            fromFile: lookup.descriptor.fromFile,
-            toFile: lookup.descriptor.toFile,
-            status: 'missing',
-            transitionSeconds: lookup.descriptor.transitionSeconds,
-            sliceSeconds: lookup.descriptor.sliceSeconds,
-            attempts: 0,
-            error: null,
-            outputUrl: null,
-            outputFileName: null,
-            outputSizeBytes: null,
-            sourceMtimeMs: null,
-            createdAt: null,
-            updatedAt: null,
-            lastRequestedAt: null,
-          }
-        : null);
+      (lookup.descriptor ? dspJobManager.buildMissingTransitionStub(lookup.descriptor) : null);
 
     sendJson(res, 200, {
-      transition: lookup.item ? serializeDspTransition(lookup.item) : transition,
-      queue: buildDspQueueSummary(),
+      transition: lookup.item ? dspJobManager.serializeTransition(lookup.item) : transition,
+      queue: dspJobManager.getQueueSummary(),
     });
     return;
   }
 
-  const transitions = Array.from(dspTransitions.values())
-    .sort((left, right) => {
-      const leftUpdated = Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
-      const rightUpdated = Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
-      return rightUpdated - leftUpdated;
-    })
-    .slice(0, limit)
-    .map((item) => serializeDspTransition(item))
-    .filter(Boolean);
-
+  const transitions = dspJobManager.listTransitions(limit);
   sendJson(res, 200, {
     transitions,
-    queue: buildDspQueueSummary(),
+    queue: dspJobManager.getQueueSummary(),
   });
 }
 
 async function handleApiDspTransitionsPost(req, res) {
-  const auth = getAuthState(req);
-  if (!auth.isServer) {
-    sendJson(res, 403, { error: 'Только хост может запускать DSP-подготовку.' });
-    return;
-  }
-  if (!DSP_ENABLED) {
+  if (!dspJobManager.enabled) {
     sendJson(res, 503, { error: 'DSP отключен в extra.conf (dsp_enabled=false).' });
     return;
   }
@@ -4289,114 +4195,38 @@ async function handleApiDspTransitionsPost(req, res) {
     return;
   }
 
-  const force = Boolean(body.force);
-  const transitionSeconds = body.transitionSeconds;
-  const sliceSeconds = body.sliceSeconds;
-  const priority = body.priority === 'high' ? 'high' : 'normal';
-  const sourceLabel = typeof body.source === 'string' && body.source.trim() ? body.source.trim().slice(0, 64) : 'api';
-  const requestTransitions = [];
+  const result = dspJobManager.enqueueBatch(body, {
+    layout: sharedLayoutState.layout,
+    playlistDsp: sharedLayoutState.playlistDsp,
+  });
 
-  if (typeof body.from === 'string' || typeof body.to === 'string') {
-    if (typeof body.from !== 'string' || typeof body.to !== 'string') {
-      sendJson(res, 400, { error: 'Для одиночного transition нужны оба поля: from и to.' });
-      return;
-    }
-    requestTransitions.push({ fromFile: body.from, toFile: body.to });
-  }
-
-  if (Array.isArray(body.transitions)) {
-    for (const entry of body.transitions) {
-      if (!entry || typeof entry !== 'object') continue;
-      if (typeof entry.from !== 'string' || typeof entry.to !== 'string') continue;
-      requestTransitions.push({ fromFile: entry.from, toFile: entry.to });
-      if (requestTransitions.length >= 2000) break;
-    }
-  }
-
-  const includeLayout = Boolean(body.fromLayout) || requestTransitions.length === 0;
-  if (includeLayout) {
-    const layoutTransitions = collectAdjacentLayoutTransitions(sharedLayoutState.layout, sharedLayoutState.playlistDsp);
-    layoutTransitions.forEach((entry) => requestTransitions.push(entry));
-  }
-
-  if (!requestTransitions.length) {
-    sendJson(res, 400, { error: 'Не переданы transition-пары для обработки.' });
+  if (result.error) {
+    sendJson(res, 400, { error: result.error });
     return;
   }
 
-  const dedupe = new Set();
-  const accepted = [];
-  requestTransitions.forEach((entry) => {
-    const fromFile = typeof entry.fromFile === 'string' ? entry.fromFile.trim() : '';
-    const toFile = typeof entry.toFile === 'string' ? entry.toFile.trim() : '';
-    if (!fromFile || !toFile) return;
-    const key = `${fromFile}\n${toFile}`;
-    if (dedupe.has(key)) return;
-    dedupe.add(key);
-    accepted.push({ fromFile, toFile });
-  });
-
-  let created = 0;
-  let enqueued = 0;
-  let failed = 0;
-  const transitions = [];
-
-  accepted.forEach((entry) => {
-    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
-      force,
-      transitionSeconds,
-      sliceSeconds,
-      source: sourceLabel,
-      priority,
-    });
-    if (!result.ok || !result.item) {
-      failed += 1;
-      return;
-    }
-    if (result.created) created += 1;
-    if (result.enqueued) enqueued += 1;
-    transitions.push(serializeDspTransition(result.item));
-  });
-
-  sendJson(res, 200, {
-    request: {
-      totalPairs: requestTransitions.length,
-      uniquePairs: accepted.length,
-      force,
-      priority,
-      source: sourceLabel,
-      fromLayout: includeLayout,
-    },
-    summary: {
-      created,
-      enqueued,
-      failed,
-    },
-    queue: buildDspQueueSummary(),
-    transitions: transitions.slice(0, 200),
-  });
+  sendJson(res, 200, result);
   appendDspLog('transition.request', {
-    source: sourceLabel,
-    force,
-    priority,
-    fromLayout: includeLayout,
-    totalPairs: requestTransitions.length,
-    uniquePairs: accepted.length,
-    created,
-    enqueued,
-    failed,
+    source: result.request.source,
+    force: result.request.force,
+    priority: result.request.priority,
+    fromLayout: result.request.fromLayout,
+    totalPairs: result.request.totalPairs,
+    uniquePairs: result.request.uniquePairs,
+    created: result.summary.created,
+    enqueued: result.summary.enqueued,
+    failed: result.summary.failed,
   });
 }
 
 function handleApiDspTransitionFile(req, res, pathname) {
-  const prefix = '/api/dsp/transitions/file/';
-  const id = pathname.startsWith(prefix) ? pathname.slice(prefix.length).trim() : '';
+  const id = req.params && req.params.id ? req.params.id.trim() : '';
   if (!/^[a-f0-9]{40}$/.test(id)) {
     sendJson(res, 400, { error: 'Некорректный transition id' });
     return;
   }
 
-  const filePath = resolveDspTransitionOutputPathById(id);
+  const filePath = dspJobManager.resolveOutputPath(id);
   if (!filePath) {
     sendJson(res, 403, { error: 'Forbidden' });
     return;
@@ -4788,9 +4618,20 @@ async function collectAudioCatalog() {
   };
 }
 
+const audioCatalog = new AudioCatalogService({
+  collectCatalog: collectAudioCatalog,
+  getAttributesCached: getAudioAttributesCached,
+  buildDisplayName: buildAudioAttributeDisplayName,
+  normalizePath: normalizeAudioRelativePath,
+  safeResolve: safeResolve,
+  isAudioFile: isAudioFile,
+  stripExtension: stripFileExtension,
+  audioDir: AUDIO_DIR_RESOLVED,
+});
+
 async function handleApiAudio(req, res) {
   try {
-    const catalog = await collectAudioCatalog();
+    const catalog = await audioCatalog.getCatalog();
     sendJson(res, 200, catalog);
   } catch (err) {
     console.error('Failed to read audio directory', err);
@@ -4805,19 +4646,19 @@ async function handleApiAudioAttributes(req, res, requestUrl) {
     return;
   }
 
-  const normalizedFile = normalizeAudioRelativePath(rawFile.trim());
+  const normalizedFile = audioCatalog.normalizePath(rawFile.trim());
   if (!normalizedFile) {
     sendJson(res, 400, { error: 'Неверное имя файла' });
     return;
   }
 
-  const absoluteFilePath = safeResolve(AUDIO_DIR_RESOLVED, normalizedFile);
+  const absoluteFilePath = audioCatalog.resolveAudioPath(normalizedFile);
   if (!absoluteFilePath) {
     sendJson(res, 400, { error: 'Неверный путь к файлу' });
     return;
   }
 
-  if (!isAudioFile(absoluteFilePath)) {
+  if (!audioCatalog.isAudioFile(absoluteFilePath)) {
     sendJson(res, 400, { error: 'Неверный тип файла' });
     return;
   }
@@ -4841,9 +4682,9 @@ async function handleApiAudioAttributes(req, res, requestUrl) {
   }
 
   try {
-    const attributes = await getAudioAttributesCached(normalizedFile, absoluteFilePath, fileStat);
-    const fallbackName = stripFileExtension(path.basename(normalizedFile));
-    const displayName = buildAudioAttributeDisplayName(attributes, fallbackName);
+    const attributes = await audioCatalog.getAttributes(normalizedFile, absoluteFilePath, fileStat);
+    const fallbackName = audioCatalog.stripExtension(path.basename(normalizedFile));
+    const displayName = audioCatalog.buildDisplayName(attributes, fallbackName);
 
     sendJson(res, 200, {
       file: normalizedFile,
@@ -4882,9 +4723,6 @@ function handleApiLayoutGet(req, res) {
 }
 
 function handleApiLayoutReset(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   sharedLayoutState = {
     ...getDefaultLayoutState(),
     version: sharedLayoutState.version + 1,
@@ -4893,7 +4731,7 @@ function handleApiLayoutReset(req, res) {
 
   persistLayoutState(sharedLayoutState);
   broadcastLayoutUpdate(null);
-  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
     source: 'layout-update',
     priority: 'normal',
     force: false,
@@ -4904,11 +4742,11 @@ function handleApiLayoutReset(req, res) {
 }
 
 function handleApiPlaybackGet(req, res) {
-  sendJson(res, 200, buildPlaybackPayload(null));
+  sendJson(res, 200, playbackGateway.getSnapshot(null));
 }
 
 async function handleApiLayoutUpdate(req, res) {
-  const auth = getAuthState(req);
+  const auth = req.auth;
   let body;
   try {
     body = await readJsonBody(req, LAYOUT_BODY_LIMIT_BYTES);
@@ -5015,7 +4853,7 @@ async function handleApiLayoutUpdate(req, res) {
     };
     persistLayoutState(sharedLayoutState);
     broadcastLayoutUpdate(sourceClientId);
-    scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+    dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
       source: 'layout-update',
       priority: 'normal',
       force: false,
@@ -5027,12 +4865,6 @@ async function handleApiLayoutUpdate(req, res) {
 }
 
 async function handleApiPlaybackUpdate(req, res) {
-  const auth = getAuthState(req);
-  if (!auth.isServer) {
-    sendJson(res, 403, { error: 'Только хост может обновлять состояние воспроизведения' });
-    return;
-  }
-
   let body;
   try {
     body = await readJsonBody(req, PLAYBACK_BODY_LIMIT_BYTES);
@@ -5051,16 +4883,8 @@ async function handleApiPlaybackUpdate(req, res) {
     return;
   }
 
-  const nextState = sanitizePlaybackState(body);
-  const sourceClientId = sanitizeClientId(body.clientId);
-  const hasChanged = serializePlaybackState(nextState) !== serializePlaybackState(sharedPlaybackState);
-
-  if (hasChanged) {
-    sharedPlaybackState = nextState;
-    broadcastPlaybackUpdate(sourceClientId);
-  }
-
-  sendJson(res, 200, buildPlaybackPayload(sourceClientId));
+  const result = playbackGateway.updateState(body);
+  sendJson(res, 200, result.payload);
 }
 
 function handleApiLayoutStream(req, res) {
@@ -5083,17 +4907,16 @@ function handleApiLayoutStream(req, res) {
 }
 
 function handleAuthSession(req, res) {
-  const auth = getAuthState(req);
   sendJson(res, 200, {
-    authenticated: auth.authenticated,
-    isServer: auth.isServer,
-    role: auth.role,
-    username: auth.username,
+    authenticated: req.auth.authenticated,
+    isServer: req.auth.isServer,
+    role: req.auth.role,
+    username: req.auth.username,
   });
 }
 
 async function handleAuthLogin(req, res) {
-  if (isServerRequest(req)) {
+  if (req.auth.isServer) {
     sendJson(res, 200, { authenticated: true, isServer: true, role: ROLE_HOST, username: 'server' });
     return;
   }
@@ -5150,16 +4973,10 @@ function handleAuthLogout(req, res) {
 }
 
 function handleAuthClientsGet(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   sendJson(res, 200, buildAuthUsersPayload(null));
 }
 
 async function handleAuthClientsRoleUpdate(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   let body;
   try {
     body = await readJsonBody(req);
@@ -5203,9 +5020,6 @@ async function handleAuthClientsRoleUpdate(req, res) {
 }
 
 async function handleAuthClientsDisconnect(req, res) {
-  const auth = requireHostRequest(req, res);
-  if (!auth) return;
-
   let body;
   try {
     body = await readJsonBody(req);
@@ -5246,12 +5060,7 @@ async function handleAuthClientsDisconnect(req, res) {
 }
 
 async function handleApiPlaybackCommand(req, res) {
-  const auth = getAuthState(req);
-  const canControlLivePlayback = Boolean(auth.isServer || auth.role === ROLE_COHOST);
-  if (!canControlLivePlayback) {
-    sendJson(res, 403, { error: 'Только хост или co-host может отправлять live-команды' });
-    return;
-  }
+  const auth = req.auth;
 
   let body;
   try {
@@ -5271,54 +5080,15 @@ async function handleApiPlaybackCommand(req, res) {
     return;
   }
 
-  const command = sanitizePlaybackCommand(body);
-  if (!command) {
-    sendJson(res, 400, { error: 'Некорректная команда воспроизведения' });
-    return;
-  }
-
-  const payload = {
-    ...command,
-    issuedAt: Date.now(),
-    sourceClientId: sanitizeClientId(body.clientId),
-    sourceRole: auth.isServer ? ROLE_HOST : sanitizeSessionRole(auth.role),
-    sourceUsername: auth.username,
-  };
-  const commandResult = await livePlaybackCommandBus.dispatch(
-    {
-      sourceRole: payload.sourceRole,
-      commandType: payload.type,
-      isServer: auth.isServer,
-    },
-    payload,
-  );
-  if (!commandResult.ok) {
-    sendJson(res, 403, { error: commandResult.message });
-    return;
-  }
-
-  sendJson(res, 200, {
-    ok: true,
-    command: payload,
-  });
+  const result = await playbackGateway.dispatchCommand(body, auth);
+  sendJson(res, result.status, result.ok ? result.payload : { error: result.error });
 }
 
 async function handleUpdateCheck(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const allowPrerelease = parseBooleanParam(url, 'allowPrerelease');
-    const { latestVersion, htmlUrl, isPrerelease, releaseName } = await getLatestReleaseInfo(appVersion, allowPrerelease);
-    const comparableLatest = latestVersion || null;
-    const hasUpdate = comparableLatest ? compareVersions(comparableLatest, appVersion) > 0 : false;
-
-    sendJson(res, 200, {
-      currentVersion: appVersion,
-      latestVersion: comparableLatest,
-      hasUpdate,
-      releaseUrl: htmlUrl || null,
-      isPrerelease: Boolean(isPrerelease),
-      releaseName: releaseName || null,
-    });
+    const result = await updateService.checkForUpdate(url);
+    sendJson(res, 200, result);
   } catch (err) {
     console.error('Update check failed', err);
     sendJson(res, 500, { error: 'Не удалось проверить наличие обновлений', details: err.message });
@@ -5326,43 +5096,13 @@ async function handleUpdateCheck(req, res) {
 }
 
 async function handleUpdateApply(req, res) {
-  if (updateInProgress) {
-    sendJson(res, 409, { message: 'Обновление уже выполняется' });
-    return;
-  }
-
-  updateInProgress = true;
-
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const allowPrerelease = parseBooleanParam(url, 'allowPrerelease');
-    const { latestVersion, tarballUrl } = await getLatestReleaseInfo(appVersion, allowPrerelease);
-    const comparableLatest = latestVersion || null;
-    const hasUpdate = comparableLatest ? compareVersions(comparableLatest, appVersion) > 0 : false;
-
-    if (!hasUpdate) {
-      sendJson(res, 200, { message: 'Установлена последняя версия приложения' });
-      return;
-    }
-
-    if (!tarballUrl) {
-      throw new Error('Не удалось найти архив релиза для загрузки');
-    }
-
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'djtron-update-'));
-    const archivePath = path.join(tempDir, 'release.tar.gz');
-
-    await downloadFile(tarballUrl, archivePath);
-    await extractTarball(archivePath, tempDir);
-    const extractedRoot = await findExtractedRoot(tempDir);
-    await copyReleaseContents(extractedRoot, __dirname);
-
-    sendJson(res, 200, { message: 'Обновление установлено. Приложение будет закрыто.' });
+    const { status, body } = await updateService.applyUpdate(url);
+    sendJson(res, status, body);
   } catch (err) {
     console.error('Update apply failed', err);
     sendJson(res, 500, { error: 'Не удалось выполнить обновление', details: err.message });
-  } finally {
-    updateInProgress = false;
   }
 }
 
@@ -5414,274 +5154,48 @@ function handlePublic(req, res, pathname) {
   serveFile(req, res, filePath, getContentType(filePath));
 }
 
+
+// --- HttpRouter + AuthService wiring (PR1) ---
+const authService = new AuthService({ getAuthStateFn: getAuthState });
+const authGuard = createAuthGuard(authService);
+const router = new HttpRouter({ authGuard });
+
+// Auth endpoints
+router.register('GET', '/api/auth/session', handleAuthSession, { auth: 'none' });
+router.register('POST', '/api/auth/login', handleAuthLogin, { auth: 'none' });
+router.register('POST', '/api/auth/logout', handleAuthLogout, { auth: 'none' });
+router.register('GET', '/api/auth/clients', handleAuthClientsGet, { auth: 'host' });
+router.register('POST', '/api/auth/clients/role', handleAuthClientsRoleUpdate, { auth: 'host' });
+router.register('POST', '/api/auth/clients/disconnect', handleAuthClientsDisconnect, { auth: 'host' });
+
+// Layout/playback endpoints
+router.register('GET', '/api/layout/stream', handleApiLayoutStream, { auth: 'session' });
+router.register('POST', '/api/layout/reset', handleApiLayoutReset, { auth: 'host' });
+router.register('GET', '/api/layout', handleApiLayoutGet, { auth: 'session' });
+router.register('POST', '/api/layout', handleApiLayoutUpdate, { auth: 'session' });
+router.register('GET', '/api/playback', handleApiPlaybackGet, { auth: 'session' });
+router.register('POST', '/api/playback', handleApiPlaybackUpdate, { auth: 'host' });
+router.register('POST', '/api/playback/command', handleApiPlaybackCommand, { auth: 'host|cohost' });
+router.register('POST', '/api/shutdown', handleShutdown, { auth: 'host' });
+
+// Catalog/DSP/config/update endpoints
+router.register('GET', '/api/audio', handleApiAudio, { auth: 'session' });
+router.register('GET', '/api/audio/attributes', (req, res) => handleApiAudioAttributes(req, res, req.parsedUrl), { auth: 'session' });
+router.register('GET', '/api/dsp/transitions', (req, res) => handleApiDspTransitionsGet(req, res, req.parsedUrl), { auth: 'session' });
+router.register('POST', '/api/dsp/transitions', handleApiDspTransitionsPost, { auth: 'host' });
+router.register('GET|HEAD', '/api/dsp/transitions/file/:id', (req, res) => handleApiDspTransitionFile(req, res, req.pathname), { auth: 'session' });
+router.register('GET', '/api/config', handleApiConfig, { auth: 'session' });
+router.register('GET', '/api/version', handleApiVersion, { auth: 'session' });
+router.register('GET', '/api/update/check', handleUpdateCheck, { auth: 'session' });
+router.register('POST', '/api/update/apply', handleUpdateApply, { auth: 'session' });
+
+// Wildcard routes (catch-alls, order matters: more specific first)
+router.register('GET|HEAD', '/api/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'session' });
+router.register('GET|HEAD', '/audio/*', (req, res) => handleAudioFile(req, res, req.pathname, AUDIO_DIR_RESOLVED, '/audio/'), { auth: 'session', authResponseKind: 'text' });
+router.register('GET|HEAD', '/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'none' });
+
 const server = http.createServer((req, res) => {
-  let pathname = '/';
-  let requestUrl = null;
-
-  try {
-    requestUrl = new URL(req.url, `http://${req.headers.host}`);
-    pathname = decodeURIComponent(requestUrl.pathname);
-  } catch (e) {
-    res.writeHead(400);
-    res.end('Bad Request');
-    return;
-  }
-
-  if (pathname === '/api/auth/session') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthSession(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/login') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthLogin(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/logout') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthLogout(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsGet(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients/role') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsRoleUpdate(req, res);
-    return;
-  }
-
-  if (pathname === '/api/auth/clients/disconnect') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAuthClientsDisconnect(req, res);
-    return;
-  }
-
-  if (pathname.startsWith('/api/')) {
-    const auth = requireAuthorizedRequest(req, res, 'json');
-    if (!auth) return;
-  }
-
-  if (pathname.startsWith('/audio/')) {
-    const auth = requireAuthorizedRequest(req, res, 'text');
-    if (!auth) return;
-  }
-
-  if (pathname === '/api/layout/stream') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiLayoutStream(req, res);
-    return;
-  }
-
-  if (pathname === '/api/layout/reset') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-
-    handleApiLayoutReset(req, res);
-    return;
-  }
-
-  if (pathname === '/api/layout') {
-    if (req.method === 'GET') {
-      handleApiLayoutGet(req, res);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiLayoutUpdate(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname === '/api/playback') {
-    if (req.method === 'GET') {
-      handleApiPlaybackGet(req, res);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiPlaybackUpdate(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname === '/api/playback/command') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiPlaybackCommand(req, res);
-    return;
-  }
-
-  if (pathname === '/api/shutdown') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-
-    const auth = getAuthState(req);
-    if (!auth.isServer) {
-      sendJson(res, 403, { error: 'Только хост может останавливать сервер' });
-      return;
-    }
-
-    handleShutdown(req, res);
-    return;
-  }
-
-  if (pathname === '/api/audio') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiAudio(req, res);
-    return;
-  }
-
-  if (pathname === '/api/audio/attributes') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiAudioAttributes(req, res, requestUrl);
-    return;
-  }
-
-  if (pathname === '/api/dsp/transitions') {
-    if (req.method === 'GET') {
-      handleApiDspTransitionsGet(req, res, requestUrl);
-      return;
-    }
-
-    if (req.method === 'POST') {
-      handleApiDspTransitionsPost(req, res);
-      return;
-    }
-
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  if (pathname.startsWith('/api/dsp/transitions/file/')) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiDspTransitionFile(req, res, pathname);
-    return;
-  }
-
-  if (pathname === '/api/config') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiConfig(req, res);
-    return;
-  }
-
-  if (pathname === '/api/version') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleApiVersion(req, res);
-    return;
-  }
-
-  if (pathname === '/api/update/check') {
-    if (req.method !== 'GET') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleUpdateCheck(req, res);
-    return;
-  }
-
-  if (pathname === '/api/update/apply') {
-    if (req.method !== 'POST') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleUpdateApply(req, res);
-    return;
-  }
-
-  if (pathname.startsWith('/audio/')) {
-    // Allow GET and HEAD for proper metadata fetching.
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405);
-      res.end('Method Not Allowed');
-      return;
-    }
-    handleAudioFile(req, res, pathname, AUDIO_DIR_RESOLVED, '/audio/');
-    return;
-  }
-
-  // Public files: allow GET and HEAD.
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405);
-    res.end('Method Not Allowed');
-    return;
-  }
-
-  handlePublic(req, res, pathname);
+  router.dispatch(req, res);
 });
 
 if (DSP_ENABLED) {
@@ -5716,7 +5230,7 @@ if (DSP_ENABLED) {
     noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
     tempoCacheItems: dspTempoCache.size,
   });
-  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
     source: 'startup',
     priority: 'normal',
     force: false,
