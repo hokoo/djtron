@@ -20,401 +20,52 @@ const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
 const { UpdateService } = require('./src/update/UpdateService');
 
 const configManager = new ConfigManager({ appDir: __dirname });
+configManager.materialize();
+const cfg = configManager.getAll();
 
-function loadEnvFile() {
-  configManager.loadEnvFile();
-}
-
-const DEFAULT_PORT = 3000;
-const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
-const ROOT_CONF_CANDIDATES = ['extra.conf'];
-
-function stripWrappingQuotes(value) {
-  return ConfigManager.stripWrappingQuotes(value);
-}
-
-function loadRootConfig() {
-  return configManager.loadRootConfig();
-}
-
-function pickConfigValue(config, keys) {
-  return ConfigManager.pickConfigValue(config, keys);
-}
-
-function parseBooleanConfigValue(value, fallback = false) {
-  return ConfigManager.parseBooleanConfigValue(value, fallback);
-}
-
-function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
-  const source = Array.isArray(values) ? values : [];
-  const normalized = [];
-  const seen = new Set();
-
-  for (const rawValue of source) {
-    const numericValue = Number(rawValue);
-    if (!Number.isFinite(numericValue)) continue;
-
-    let ratioValue = null;
-    if (numericValue > 0 && numericValue < 1) {
-      ratioValue = numericValue;
-    } else if (numericValue >= 1 && numericValue < 100) {
-      ratioValue = numericValue / 100;
-    }
-    if (!Number.isFinite(ratioValue)) continue;
-
-    const rounded = Math.round(ratioValue * 1000) / 1000;
-    if (rounded <= 0 || rounded >= 1) continue;
-    const dedupeKey = rounded.toFixed(3);
-    if (seen.has(dedupeKey)) continue;
-
-    seen.add(dedupeKey);
-    normalized.push(rounded);
-    if (normalized.length >= 8) break;
-  }
-
-  if (normalized.length) return normalized;
-  return Array.isArray(fallback) && fallback.length ? fallback.slice() : DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
-}
-
-function parseVolumePresetsConfigValue(value, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
-  if (Array.isArray(value)) {
-    return normalizeVolumePresetValues(value, fallback);
-  }
-
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return normalizeVolumePresetValues([value], fallback);
-  }
-
-  if (typeof value !== 'string') {
-    return normalizeVolumePresetValues([], fallback);
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return normalizeVolumePresetValues([], fallback);
-  }
-
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        return normalizeVolumePresetValues(parsed, fallback);
-      }
-    } catch (err) {
-      // fallback to token parsing
-    }
-  }
-
-  const tokens = trimmed.split(/[,\s;|]+/).filter(Boolean);
-  return normalizeVolumePresetValues(tokens, fallback);
-}
-
-function serializeVolumePresetPercentValues(values) {
-  const source = Array.isArray(values) && values.length ? values : DEFAULT_LIVE_VOLUME_PRESET_VALUES;
-  return source
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0 && value < 1)
-    .map((value) => Math.round(value * 1000) / 10);
-}
-
-function parsePortCandidate(value) {
-  return ConfigManager.parsePortCandidate(value);
-}
-
-function resolvePortValue(envValue, configValue, fallback = DEFAULT_PORT) {
-  return ConfigManager.resolvePortValue(envValue, configValue, fallback);
-}
+const {
+  PORT, AUDIO_DIR, PUBLIC_DIR, USERS_DIR,
+  AUDIO_DIR_RESOLVED, PUBLIC_DIR_RESOLVED, USERS_DIR_RESOLVED,
+  AUDIO_EXTENSIONS, REPO_OWNER, REPO_NAME, GITHUB_API_URL,
+  githubToken, UPDATE_CACHE_WINDOW_MS,
+  UPDATE_STATE_PATH, LAYOUT_STATE_PATH, SESSIONS_STATE_PATH,
+  DSP_CACHE_DIR, DSP_TRANSITIONS_DIR, DSP_LOG_PATH, DSP_TEMPO_CACHE_PATH,
+  DSP_STATUS_QUEUED, DSP_STATUS_PROCESSING, DSP_STATUS_READY, DSP_STATUS_FAILED,
+  SESSION_COOKIE_NAME, SESSION_TTL_MS,
+  AUTH_BODY_LIMIT_BYTES, LAYOUT_BODY_LIMIT_BYTES, PLAYBACK_BODY_LIMIT_BYTES,
+  PLAYBACK_COMMAND_BODY_LIMIT_BYTES, DSP_BODY_LIMIT_BYTES, AUDIO_TAG_SCAN_BYTES,
+  PLAYLIST_NAME_MAX_LENGTH, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_KEY_MAX_LENGTH,
+  USERNAME_PATTERN, SESSION_TOKEN_PATTERN,
+  ROLE_HOST, ROLE_SLAVE, ROLE_COHOST,
+  DAP_DEFAULT_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT,
+  DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME,
+  RUNTIME_OVERRIDE_SCOPE_NONE, RUNTIME_OVERRIDE_SCOPE_CLIENT, RUNTIME_OVERRIDE_SCOPE_HOST,
+  LIVE_VOLUME_PRESET_VALUES, ALLOW_CONTEXT_MENU, RUNTIME_CONFIG_SCHEMA,
+  DSP_ENABLED, DSP_FFMPEG_BINARY, DSP_FFPROBE_BINARY,
+  DSP_TRANSITION_OUTPUT_FORMAT, DSP_TRANSITION_OUTPUT_CODEC,
+  DSP_DEFAULT_TRANSITION_SECONDS, DSP_DEFAULT_SLICE_SECONDS,
+  DSP_JOB_TIMEOUT_MS, DSP_MAX_QUEUE_LENGTH, DSP_HISTORY_LIMIT,
+  DSP_PROBE_CACHE_MS, DSP_LOG_MAX_BYTES,
+  DSP_TEMPO_ALIGN_ENABLED, DSP_TEMPO_ANALYSIS_SECONDS, DSP_TEMPO_SAMPLE_RATE,
+  DSP_TEMPO_MIN_BPM, DSP_TEMPO_MAX_BPM, DSP_TEMPO_MAX_ADJUST_PERCENT,
+  DSP_TEMPO_MIN_RATIO, DSP_TEMPO_MAX_RATIO, DSP_TEMPO_MIN_DELTA_RATIO,
+  DSP_TEMPO_GLIDE_ENABLED, DSP_TEMPO_GLIDE_SEGMENTS, DSP_TEMPO_GLIDE_ANCHOR_SECONDS,
+  DSP_AGGRESSIVE_JOIN_ENABLED, DSP_JOIN_INTENSITY, DSP_JOIN_MIN_TRANSITION_SECONDS,
+  DSP_TRIM_SILENCE_ENABLED, DSP_TRIM_SILENCE_THRESHOLD_DB, DSP_TRIM_MIN_SILENCE_SECONDS,
+  DSP_TRIM_MAX_SECONDS, DSP_NO_GAP_GUARD_ENABLED, DSP_TRIM_GUARD_THRESHOLD_BOOST_DB,
+  DSP_NO_GAP_ENERGY_TRIM_ENABLED, DSP_NO_GAP_ENERGY_SAMPLE_RATE,
+  DSP_NO_GAP_ENERGY_FRAME_MS, DSP_NO_GAP_ENERGY_FLOOR_RATIO, DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
+  LIVE_DSP_ENTRY_COMPENSATION_MS, LIVE_DSP_EXIT_COMPENSATION_MS,
+  DSP_TEMPO_FRAME_SAMPLES, DSP_TEMPO_HOP_SAMPLES,
+} = cfg;
 
 function parseBoundedNumberConfigValue(value, fallback, bounds = {}) {
   return ConfigManager.parseBoundedNumberConfigValue(value, fallback, bounds);
 }
 
-function parseDspTransitionOutputFormat(value, fallback = 'wav') {
-  return ConfigManager.parseDspTransitionOutputFormat(value, fallback);
+function serializeVolumePresetPercentValues(values) {
+  return ConfigManager.serializeVolumePresetPercentValues(values);
 }
-
-loadEnvFile();
-const ROOT_CONFIG = loadRootConfig();
-
-const PORT = resolvePortValue(
-  process.env.PORT,
-  pickConfigValue(ROOT_CONFIG, ['port']),
-  DEFAULT_PORT,
-);
-const AUDIO_DIR = path.join(__dirname, 'audio');
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const USERS_DIR = path.join(__dirname, 'users');
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
-const REPO_OWNER = 'hokoo';
-const REPO_NAME = 'djtron';
-const GITHUB_API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}`;
-const ONE_HOUR_MS = 60 * 60 * 1000;
-const githubToken = process.env.GITHUB_TOKEN || null;
-const UPDATE_CACHE_WINDOW_MS = githubToken ? 0 : ONE_HOUR_MS;
-const UPDATE_STATE_PATH = path.join(__dirname, 'update-state.json');
-const LAYOUT_STATE_PATH = path.join(__dirname, 'layout-state.json');
-const SESSIONS_STATE_PATH = path.join(__dirname, 'sessions-state.json');
-const DSP_CACHE_DIR = path.join(__dirname, '.cache', 'dsp');
-const DSP_TRANSITIONS_DIR = path.join(DSP_CACHE_DIR, 'transitions');
-const DSP_LOG_PATH = path.join(__dirname, 'dsp.log');
-const DSP_TEMPO_CACHE_PATH = path.join(DSP_CACHE_DIR, 'tempo-cache.json');
-const DSP_STATUS_QUEUED = 'queued';
-const DSP_STATUS_PROCESSING = 'processing';
-const DSP_STATUS_READY = 'ready';
-const DSP_STATUS_FAILED = 'failed';
-
-const execFileAsync = promisify(execFile);
-const pipelineAsync = promisify(pipeline);
-
-const AUDIO_DIR_RESOLVED = path.resolve(AUDIO_DIR);
-const PUBLIC_DIR_RESOLVED = path.resolve(PUBLIC_DIR);
-const USERS_DIR_RESOLVED = path.resolve(USERS_DIR);
-const SESSION_COOKIE_NAME = 'chkg_session';
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const AUTH_BODY_LIMIT_BYTES = 8 * 1024;
-const LAYOUT_BODY_LIMIT_BYTES = 512 * 1024;
-const PLAYBACK_BODY_LIMIT_BYTES = 32 * 1024;
-const PLAYBACK_COMMAND_BODY_LIMIT_BYTES = 16 * 1024;
-const DSP_BODY_LIMIT_BYTES = 128 * 1024;
-const AUDIO_TAG_SCAN_BYTES = 256 * 1024;
-const PLAYLIST_NAME_MAX_LENGTH = 80;
-const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
-const TRACK_TITLE_KEY_MAX_LENGTH = 1024;
-const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
-const SESSION_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const ROLE_HOST = 'host';
-const ROLE_SLAVE = 'slave';
-const ROLE_COHOST = 'co-host';
-const DAP_DEFAULT_VOLUME_PERCENT = 5;
-const DAP_MIN_VOLUME_PERCENT = 0;
-const DAP_MAX_VOLUME_PERCENT = 100;
-const DEFAULT_DAP_CONFIG = Object.freeze({
-  enabled: false,
-  playlistIndex: null,
-  volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
-});
-const RUNTIME_OVERRIDE_SCOPE_NONE = 'none';
-const RUNTIME_OVERRIDE_SCOPE_CLIENT = 'client';
-const RUNTIME_OVERRIDE_SCOPE_HOST = 'host';
-const LIVE_VOLUME_PRESET_VALUES = parseVolumePresetsConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['volume_presets', 'live_volume_presets', 'presets']),
-  DEFAULT_LIVE_VOLUME_PRESET_VALUES,
-);
-const ALLOW_CONTEXT_MENU = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['allow_context_menu', 'context_menu']),
-  false,
-);
-const RUNTIME_CONFIG_SCHEMA = Object.freeze({
-  port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-  allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
-  volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
-  dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-  dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-});
-const DEFAULT_LIVE_VOLUME = 1;
-const DSP_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_enabled', 'dsp']),
-  true,
-);
-const DSP_FFMPEG_BINARY = stripWrappingQuotes(
-  String(pickConfigValue(ROOT_CONFIG, ['dsp_ffmpeg_path', 'ffmpeg_path']) || ''),
-) || 'ffmpeg';
-const DSP_FFPROBE_BINARY = stripWrappingQuotes(
-  String(pickConfigValue(ROOT_CONFIG, ['dsp_ffprobe_path', 'ffprobe_path']) || ''),
-) || 'ffprobe';
-const DSP_TRANSITION_OUTPUT_FORMAT = parseDspTransitionOutputFormat(
-  pickConfigValue(ROOT_CONFIG, ['dsp_transition_output_format', 'dsp_output_format', 'dsp_transition_format', 'dsp_format']),
-  'wav',
-);
-const DSP_TRANSITION_OUTPUT_CODEC = DSP_TRANSITION_OUTPUT_FORMAT === 'wav' ? 'pcm_s16le' : 'libmp3lame';
-const DSP_DEFAULT_TRANSITION_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_transition_seconds', 'transition_seconds']),
-  5,
-  { min: 0.2, max: 30 },
-);
-const DSP_DEFAULT_SLICE_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_slice_seconds', 'slice_seconds']),
-  15,
-  { min: 1, max: 120 },
-);
-const DSP_JOB_TIMEOUT_MS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_job_timeout_ms', 'job_timeout_ms']),
-  90 * 1000,
-  { min: 5 * 1000, max: 15 * 60 * 1000 },
-);
-const DSP_MAX_QUEUE_LENGTH = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_max_queue', 'max_queue']),
-    500,
-    { min: 10, max: 10_000 },
-  ),
-);
-const DSP_HISTORY_LIMIT = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_history_limit', 'history_limit']),
-    2000,
-    { min: 100, max: 50_000 },
-  ),
-);
-const DSP_PROBE_CACHE_MS = 60 * 1000;
-const DSP_LOG_MAX_BYTES = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_log_max_bytes', 'log_max_bytes']),
-    4 * 1024 * 1024,
-    { min: 256 * 1024, max: 64 * 1024 * 1024 },
-  ),
-);
-const DSP_TEMPO_ALIGN_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_align_enabled', 'dsp_tempo_align', 'tempo_align']),
-  true,
-);
-const DSP_TEMPO_ANALYSIS_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_analysis_seconds', 'tempo_analysis_seconds']),
-  90,
-  { min: 15, max: 240 },
-);
-const DSP_TEMPO_SAMPLE_RATE = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_sample_rate', 'tempo_sample_rate']),
-    11025,
-    { min: 4000, max: 48000 },
-  ),
-);
-const DSP_TEMPO_MIN_BPM = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_min_bpm', 'tempo_min_bpm']),
-  70,
-  { min: 40, max: 220 },
-);
-const DSP_TEMPO_MAX_BPM = Math.max(
-  DSP_TEMPO_MIN_BPM + 1,
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_max_bpm', 'tempo_max_bpm']),
-    170,
-    { min: 60, max: 260 },
-  ),
-);
-const DSP_TEMPO_MAX_ADJUST_PERCENT = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_max_adjust_percent', 'tempo_max_adjust_percent']),
-  12,
-  { min: 0, max: 40 },
-);
-const DSP_TEMPO_MIN_RATIO = Math.max(0.6, 1 - DSP_TEMPO_MAX_ADJUST_PERCENT / 100);
-const DSP_TEMPO_MAX_RATIO = Math.min(1.8, 1 + DSP_TEMPO_MAX_ADJUST_PERCENT / 100);
-const DSP_TEMPO_MIN_DELTA_RATIO = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_min_delta_ratio', 'tempo_min_delta_ratio']),
-  0.012,
-  { min: 0.001, max: 0.2 },
-);
-const DSP_TEMPO_GLIDE_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_enabled', 'dsp_tempo_glide', 'tempo_glide']),
-  true,
-);
-const DSP_TEMPO_GLIDE_SEGMENTS = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_segments', 'tempo_glide_segments']),
-    4,
-    { min: 2, max: 12 },
-  ),
-);
-const DSP_TEMPO_GLIDE_ANCHOR_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_tempo_glide_anchor_seconds', 'tempo_glide_anchor_seconds']),
-  0.22,
-  { min: 0, max: 2 },
-);
-const DSP_AGGRESSIVE_JOIN_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_aggressive_join', 'dsp_aggressive_join_enabled', 'aggressive_join']),
-  true,
-);
-const DSP_JOIN_INTENSITY = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_join_intensity', 'join_intensity']),
-  0.78,
-  { min: 0, max: 1 },
-);
-const DSP_JOIN_MIN_TRANSITION_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_join_min_transition_seconds', 'join_min_transition_seconds']),
-  0.3,
-  { min: 0.05, max: 10 },
-);
-const DSP_TRIM_SILENCE_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_trim_silence_enabled', 'trim_silence_enabled']),
-  true,
-);
-const DSP_TRIM_SILENCE_THRESHOLD_DB = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_trim_silence_db', 'trim_silence_db']),
-  -36,
-  { min: -90, max: -8 },
-);
-const DSP_TRIM_MIN_SILENCE_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_trim_min_silence_seconds', 'trim_min_silence_seconds']),
-  0.14,
-  { min: 0.02, max: 3 },
-);
-const DSP_TRIM_MAX_SECONDS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_trim_max_seconds', 'trim_max_seconds']),
-  4.8,
-  { min: 0, max: 20 },
-);
-const DSP_NO_GAP_GUARD_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_guard', 'dsp_trim_no_gap_guard', 'trim_no_gap_guard']),
-  true,
-);
-const DSP_TRIM_GUARD_THRESHOLD_BOOST_DB = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_trim_guard_threshold_boost_db', 'trim_guard_threshold_boost_db']),
-  10,
-  { min: 0, max: 30 },
-);
-const DSP_NO_GAP_ENERGY_TRIM_ENABLED = parseBooleanConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_trim', 'dsp_trim_energy_guard', 'trim_energy_guard']),
-  true,
-);
-const DSP_NO_GAP_ENERGY_SAMPLE_RATE = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_sample_rate', 'trim_energy_sample_rate']),
-    12000,
-    { min: 4000, max: 48000 },
-  ),
-);
-const DSP_NO_GAP_ENERGY_FRAME_MS = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_frame_ms', 'trim_energy_frame_ms']),
-  20,
-  { min: 5, max: 100 },
-);
-const DSP_NO_GAP_ENERGY_FLOOR_RATIO = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_floor_ratio', 'trim_energy_floor_ratio']),
-  0.18,
-  { min: 0.03, max: 0.9 },
-);
-const DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER = parseBoundedNumberConfigValue(
-  pickConfigValue(ROOT_CONFIG, ['dsp_no_gap_energy_mean_multiplier', 'trim_energy_mean_multiplier']),
-  1.7,
-  { min: 1, max: 6 },
-);
-const LIVE_DSP_ENTRY_COMPENSATION_MS = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, [
-      'dsp_live_entry_compensation_ms',
-      'dsp_entry_compensation_ms',
-      'live_dsp_entry_compensation_ms',
-      'entry_compensation_ms',
-    ]),
-    22,
-    { min: 0, max: 250 },
-  ),
-);
-const LIVE_DSP_EXIT_COMPENSATION_MS = Math.trunc(
-  parseBoundedNumberConfigValue(
-    pickConfigValue(ROOT_CONFIG, [
-      'dsp_live_exit_compensation_ms',
-      'dsp_exit_compensation_ms',
-      'live_dsp_exit_compensation_ms',
-      'exit_compensation_ms',
-    ]),
-    19,
-    { min: 0, max: 250 },
-  ),
-);
-const DSP_TEMPO_FRAME_SAMPLES = 1024;
-const DSP_TEMPO_HOP_SAMPLES = 512;
 
 let shuttingDown = false;
 let updateInProgress = false;
