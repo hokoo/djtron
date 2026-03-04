@@ -1,0 +1,17 @@
+'use strict';
+
+const DSP_STATUS_QUEUED = 'queued';
+const DSP_STATUS_PROCESSING = 'processing';
+const DSP_STATUS_READY = 'ready';
+const DSP_STATUS_FAILED = 'failed';
+const DSP_TEMPO_FRAME_SAMPLES = 1024;
+const DSP_TEMPO_HOP_SAMPLES = 512;
+
+module.exports = {
+  DSP_STATUS_QUEUED,
+  DSP_STATUS_PROCESSING,
+  DSP_STATUS_READY,
+  DSP_STATUS_FAILED,
+  DSP_TEMPO_FRAME_SAMPLES,
+  DSP_TEMPO_HOP_SAMPLES,
+};
