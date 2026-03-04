@@ -56,6 +56,33 @@ import { setAudioDeps, isOverlayEnabled, isStopFadeEnabled, getOverlaySeconds, g
   resetFadeState, fadeOutAndStop, fadeOutAndPause, pauseCurrentPlayback,
   shouldTriggerAutoplayOverlayTransition, maybeTriggerAutoplayOverlayTransition,
   createAudio, applyOverlay, handlePlay } from './modules/audio.js';
+import { setStatusDeps, setStatus, announcePlaybackAction, showCollapsedPlaylistsHint,
+  hideCollapsedPlaylistsOverlay, showCollapsedPlaylistsOverlay,
+  removeCollapsedPlaylistsHint } from './modules/ui/status.js';
+import { setSettingsDeps, updateTransitionSettingsUi, initSettings,
+  setSidebarOpen, initSidebarToggle } from './modules/ui/settings.js';
+import { setAuthDeps, setAuthOverlayVisible, setAuthError, fetchSessionInfo, login,
+  normalizeRole, applyRoleUi, updateCurrentUser, ensureAuthorizedUser,
+  recoverFromRemoteSessionTermination, normalizeAuthUsersPayload, applyIncomingAuthUsers,
+  renderCohostUsers, fetchAuthUsersForHost, updateCoHostRole, disconnectClientSessions,
+  stopServer, logoutClient, initServerControls } from './modules/ui/auth.js';
+import { setDspDeps, setDspSetupStatus, updateDspSetupUi, parseDspStatusPayload,
+  refreshDspStatus, initDspSetupPanel, syncLiveDspNextTrackHighlight,
+  syncDspTransitionTrackHighlight } from './modules/ui/dsp.js';
+import { setUpdaterDeps, updatePrereleaseSettingUi, showUpdateBlock, resetUpdateUi,
+  setUpdateMessage, setUpdateStatus, startShutdownCountdown, checkForUpdates,
+  applyUpdate, loadVersion, initUpdater } from './modules/ui/updater.js';
+import { setNowPlayingDeps, syncHostNowPlayingPanel, syncDapNowPlayingPanel,
+  syncNowPlayingPanelForCoHost, syncNowPlayingPanel, syncHostTrackHighlight,
+  updateLiveSeekUi, startHostProgressLoop, stopHostProgressLoop,
+  startCoHostProgressLoop, stopCoHostProgressLoop, cleanupNowPlayingSeekInteraction,
+  setLiveSeekEnabled, initLiveSeekControls, initNowPlayingControls } from './modules/ui/nowplaying.js';
+import { setDapDeps, updateDapSettingsUi, isDapEnabled, isDapTrackContext,
+  startDapNoSilenceGuard, stopDapNoSilenceGuard,
+  initDapSettingsControls } from './modules/ui/dap.js';
+import { setVolumeDeps, rebuildVolumePresetButtons, updateVolumePresetsUi,
+  onVolumePresetButtonClick, setShowVolumePresetsEnabled,
+  initVolumePresetControls } from './modules/ui/volume.js';
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
@@ -132,29 +159,6 @@ const dapNowPlayingReelEl = document.getElementById('dapNowPlayingReel');
 
 const clientId = getClientId();
 
-function rebuildVolumePresetButtons() {
-  if (!localVolumePresetsEl) {
-    localVolumePresetButtons = [];
-    state.volumePresetButtonsSignature = '';
-    return;
-  }
-
-  state.volumePresetButtonsSignature = '';
-  updateVolumePresetsUi();
-}
-
-function updateTransitionSettingsUi() {
-  if (overlayTimeInput) {
-    overlayTimeInput.disabled = !isOverlayEnabled();
-  }
-  if (stopFadeInput) {
-    stopFadeInput.disabled = !isStopFadeEnabled();
-  }
-}
-
-function setShowVolumePresetsEnabled(
-  enabled,
-  { persist = false, sync = false, announce = false } = {},
 ) {
   let normalized = Boolean(enabled);
   if (!normalized && !canDisableVolumePresetsSetting()) {
@@ -184,137 +188,9 @@ function setShowVolumePresetsEnabled(
   return changed;
 }
 
-function updateLiveSeekUi() {
-  const isHost = isHostRole();
-  if (liveSeekToggleRow) {
-    liveSeekToggleRow.style.display = isHost ? 'flex' : 'none';
-  }
-
-  if (liveSeekEnabledToggle) {
-    liveSeekEnabledToggle.checked = state.liveSeekEnabled;
-    liveSeekEnabledToggle.disabled = !isHost;
-  }
-
-  if (nowPlayingControlBtn) {
-    const canTouchSeek =
-      isSlaveRole() ||
-      ((isHostRole() || isCoHostRole()) && state.liveSeekEnabled);
-    nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
-  }
-}
-
 function getPlaylistDisplayLabel(playlistIndex) {
   const safeIndex = Number.isInteger(playlistIndex) && playlistIndex >= 0 ? playlistIndex : 0;
   return sanitizePlaylistName(state.playlistNames[safeIndex], safeIndex);
-}
-
-function updateDapSettingsUi(role = state.currentRole) {
-  const isHost = isHostRole(role);
-  const isHostOrCoHost = isHost || isCoHostRole(role);
-  const normalizedLayout = ensurePlaylists(state.layout);
-  const normalizedDap = normalizeDapConfig(state.dapConfig, normalizedLayout.length, state.dapConfig);
-  state.dapConfig = normalizedDap;
-  updateDapNowPlayingVisibility(role);
-
-  if (dapSettingsPanelEl) {
-    dapSettingsPanelEl.hidden = !isHostOrCoHost;
-  }
-
-  if (dapPlaylistSelect) {
-    const selectedValue = normalizedDap.playlistIndex !== null
-      ? String(normalizedDap.playlistIndex)
-      : '';
-    const previousValue = dapPlaylistSelect.value;
-    dapPlaylistSelect.innerHTML = '';
-
-    const emptyOption = document.createElement('option');
-    emptyOption.value = '';
-    emptyOption.textContent = 'Выберите плей-лист';
-    dapPlaylistSelect.appendChild(emptyOption);
-
-    for (let index = 0; index < normalizedLayout.length; index += 1) {
-      const option = document.createElement('option');
-      option.value = String(index);
-      option.textContent = `${index + 1}. ${getPlaylistDisplayLabel(index)}`;
-      dapPlaylistSelect.appendChild(option);
-    }
-
-    dapPlaylistSelect.value = selectedValue;
-    if (dapPlaylistSelect.value !== selectedValue) {
-      dapPlaylistSelect.value = '';
-    }
-    if (previousValue && !selectedValue && !dapPlaylistSelect.value) {
-      dapPlaylistSelect.value = '';
-    }
-
-    dapPlaylistSelect.disabled = !isHost || !normalizedDap.enabled || normalizedLayout.length <= 0;
-  }
-
-  if (dapEnabledToggle) {
-    dapEnabledToggle.checked = normalizedDap.enabled;
-    dapEnabledToggle.disabled = !isHost || normalizedLayout.length <= 0;
-  }
-
-  if (dapVolumePercentInput) {
-    dapVolumePercentInput.value = String(normalizedDap.volumePercent);
-    dapVolumePercentInput.disabled = !isHost || !normalizedDap.enabled;
-  }
-}
-
-function updatePrereleaseSettingUi(role = state.currentRole) {
-  const isHost = isHostRole(role);
-  if (allowPrereleaseRow) {
-    allowPrereleaseRow.style.display = isHost ? 'flex' : 'none';
-  }
-  if (allowPrereleaseInput) {
-    allowPrereleaseInput.disabled = !isHost;
-  }
-  if (!isHost) {
-    showUpdateBlock(false);
-  }
-}
-
-function setDspSetupStatus(message) {
-  if (!dspSetupStatusEl) return;
-  dspSetupStatusEl.textContent = message || '';
-}
-
-function updateDspSetupUi(role = state.currentRole) {
-  if (!dspSetupPanelEl) return;
-
-  const isHost = isHostRole(role);
-  if (!isHost) {
-    dspSetupPanelEl.hidden = true;
-    return;
-  }
-
-  const enabled = state.dspStatusState.enabled;
-  const available = state.dspStatusState.ffmpegAvailable;
-  const installCommand =
-    typeof state.dspStatusState.wingetCommand === 'string' && state.dspStatusState.wingetCommand.trim()
-      ? state.dspStatusState.wingetCommand.trim()
-      : DEFAULT_DSP_WINGET_COMMAND;
-
-  if (dspInstallCommandEl) {
-    dspInstallCommandEl.textContent = installCommand;
-  }
-
-  const shouldShowPanel = enabled !== false && available !== true;
-  dspSetupPanelEl.hidden = !shouldShowPanel;
-  if (!shouldShowPanel) return;
-
-  if (available === false) {
-    const details = state.dspStatusState.ffmpegError ? ` (${state.dspStatusState.ffmpegError})` : '';
-    setDspSetupStatus(`ffmpeg не найден${details}`);
-    return;
-  }
-
-  if (state.dspStatusState.ffmpegError) {
-    setDspSetupStatus(`Не удалось проверить ffmpeg: ${state.dspStatusState.ffmpegError}`);
-    return;
-  }
-
-  setDspSetupStatus('Проверяем доступность ffmpeg...');
 }
 
 async function copyTextToClipboard(text) {
@@ -348,104 +224,6 @@ async function copyTextToClipboard(text) {
   return true;
 }
 
-function parseDspStatusPayload(data) {
-  const payload = data && typeof data === 'object' ? data : {};
-  const queue = payload.queue && typeof payload.queue === 'object' ? payload.queue : null;
-  if (!queue) {
-    throw new Error('Некорректный ответ DSP API');
-  }
-
-  state.dspStatusState.enabled = Boolean(queue.enabled);
-  state.dspStatusState.ffmpegAvailable = typeof queue.ffmpegAvailable === 'boolean' ? queue.ffmpegAvailable : null;
-  state.dspStatusState.ffmpegError =
-    typeof queue.ffmpegError === 'string' && queue.ffmpegError.trim() ? queue.ffmpegError.trim() : null;
-  state.dspStatusState.wingetCommand =
-    typeof queue.wingetCommand === 'string' && queue.wingetCommand.trim()
-      ? queue.wingetCommand.trim()
-      : DEFAULT_DSP_WINGET_COMMAND;
-  state.dspStatusState.checkedAt = Date.now();
-}
-
-async function refreshDspStatus({ announceError = false, userInitiated = false } = {}) {
-  if (!isHostRole()) return;
-  if (state.dspStatusRequestInFlight) return;
-
-  state.dspStatusRequestInFlight = true;
-  if (dspCheckInstallBtn) {
-    dspCheckInstallBtn.disabled = true;
-  }
-
-  if (userInitiated) {
-    setDspSetupStatus('Проверяем наличие ffmpeg...');
-  }
-
-  try {
-    const { ok: response_ok, data } = await api.fetchDspStatus(1);
-
-    if (!response_ok) {
-      const message = data && typeof data.error === 'string' && data.error ? data.error : 'Не удалось проверить DSP';
-      throw new Error(message);
-    }
-
-    parseDspStatusPayload(data);
-    updateDspSetupUi(state.currentRole);
-
-    if (userInitiated && state.dspStatusState.ffmpegAvailable === true) {
-      setStatus('ffmpeg найден. DSP готов.');
-    }
-  } catch (err) {
-    console.error('Не удалось проверить ffmpeg', err);
-    state.dspStatusState.enabled = true;
-    state.dspStatusState.ffmpegAvailable = null;
-    state.dspStatusState.ffmpegError = err && err.message ? err.message : 'Ошибка запроса';
-    state.dspStatusState.checkedAt = Date.now();
-    updateDspSetupUi(state.currentRole);
-
-    if (announceError || userInitiated) {
-      setStatus(state.dspStatusState.ffmpegError || 'Не удалось проверить ffmpeg.');
-    }
-  } finally {
-    state.dspStatusRequestInFlight = false;
-    if (dspCheckInstallBtn) {
-      dspCheckInstallBtn.disabled = !isHostRole();
-    }
-  }
-}
-
-function initDspSetupPanel() {
-  updateDspSetupUi(state.currentRole);
-
-  if (dspCopyInstallCommandBtn) {
-    dspCopyInstallCommandBtn.addEventListener('click', async () => {
-      const command =
-        typeof state.dspStatusState.wingetCommand === 'string' && state.dspStatusState.wingetCommand.trim()
-          ? state.dspStatusState.wingetCommand.trim()
-          : DEFAULT_DSP_WINGET_COMMAND;
-      try {
-        await copyTextToClipboard(command);
-        setDspSetupStatus('Команда скопирована. Вставьте ее в PowerShell или cmd.');
-        setStatus('Команда установки ffmpeg скопирована.');
-      } catch (err) {
-        console.error('Не удалось скопировать команду установки ffmpeg', err);
-        setDspSetupStatus('Не удалось скопировать автоматически. Скопируйте строку вручную.');
-      }
-    });
-  }
-
-  if (dspCheckInstallBtn) {
-    dspCheckInstallBtn.addEventListener('click', () => {
-      refreshDspStatus({ announceError: true, userInitiated: true });
-    });
-  }
-
-  if (isHostRole()) {
-    refreshDspStatus({ announceError: false, userInitiated: false });
-  }
-}
-
-function setLiveSeekEnabled(
-  enabled,
-  { persist = false, sync = false, announce = false } = {},
 ) {
   const normalized = Boolean(enabled);
   const changed = normalized !== state.liveSeekEnabled;
@@ -474,92 +252,6 @@ function setLiveSeekEnabled(
   }
 
   return changed;
-}
-
-function updateVolumePresetsUi() {
-  if (!localVolumePresetsEl) return;
-
-  const canManagePresets = isHostRole() || isCoHostRole();
-  if (showVolumePresetsToggleRow) {
-    showVolumePresetsToggleRow.style.display = canManagePresets ? 'flex' : 'none';
-  }
-
-  const dapPresetActive = isDapVolumePresetPlaybackActive();
-  const dapPresetVolume = getDapVolumePresetValue();
-  const basePresetSource =
-    Array.isArray(state.LIVE_VOLUME_PRESET_VALUES) && state.LIVE_VOLUME_PRESET_VALUES.length
-      ? LIVE_VOLUME_PRESET_VALUES
-      : DEFAULT_LIVE_VOLUME_PRESET_VALUES;
-  const basePresets = basePresetSource
-    .map((value) => normalizeLiveVolumePreset(value, null))
-    .filter((value, index, source) => Number.isFinite(value) && value > 0 && value < 1 && source.indexOf(value) === index);
-  const visibleBasePresets = dapPresetActive
-    ? basePresets.filter((presetValue) => !isVolumePresetMatch(presetValue, dapPresetVolume))
-    : basePresets.slice();
-  const visiblePresetItems = visibleBasePresets.map((presetValue) => ({
-    key: `base:${presetValue.toFixed(3)}`,
-    kind: 'base',
-    volume: presetValue,
-    label: formatVolumePresetLabel(presetValue),
-  }));
-  if (dapPresetActive) {
-    visiblePresetItems.push({
-      key: `dap:${dapPresetVolume.toFixed(3)}`,
-      kind: 'dap',
-      volume: dapPresetVolume,
-      label: formatVolumePresetLabel(dapPresetVolume),
-    });
-  }
-
-  const shouldShow = state.showVolumePresetsEnabled && canManagePresets;
-  localVolumePresetsEl.hidden = !shouldShow;
-  const activePreset = getActiveVolumePresetValue();
-  if (showVolumePresetsToggle) {
-    showVolumePresetsToggle.checked = state.showVolumePresetsEnabled;
-    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(state.showVolumePresetsEnabled && !canDisableVolumePresetsSetting());
-  }
-
-  const layoutSignature = visiblePresetItems.map((item) => item.key).join('|');
-  if (layoutSignature !== state.volumePresetButtonsSignature) {
-    localVolumePresetsEl.textContent = '';
-    localVolumePresetButtons = visiblePresetItems.map((item) => {
-      const button = document.createElement('button');
-      button.className = 'volume-presets__button';
-      button.type = 'button';
-      button.dataset.volume = String(item.volume);
-      button.dataset.presetKind = item.kind;
-      button.textContent = item.label;
-      button.addEventListener('click', onVolumePresetButtonClick);
-      localVolumePresetsEl.append(button);
-      return button;
-    });
-    state.volumePresetButtonsSignature = layoutSignature;
-  }
-
-  if (!localVolumePresetButtons.length) return;
-
-  for (const button of localVolumePresetButtons) {
-    const buttonVolume = normalizeLiveVolumePreset(button.dataset.volume, null);
-    const presetKind = button.dataset.presetKind === 'dap' ? 'dap' : 'base';
-    const isDapButton = presetKind === 'dap';
-    const isActive = isDapButton
-      ? dapPresetActive
-      : !dapPresetActive && buttonVolume !== null && activePreset !== null && isVolumePresetMatch(buttonVolume, activePreset);
-    const isLocked = dapPresetActive;
-
-    button.classList.toggle('is-dap', isDapButton);
-    button.classList.toggle('is-active', isActive);
-    button.classList.toggle('is-locked', isLocked);
-    button.disabled = isLocked;
-    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-    if (isDapButton) {
-      button.title = `DAP громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : dapPresetVolume)} (зафиксировано)`;
-    } else {
-      button.title = dapPresetActive
-        ? `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)} (временно недоступно)`
-        : `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)}`;
-    }
-  }
 }
 
 function cloneLayoutState(layoutState) {
@@ -2853,10 +2545,6 @@ const easing = (t, type) => {
   }
 };
 
-function setStatus(message) {
-  if (statusEl) statusEl.textContent = message;
-}
-
 function waitMs(ms) {
   const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
   return new Promise((resolve) => {
@@ -2894,47 +2582,6 @@ function isPlaylistCollapsedForLocalView(playlistIndex) {
   return state.collapsedPlaylistIndices.has(playlistIndex);
 }
 
-function removeCollapsedPlaylistsHint() {
-  if (state.collapsedPlaylistsHintTimer !== null) {
-    clearTimeout(state.collapsedPlaylistsHintTimer);
-    state.collapsedPlaylistsHintTimer = null;
-  }
-  if (state.collapsedPlaylistsHintEl) {
-    state.collapsedPlaylistsHintEl.remove();
-    state.collapsedPlaylistsHintEl = null;
-  }
-}
-
-function showCollapsedPlaylistsHint(message) {
-  if (typeof message !== 'string' || !message.trim()) return;
-  removeCollapsedPlaylistsHint();
-
-  const hintEl = document.createElement('div');
-  hintEl.className = 'collapsed-playlists-hint';
-  hintEl.textContent = message.trim();
-  document.body.appendChild(hintEl);
-  state.collapsedPlaylistsHintEl = hintEl;
-
-  requestAnimationFrame(() => {
-    if (!state.collapsedPlaylistsHintEl) return;
-    state.collapsedPlaylistsHintEl.classList.add('is-visible');
-  });
-
-  state.collapsedPlaylistsHintTimer = setTimeout(() => {
-    if (!state.collapsedPlaylistsHintEl) return;
-    state.collapsedPlaylistsHintEl.classList.remove('is-visible');
-    state.collapsedPlaylistsHintTimer = setTimeout(() => {
-      removeCollapsedPlaylistsHint();
-    }, 180);
-  }, COLLAPSED_PLAYLIST_HINT_DURATION_MS);
-}
-
-function hideCollapsedPlaylistsOverlay() {
-  if (!state.collapsedPlaylistsOverlayEl) return;
-  state.collapsedPlaylistsOverlayEl.remove();
-  state.collapsedPlaylistsOverlayEl = null;
-}
-
 function restoreCollapsedPlaylistForLocalView(playlistIndex) {
   if (!state.collapsedPlaylistIndices.has(playlistIndex)) return false;
   state.collapsedPlaylistIndices.delete(playlistIndex);
@@ -2953,51 +2600,6 @@ function collapsePlaylistForLocalView(playlistIndex) {
   const title = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
   showCollapsedPlaylistsHint(`Свернут: ${title}`);
   return true;
-}
-
-function showCollapsedPlaylistsOverlay() {
-  if (!isTouchPlaylistCollapseEnabled()) return;
-  const collapsedIndices = getCollapsedPlaylistIndicesInRenderOrder();
-  if (!collapsedIndices.length) {
-    hideCollapsedPlaylistsOverlay();
-    showCollapsedPlaylistsHint('Скрытых плей-листов нет.');
-    return;
-  }
-
-  hideCollapsedPlaylistsOverlay();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'collapsed-playlists-overlay';
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) {
-      hideCollapsedPlaylistsOverlay();
-    }
-  });
-
-  const panel = document.createElement('div');
-  panel.className = 'collapsed-playlists-panel';
-
-  const title = document.createElement('p');
-  title.className = 'collapsed-playlists-panel__title';
-  title.textContent = 'Скрытые плей-листы';
-  panel.appendChild(title);
-
-  collapsedIndices.forEach((playlistIndex) => {
-    const restoreButton = document.createElement('button');
-    restoreButton.type = 'button';
-    restoreButton.className = 'collapsed-playlists-panel__item';
-    restoreButton.textContent = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
-    restoreButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      restoreCollapsedPlaylistForLocalView(playlistIndex);
-    });
-    panel.appendChild(restoreButton);
-  });
-
-  overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  state.collapsedPlaylistsOverlayEl = overlay;
 }
 
 function isTouchFullscreenPreferredDevice() {
@@ -3083,421 +2685,6 @@ function initTouchFullscreenToggle() {
   document.addEventListener('fullscreenchange', updateTouchFullscreenToggleState);
   document.addEventListener('webkitfullscreenchange', updateTouchFullscreenToggleState);
   updateTouchFullscreenToggleState();
-}
-
-function setAuthOverlayVisible(visible) {
-  if (!authOverlay) return;
-  authOverlay.hidden = !visible;
-}
-
-function setAuthError(message) {
-  if (!authError) return;
-  authError.textContent = message || '';
-}
-
-async function fetchSessionInfo() {
-  const { ok, data } = await api.fetchAuthSession();
-  if (!ok) {
-    throw new Error('Не удалось проверить сессию');
-  }
-  return {
-    authenticated: Boolean(data && data.authenticated),
-    isServer: Boolean(data && data.isServer),
-    role: data && typeof data.role === 'string' ? data.role : null,
-    username: data && typeof data.username === 'string' ? data.username : null,
-  };
-}
-
-async function login(username, password) {
-  const { ok, data } = await api.postAuthLogin(username, password);
-  if (!ok) {
-    const error = data && typeof data.error === 'string' ? data.error : 'Ошибка авторизации';
-    throw new Error(error);
-  }
-
-  return {
-    authenticated: Boolean(data && data.authenticated),
-    isServer: Boolean(data && data.isServer),
-    role: data && typeof data.role === 'string' ? data.role : null,
-    username: data && typeof data.username === 'string' ? data.username : null,
-  };
-}
-
-function normalizeRole(info) {
-  if (info && info.role === ROLE_HOST) return ROLE_HOST;
-  if (info && info.role === ROLE_COHOST) return ROLE_COHOST;
-  if (info && info.role === ROLE_SLAVE) return ROLE_SLAVE;
-  if (info && info.isServer) return ROLE_HOST;
-  return ROLE_SLAVE;
-}
-
-function applyRoleUi(role) {
-  const resolvedRole = normalizeRole({ role });
-  const previousRole = state.currentRole;
-  state.currentRole = resolvedRole;
-  document.body.dataset.role = resolvedRole;
-  applyRuntimeConfigFromSources();
-
-  const isHost = isHostRole(resolvedRole);
-  const isCoHost = isCoHostRole(resolvedRole);
-
-  if (!isCoHost) {
-    stopCoHostProgressLoop();
-    clearQueuedCoHostSeekCommands();
-  }
-
-  if (serverPanelEl) {
-    serverPanelEl.hidden = !isHost;
-  }
-  if (clientSessionPanelEl) {
-    clientSessionPanelEl.hidden = isHost;
-  }
-  if (cohostPanelEl) {
-    cohostPanelEl.hidden = !isHost;
-  }
-
-  if (stopServerBtn) {
-    stopServerBtn.hidden = !isHost;
-    stopServerBtn.disabled = !isHost;
-  }
-  if (clientLogoutBtn) {
-    clientLogoutBtn.hidden = isHost;
-    clientLogoutBtn.disabled = isHost;
-  }
-
-  if (serverActionsHintEl) {
-    serverActionsHintEl.textContent = HOST_SERVER_HINT;
-  }
-
-  if (isCoHost && !isCoHostRole(previousRole)) {
-    stopAndClearLocalPlayback();
-  }
-
-  if (!isHost) {
-    if (isDspTransitionPlaybackActive()) {
-      stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
-    }
-    resetLiveDspNextTrackPreview();
-  }
-
-  if (isHost) {
-    stopHostProgressLoop();
-    requestHostPlaybackSync(true);
-  } else {
-    stopHostProgressLoop();
-    syncNowPlayingPanel();
-    syncHostNowPlayingPanel();
-  }
-
-  renderCohostUsers();
-  updateVolumePresetsUi();
-  updateLiveSeekUi();
-  updateDapSettingsUi(resolvedRole);
-  updateDapNowPlayingVisibility(resolvedRole);
-  updatePrereleaseSettingUi(resolvedRole);
-  updateDspSetupUi(resolvedRole);
-  renderZones();
-
-  if (isHost && (!isHostRole(previousRole) || state.dspStatusState.checkedAt <= 0)) {
-    refreshDspStatus({ announceError: false, userInitiated: false });
-  }
-}
-
-function updateCurrentUser(info) {
-  const username = info && typeof info.username === 'string' ? info.username : null;
-  state.currentUser = username;
-  applyRoleUi(normalizeRole(info));
-
-  if (isHostRole()) {
-    fetchAuthUsersForHost().catch((err) => {
-      console.error(err);
-      setStatus(err && err.message ? err.message : 'Не удалось загрузить список активных пользователей.');
-    });
-  }
-}
-
-async function ensureAuthorizedUser() {
-  let session;
-  try {
-    session = await fetchSessionInfo();
-  } catch (err) {
-    console.error(err);
-    setStatus('Не удалось проверить авторизацию.');
-    return false;
-  }
-
-  applyRoleUi(normalizeRole(session));
-
-  if (session.authenticated) {
-    updateCurrentUser(session);
-    setAuthOverlayVisible(false);
-    return true;
-  }
-
-  if (!authForm || !authUsernameInput || !authPasswordInput || !authSubmit) {
-    setStatus('Не удалось инициализировать форму входа.');
-    return false;
-  }
-
-  setAuthError('');
-  authPasswordInput.value = '';
-  setAuthOverlayVisible(true);
-  authUsernameInput.focus();
-
-  return new Promise((resolve) => {
-    const onSubmit = async (event) => {
-      event.preventDefault();
-      setAuthError('');
-      authSubmit.disabled = true;
-
-      const username = authUsernameInput.value.trim();
-      const password = authPasswordInput.value;
-
-      try {
-        const loginResult = await login(username, password);
-        if (!loginResult.authenticated) {
-          throw new Error('Не удалось создать сессию');
-        }
-
-        updateCurrentUser(loginResult);
-        setAuthOverlayVisible(false);
-        authForm.removeEventListener('submit', onSubmit);
-        resolve(true);
-      } catch (err) {
-        console.error(err);
-        setAuthError(err.message || 'Ошибка авторизации');
-        authSubmit.disabled = false;
-      } finally {
-        authPasswordInput.value = '';
-      }
-    };
-
-    authForm.addEventListener('submit', onSubmit);
-  });
-}
-
-function recoverFromRemoteSessionTermination(message = 'Сессия завершена. Войдите снова.') {
-  if (state.authRecoveryInProgress) return;
-  state.authRecoveryInProgress = true;
-
-  closeLayoutStream();
-  stopHostProgressLoop();
-  stopCoHostProgressLoop();
-  stopAndClearLocalPlayback();
-  state.currentUser = null;
-  state.authUsersState = [];
-  applyRoleUi(ROLE_SLAVE);
-  setStatus(message);
-
-  ensureAuthorizedUser()
-    .then((authorized) => {
-      if (!authorized) return;
-      connectLayoutStream();
-    })
-    .catch((err) => {
-      console.error(err);
-    })
-    .finally(() => {
-      state.authRecoveryInProgress = false;
-    });
-}
-
-function normalizeAuthUsersPayload(payload) {
-  const users = Array.isArray(payload && payload.users) ? payload.users : [];
-  return users
-    .map((entry) => {
-      if (!entry || typeof entry !== 'object') return null;
-      const username = typeof entry.username === 'string' ? entry.username.trim() : '';
-      if (!username) return null;
-      const role = entry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
-      const sessionCount = Number.isInteger(entry.sessionCount) && entry.sessionCount > 0 ? entry.sessionCount : 1;
-      return { username, role, sessionCount };
-    })
-    .filter(Boolean)
-    .sort((left, right) => left.username.localeCompare(right.username, 'ru'));
-}
-
-function applyIncomingAuthUsers(payload, { syncOwnRole = true } = {}) {
-  state.authUsersState = normalizeAuthUsersPayload(payload);
-  renderCohostUsers();
-
-  if (!syncOwnRole || !state.currentUser || isHostRole()) return;
-
-  const selfEntry = state.authUsersState.find((entry) => entry.username === state.currentUser);
-  if (!selfEntry) {
-    recoverFromRemoteSessionTermination('Хост завершил вашу сессию. Войдите снова.');
-    return;
-  }
-
-  const nextRole = selfEntry && selfEntry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
-  if (nextRole === state.currentRole) return;
-
-  applyRoleUi(nextRole);
-  setStatus(nextRole === ROLE_COHOST ? 'Вам назначена роль co-host.' : 'Роль co-host снята. Вы снова slave.');
-}
-
-function renderCohostUsers() {
-  if (!cohostUsersEl) return;
-
-  if (!isHostRole()) {
-    cohostUsersEl.innerHTML = '';
-    return;
-  }
-
-  cohostUsersEl.innerHTML = '';
-  if (!state.authUsersState.length) {
-    const empty = document.createElement('p');
-    empty.className = 'cohost-users__empty';
-    empty.textContent = 'Нет активных пользователей.';
-    cohostUsersEl.appendChild(empty);
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  state.authUsersState.forEach((entry) => {
-    const isRoleUpdatePending = state.cohostRoleUpdatesInFlight.has(entry.username);
-    const isDisconnectPending = state.cohostDisconnectUpdatesInFlight.has(entry.username);
-
-    const row = document.createElement('div');
-    row.className = 'cohost-user';
-    if (entry.role === ROLE_COHOST) {
-      row.classList.add('is-cohost');
-    }
-    if (isDisconnectPending) {
-      row.classList.add('is-disconnect-pending');
-    }
-
-    const identity = document.createElement('div');
-    identity.className = 'cohost-user__identity';
-
-    const name = document.createElement('span');
-    name.className = 'cohost-user__name';
-    name.textContent = entry.username;
-
-    const meta = document.createElement('span');
-    meta.className = 'cohost-user__meta';
-    meta.textContent = entry.sessionCount > 1 ? `Сессий: ${entry.sessionCount}` : '1 сессия';
-    identity.append(name, meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'cohost-user__actions';
-
-    const disconnectBtn = document.createElement('button');
-    disconnectBtn.type = 'button';
-    disconnectBtn.className = 'cohost-disconnect-btn';
-    disconnectBtn.title = 'Отключить все сессии пользователя';
-    disconnectBtn.setAttribute('aria-label', `Отключить пользователя ${entry.username}`);
-    disconnectBtn.disabled = isRoleUpdatePending || isDisconnectPending;
-    disconnectBtn.addEventListener('click', () => {
-      disconnectClientSessions(entry.username);
-    });
-
-    const toggle = document.createElement('input');
-    toggle.type = 'checkbox';
-    toggle.className = 'cohost-role-switch';
-    toggle.checked = entry.role === ROLE_COHOST;
-    toggle.disabled = isRoleUpdatePending || isDisconnectPending;
-    toggle.title = toggle.checked ? 'Снять роль co-host' : 'Назначить роль co-host';
-    toggle.setAttribute('aria-label', `Роль co-host для ${entry.username}`);
-    toggle.addEventListener('change', () => {
-      const nextRole = toggle.checked ? ROLE_COHOST : ROLE_SLAVE;
-      updateCoHostRole(entry.username, nextRole, toggle);
-    });
-
-    actions.append(disconnectBtn, toggle);
-    row.append(identity, actions);
-    fragment.appendChild(row);
-  });
-
-  cohostUsersEl.appendChild(fragment);
-}
-
-async function fetchAuthUsersForHost() {
-  if (!isHostRole()) return;
-
-  const { ok, data } = await api.fetchAuthClients();
-  if (!ok) {
-    const message = data && (data.error || data.message);
-    throw new Error(message || 'Не удалось загрузить список активных пользователей');
-  }
-
-  applyIncomingAuthUsers(data, { syncOwnRole: false });
-}
-
-async function updateCoHostRole(username, role, toggleInput = null) {
-  if (!isHostRole()) return;
-  const normalizedRole = role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
-  const normalizedUsername = typeof username === 'string' ? username.trim() : '';
-  if (!normalizedUsername) return;
-
-  state.cohostRoleUpdatesInFlight.add(normalizedUsername);
-  renderCohostUsers();
-
-  try {
-    const { ok, data } = await api.postAuthClientRole(normalizedUsername, normalizedRole);
-    if (!ok) {
-      const message = data && (data.error || data.message);
-      throw new Error(message || 'Не удалось изменить роль пользователя');
-    }
-
-    applyIncomingAuthUsers(data, { syncOwnRole: false });
-    setStatus(
-      normalizedRole === ROLE_COHOST
-        ? `Пользователь ${normalizedUsername} назначен co-host.`
-        : `Роль co-host у ${normalizedUsername} снята.`,
-    );
-  } catch (err) {
-    if (toggleInput) {
-      toggleInput.checked = normalizedRole !== ROLE_COHOST;
-    }
-    setStatus(err && err.message ? err.message : 'Не удалось обновить роль co-host.');
-  } finally {
-    state.cohostRoleUpdatesInFlight.delete(normalizedUsername);
-    renderCohostUsers();
-  }
-}
-
-async function disconnectClientSessions(username) {
-  if (!isHostRole()) return;
-
-  const normalizedUsername = typeof username === 'string' ? username.trim() : '';
-  if (!normalizedUsername) return;
-
-  const confirmed = window.confirm(`Отключить ${normalizedUsername}? Будут завершены все его сессии.`);
-  if (!confirmed) {
-    setStatus('Отключение клиента отменено.');
-    return;
-  }
-
-  state.cohostDisconnectUpdatesInFlight.add(normalizedUsername);
-  renderCohostUsers();
-
-  try {
-    const { ok, data } = await api.postAuthClientDisconnect(normalizedUsername);
-    if (!ok) {
-      const message = data && (data.error || data.message);
-      throw new Error(message || 'Не удалось отключить пользователя');
-    }
-
-    applyIncomingAuthUsers(data, { syncOwnRole: false });
-    const removedSessions =
-      data &&
-      data.disconnected &&
-      Number.isInteger(data.disconnected.removedSessions) &&
-      data.disconnected.removedSessions > 0
-        ? data.disconnected.removedSessions
-        : null;
-    setStatus(
-      removedSessions
-        ? `Пользователь ${normalizedUsername} отключен (${removedSessions} сесс.).`
-        : `Пользователь ${normalizedUsername} отключен.`,
-    );
-  } catch (err) {
-    setStatus(err && err.message ? err.message : 'Не удалось отключить пользователя.');
-  } finally {
-    state.cohostDisconnectUpdatesInFlight.delete(normalizedUsername);
-    renderCohostUsers();
-  }
 }
 
 function loadSetting(key, fallback) {
@@ -3940,36 +3127,6 @@ function getProgressUiFrameIntervalMs() {
   return window.matchMedia('(pointer: coarse)').matches ? MOBILE_PROGRESS_UI_MIN_INTERVAL_MS : 0;
 }
 
-function stopHostProgressLoop() {
-  if (state.hostProgressRaf === null) return;
-  cancelAnimationFrame(state.hostProgressRaf);
-  state.hostProgressRaf = null;
-}
-
-function startHostProgressLoop() {
-  if (state.hostProgressRaf !== null) return;
-  const minFrameIntervalMs = getProgressUiFrameIntervalMs();
-  let lastRenderTimestamp = 0;
-
-  const tick = (timestamp) => {
-    if (state.hostProgressRaf === null) return;
-    const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
-    if (
-      minFrameIntervalMs > 0 &&
-      lastRenderTimestamp > 0 &&
-      nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
-    ) {
-      state.hostProgressRaf = requestAnimationFrame(tick);
-      return;
-    }
-    lastRenderTimestamp = nowTimestamp;
-    syncHostNowPlayingPanel();
-    if (state.hostProgressRaf === null) return;
-    state.hostProgressRaf = requestAnimationFrame(tick);
-  };
-  state.hostProgressRaf = requestAnimationFrame(tick);
-}
-
 function clearHostTrackHighlight() {
   for (const cards of state.cardsByFile.values()) {
     if (!cards || !cards.size) continue;
@@ -4151,10 +3308,6 @@ function parseLiveDspNextTrackDescriptor(descriptor) {
   };
 }
 
-function syncLiveDspNextTrackHighlight() {
-  clearLiveDspNextTrackHighlight();
-}
-
 function resetLiveDspNextTrackPreview() {
   state.liveDspRenderToken += 1;
   state.liveDspNextReadyDescriptor = '';
@@ -4172,28 +3325,6 @@ function clearDspTransitionTrackHighlight() {
     if (!cards || !cards.size) continue;
     for (const card of cards) {
       card.classList.remove('is-dsp-transition-source', 'is-dsp-transition-target');
-    }
-  }
-}
-
-function syncDspTransitionTrackHighlight() {
-  clearDspTransitionTrackHighlight();
-  if (!isDspTransitionPlaybackActive()) return;
-
-  const sourceTrack = state.dspTransitionPlayback.fromTrack || null;
-  const targetTrack = state.dspTransitionPlayback.toTrack || null;
-
-  if (sourceTrack && sourceTrack.key) {
-    const sourceCard = getTrackCardByContext(sourceTrack.key, sourceTrack);
-    if (sourceCard) {
-      sourceCard.classList.add('is-dsp-transition-source');
-    }
-  }
-
-  if (targetTrack && targetTrack.key) {
-    const targetCard = getTrackCardByContext(targetTrack.key, targetTrack);
-    if (targetCard) {
-      targetCard.classList.add('is-dsp-transition-target');
     }
   }
 }
@@ -4251,115 +3382,6 @@ function buildHostTrackHighlightDescriptor() {
     playlistPosition === null ? '' : String(playlistPosition),
     state.hostPlaybackState.paused ? 'paused' : 'playing',
   ].join('|');
-}
-
-function syncHostTrackHighlight(force = false) {
-  const descriptor = buildHostTrackHighlightDescriptor();
-  if (!force && descriptor === state.hostHighlightedDescriptor) return;
-  state.hostHighlightedDescriptor = descriptor;
-
-  clearHostTrackHighlight();
-  if (descriptor === 'none') return;
-
-  const playbackContext = {
-    playlistIndex: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
-  };
-  const hostTrackKey = trackKey(state.hostPlaybackState.trackFile, '/audio');
-  const targetCard = getTrackCardByContext(hostTrackKey, playbackContext);
-  if (!targetCard) return;
-
-  if (state.hostPlaybackState.paused) {
-    targetCard.classList.add('is-host-paused');
-    targetCard.classList.remove('is-host-playing');
-    return;
-  }
-
-  targetCard.classList.add('is-host-playing');
-  targetCard.classList.remove('is-host-paused');
-}
-
-function syncHostNowPlayingPanel() {
-  if (!hostNowPlayingTitleEl || !hostNowPlayingControlLabelEl) return;
-
-  if (!isSlaveRole()) {
-    stopHostProgressLoop();
-    setHostNowPlayingReelActive(false);
-    syncHostTrackHighlight();
-    return;
-  }
-
-  if (!state.hostPlaybackState || !state.hostPlaybackState.trackFile) {
-    hostNowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
-    hostNowPlayingControlLabelEl.textContent = '▶';
-    setHostNowPlayingReelActive(false);
-    setHostNowPlayingProgress(0);
-    setHostNowPlayingTime(null);
-    stopHostProgressLoop();
-    syncHostTrackHighlight();
-    return;
-  }
-
-  hostNowPlayingTitleEl.textContent = `Live: ${trackDisplayName(state.hostPlaybackState.trackFile)}`;
-  hostNowPlayingControlLabelEl.textContent = state.hostPlaybackState.paused ? '▶' : '❚❚';
-  setHostNowPlayingReelActive(true, state.hostPlaybackState.paused);
-
-  const elapsed = getHostPlaybackElapsedSeconds();
-  const duration = Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0 ? state.hostPlaybackState.duration : null;
-  const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
-  const remaining = duration ? Math.max(0, duration - elapsed) : null;
-
-  setHostNowPlayingProgress(progressPercent);
-  setHostNowPlayingTime(remaining, { useCeil: true });
-  refreshTrackDurationLabels(trackKey(state.hostPlaybackState.trackFile, '/audio'));
-  syncHostTrackHighlight();
-
-  if (!state.hostPlaybackState.paused && duration && remaining > 0) {
-    startHostProgressLoop();
-  } else {
-    stopHostProgressLoop();
-  }
-}
-
-function syncDapNowPlayingPanel() {
-  if (!dapNowPlayingTitleEl || !dapNowPlayingControlLabelEl) return;
-
-  if (!updateDapNowPlayingVisibility(state.currentRole)) {
-    setDapNowPlayingReelActive(false);
-    setDapNowPlayingProgress(0);
-    setDapNowPlayingTime(null);
-    return;
-  }
-
-  const sourceState = isHostRole()
-    ? buildDapPlaybackSnapshotForSync(state.dapConfig)
-    : state.hostPlaybackState && typeof state.hostPlaybackState === 'object'
-      ? state.hostPlaybackState.dapPlayback
-      : null;
-  const dapPlaybackState = sanitizeIncomingDapPlaybackState(sourceState);
-
-  if (!dapPlaybackState.trackFile) {
-    dapNowPlayingTitleEl.textContent = DAP_NOW_PLAYING_IDLE_TITLE;
-    dapNowPlayingControlLabelEl.textContent = '▶';
-    setDapNowPlayingReelActive(false);
-    setDapNowPlayingProgress(0);
-    setDapNowPlayingTime(null);
-    return;
-  }
-
-  const titlePrefix = isCoHostRole() ? 'LIVE (DAP): ' : dapPlaybackState.interrupted ? 'DAP (пауза): ' : 'DAP: ';
-  dapNowPlayingTitleEl.textContent = `${titlePrefix}${trackDisplayName(dapPlaybackState.trackFile)}`;
-  dapNowPlayingControlLabelEl.textContent = dapPlaybackState.paused ? '▶' : '❚❚';
-  setDapNowPlayingReelActive(true, dapPlaybackState.paused);
-
-  const elapsed = getDapPlaybackElapsedSeconds(dapPlaybackState);
-  const duration = Number.isFinite(dapPlaybackState.duration) && dapPlaybackState.duration > 0 ? dapPlaybackState.duration : null;
-  const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
-  const remaining = duration ? Math.max(0, duration - elapsed) : null;
-
-  setDapNowPlayingProgress(progressPercent);
-  setDapNowPlayingTime(remaining, { useCeil: true });
-  refreshTrackDurationLabels(trackKey(dapPlaybackState.trackFile, '/audio'));
 }
 
 function getTrackDurationTextByKey(fileKey, playbackContext = null) {
@@ -4574,193 +3596,6 @@ function stopAndClearLocalPlayback() {
   syncNowPlayingPanel();
 }
 
-function stopCoHostProgressLoop() {
-  if (state.cohostProgressRaf === null) return;
-  cancelAnimationFrame(state.cohostProgressRaf);
-  state.cohostProgressRaf = null;
-}
-
-function startCoHostProgressLoop() {
-  if (state.cohostProgressRaf !== null) return;
-  const minFrameIntervalMs = getProgressUiFrameIntervalMs();
-  let lastRenderTimestamp = 0;
-
-  const tick = (timestamp) => {
-    if (state.cohostProgressRaf === null) return;
-    const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
-    if (
-      minFrameIntervalMs > 0 &&
-      lastRenderTimestamp > 0 &&
-      nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
-    ) {
-      state.cohostProgressRaf = requestAnimationFrame(tick);
-      return;
-    }
-    lastRenderTimestamp = nowTimestamp;
-    syncNowPlayingPanel();
-    if (state.cohostProgressRaf === null) return;
-    state.cohostProgressRaf = requestAnimationFrame(tick);
-  };
-  state.cohostProgressRaf = requestAnimationFrame(tick);
-}
-
-function syncNowPlayingPanelForCoHost() {
-  if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
-
-  const hostTrackFile =
-    state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' ? state.hostPlaybackState.trackFile.trim() : '';
-  if (!hostTrackFile) {
-    if (state.nowPlayingSeekActive) {
-      cleanupNowPlayingSeekInteraction();
-    }
-    nowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
-    nowPlayingControlLabelEl.textContent = '▶';
-    nowPlayingControlBtn.disabled = true;
-    setNowPlayingReelActive(false);
-    setNowPlayingProgress(0);
-    setNowPlayingTime(null);
-    stopCoHostProgressLoop();
-    return;
-  }
-
-  if (isDapTrackContext(state.hostPlaybackState, state.dapConfig)) {
-    if (state.nowPlayingSeekActive) {
-      cleanupNowPlayingSeekInteraction();
-    }
-    const dapPlaybackState = sanitizeIncomingDapPlaybackState(
-      state.hostPlaybackState && typeof state.hostPlaybackState === 'object' ? state.hostPlaybackState.dapPlayback : null,
-    );
-    nowPlayingTitleEl.textContent = '';
-    nowPlayingControlLabelEl.textContent = '▶';
-    nowPlayingControlBtn.disabled = true;
-    setNowPlayingReelActive(false);
-    setNowPlayingProgress(0);
-    setNowPlayingTime(null);
-    if (dapPlaybackState.trackFile && !dapPlaybackState.paused) {
-      startCoHostProgressLoop();
-    } else {
-      stopCoHostProgressLoop();
-    }
-    return;
-  }
-
-  nowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostTrackFile)}`;
-  nowPlayingControlBtn.disabled = false;
-  nowPlayingControlLabelEl.textContent = state.hostPlaybackState.paused ? '▶' : '❚❚';
-  setNowPlayingReelActive(true, state.hostPlaybackState.paused);
-
-  const elapsed = getHostPlaybackElapsedSeconds();
-  const duration = Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0 ? state.hostPlaybackState.duration : null;
-  const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
-  const remaining = duration ? Math.max(0, duration - elapsed) : null;
-
-  setNowPlayingProgress(progressPercent);
-  setNowPlayingTime(remaining, { useCeil: true });
-
-  if (!state.hostPlaybackState.paused && duration && remaining > 0) {
-    startCoHostProgressLoop();
-  } else {
-    stopCoHostProgressLoop();
-  }
-}
-
-function syncNowPlayingPanel() {
-  if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
-  const isPauseLocked = isDapPauseLocked(state.currentTrack, state.currentAudio, state.dapConfig);
-  nowPlayingControlBtn.classList.toggle('is-pause-locked', isPauseLocked);
-  syncDapNowPlayingPanel();
-  updateVolumePresetsUi();
-
-  if (isCoHostRole()) {
-    setDspTransitionReelReverse(false);
-    const hostTrackKey =
-      state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
-        ? trackKey(state.hostPlaybackState.trackFile, '/audio')
-        : null;
-    if (state.activeDurationTrackKey && state.activeDurationTrackKey !== hostTrackKey) {
-      refreshTrackDurationLabels(state.activeDurationTrackKey);
-    }
-    state.activeDurationTrackKey = hostTrackKey;
-    syncNowPlayingPanelForCoHost();
-    if (hostTrackKey) {
-      refreshTrackDurationLabels(hostTrackKey);
-    }
-    return;
-  }
-
-  if (isDspTransitionPlaybackActive()) {
-    const playback = state.dspTransitionPlayback;
-    const transitionAudio = playback && playback.audio ? playback.audio : null;
-    const sourceTrack = playback && playback.fromTrack ? playback.fromTrack : null;
-    const targetTrack = playback && playback.toTrack ? playback.toTrack : null;
-
-    nowPlayingTitleEl.textContent =
-      sourceTrack && targetTrack
-        ? `Переход: ${trackDisplayName(sourceTrack.file)} -> ${trackDisplayName(targetTrack.file)}`
-        : 'Переход...';
-    nowPlayingControlLabelEl.textContent = '❚❚';
-    setNowPlayingReelActive(true, false);
-    setDspTransitionReelReverse(true);
-
-    const activeDuration = getDspTransitionDurationSeconds();
-    const currentTime =
-      transitionAudio && Number.isFinite(transitionAudio.currentTime) && transitionAudio.currentTime >= 0
-        ? transitionAudio.currentTime
-        : 0;
-    const progressPercent = activeDuration ? Math.min(100, (currentTime / activeDuration) * 100) : 0;
-    const remaining = activeDuration ? Math.max(0, activeDuration - currentTime) : null;
-
-    nowPlayingControlBtn.disabled = !canSeekNowPlaying();
-    setNowPlayingProgress(progressPercent);
-    setNowPlayingTime(remaining, { useCeil: true });
-    return;
-  }
-
-  setDspTransitionReelReverse(false);
-
-  const nextActiveKey = state.currentTrack && state.currentAudio ? state.currentTrack.key : null;
-  if (state.activeDurationTrackKey && state.activeDurationTrackKey !== nextActiveKey) {
-    refreshTrackDurationLabels(state.activeDurationTrackKey);
-  }
-  state.activeDurationTrackKey = nextActiveKey;
-
-  if (!state.currentTrack || !state.currentAudio) {
-    if (state.nowPlayingSeekActive) {
-      cleanupNowPlayingSeekInteraction();
-    }
-    nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
-    nowPlayingControlLabelEl.textContent = '▶';
-    nowPlayingControlBtn.disabled = true;
-    setNowPlayingReelActive(false);
-    setNowPlayingProgress(0);
-    setNowPlayingTime(null);
-    requestHostPlaybackSync(false);
-    return;
-  }
-
-  if (isHostRole() && isDapTrackContext(state.currentTrack, state.dapConfig)) {
-    if (state.nowPlayingSeekActive) {
-      cleanupNowPlayingSeekInteraction();
-    }
-    nowPlayingTitleEl.textContent = '';
-    nowPlayingControlLabelEl.textContent = '▶';
-    nowPlayingControlBtn.disabled = true;
-    setNowPlayingReelActive(false);
-    setNowPlayingProgress(0);
-    setNowPlayingTime(null);
-    requestHostPlaybackSync(false);
-    return;
-  }
-
-  nowPlayingTitleEl.textContent = trackDisplayName(state.currentTrack.file);
-  nowPlayingControlBtn.disabled = false;
-  nowPlayingControlLabelEl.textContent = state.currentAudio.paused ? '▶' : '❚❚';
-  setNowPlayingReelActive(true, state.currentAudio.paused);
-  setNowPlayingTime(getCurrentTrackRemainingSeconds(), { useCeil: true });
-  refreshTrackDurationLabels(state.currentTrack.key);
-  requestHostPlaybackSync(false);
-}
-
 function getCurrentTrackDurationSeconds() {
   if (!state.currentTrack || !state.currentAudio) return null;
   return getDuration(state.currentAudio) || getKnownDurationSeconds(state.currentTrack.key);
@@ -4817,250 +3652,6 @@ function seekDspTransitionPlaybackByRatio(positionRatio) {
 
   syncNowPlayingPanel();
   return true;
-}
-
-function canSeekNowPlaying() {
-  if (isSlaveRole()) {
-    if (!state.currentTrack || !state.currentAudio) return false;
-    const duration = getCurrentTrackDurationSeconds();
-    return Boolean(Number.isFinite(duration) && duration > 0);
-  }
-
-  if (isHostRole()) {
-    if (!state.liveSeekEnabled) return false;
-    if (isDspTransitionPlaybackActive()) {
-      const transitionDuration = getDspTransitionDurationSeconds();
-      return Boolean(Number.isFinite(transitionDuration) && transitionDuration > 0);
-    }
-    if (!state.currentTrack || !state.currentAudio) return false;
-    const duration = getCurrentTrackDurationSeconds();
-    return Boolean(Number.isFinite(duration) && duration > 0);
-  }
-
-  if (isCoHostRole()) {
-    if (!state.liveSeekEnabled) return false;
-    const hasHostTrack = Boolean(
-      state.hostPlaybackState &&
-        typeof state.hostPlaybackState.trackFile === 'string' &&
-        state.hostPlaybackState.trackFile.trim(),
-    );
-    if (!hasHostTrack) return false;
-    const duration = getHostPlaybackDurationSeconds();
-    return Boolean(Number.isFinite(duration) && duration > 0);
-  }
-
-  return false;
-}
-
-function resolveNowPlayingSeekRatioFromClientX(clientX) {
-  if (!nowPlayingControlBtn || !Number.isFinite(clientX)) return null;
-  const rect = nowPlayingControlBtn.getBoundingClientRect();
-  if (!Number.isFinite(rect.width) || rect.width <= 0) return null;
-  const ratio = (clientX - rect.left) / rect.width;
-  return Math.max(0, Math.min(1, ratio));
-}
-
-function isNowPlayingToggleZone(clientX, clientY) {
-  if (!nowPlayingControlBtn || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
-  const rect = nowPlayingControlBtn.getBoundingClientRect();
-  if (clientY < rect.top || clientY > rect.bottom) return false;
-  const centerX = rect.left + rect.width / 2;
-  return Math.abs(clientX - centerX) <= NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX;
-}
-
-function setNowPlayingReelScrubSpeed(speedPxPerSecond) {
-  if (!nowPlayingControlBtn) return;
-  const safeSpeed = Number.isFinite(speedPxPerSecond) ? Math.max(0, speedPxPerSecond) : 0;
-  const ratio = Math.min(1, safeSpeed / NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC);
-  const durationSeconds =
-    NOW_PLAYING_REEL_BASE_SPIN_SECONDS -
-    ratio * (NOW_PLAYING_REEL_BASE_SPIN_SECONDS - NOW_PLAYING_REEL_FAST_SPIN_SECONDS);
-  nowPlayingControlBtn.style.setProperty('--reel-spin-inline-duration', `${durationSeconds.toFixed(3)}s`);
-}
-
-function resetNowPlayingReelScrubSpeed() {
-  if (!nowPlayingControlBtn) return;
-  nowPlayingControlBtn.style.removeProperty('--reel-spin-inline-duration');
-}
-
-function updateNowPlayingReelScrubSpeed(clientX, timestampMs) {
-  if (!Number.isFinite(clientX) || !Number.isFinite(timestampMs)) return;
-  if (!Number.isFinite(state.nowPlayingSeekLastAt) || state.nowPlayingSeekLastAt <= 0) {
-    state.nowPlayingSeekLastX = clientX;
-    state.nowPlayingSeekLastAt = timestampMs;
-    return;
-  }
-
-  const deltaMs = timestampMs - state.nowPlayingSeekLastAt;
-  const deltaPx = Math.abs(clientX - state.nowPlayingSeekLastX);
-  state.nowPlayingSeekLastX = clientX;
-  state.nowPlayingSeekLastAt = timestampMs;
-
-  if (!Number.isFinite(deltaMs) || deltaMs <= 0) return;
-  const instantSpeed = (deltaPx * 1000) / deltaMs;
-  state.nowPlayingSeekSmoothedSpeed =
-    state.nowPlayingSeekSmoothedSpeed > 0 ? state.nowPlayingSeekSmoothedSpeed * 0.65 + instantSpeed * 0.35 : instantSpeed;
-  setNowPlayingReelScrubSpeed(state.nowPlayingSeekSmoothedSpeed);
-}
-
-function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
-  if (!canSeekNowPlaying()) return false;
-  const ratio = resolveNowPlayingSeekRatioFromClientX(clientX);
-  if (ratio === null) return false;
-
-  if (isCoHostRole()) {
-    const duration = getHostPlaybackDurationSeconds();
-    if (!Number.isFinite(duration) || duration <= 0) return false;
-    const nextTime = Math.max(0, Math.min(duration, ratio * duration));
-
-    state.hostPlaybackState = {
-      ...hostPlaybackState,
-      currentTime: nextTime,
-      updatedAt: Date.now(),
-    };
-    syncNowPlayingPanel();
-    queueCoHostSeekCurrentPlayback(ratio, { immediate: Boolean(finalize), finalize: Boolean(finalize) });
-    return true;
-  }
-
-  if (isHostRole() && isDspTransitionPlaybackActive()) {
-    return seekDspTransitionPlaybackByRatio(ratio);
-  }
-
-  if (!state.currentTrack || !state.currentAudio) return false;
-
-  const duration = getCurrentTrackDurationSeconds();
-  if (!Number.isFinite(duration) || duration <= 0) return false;
-  const nextTime = Math.max(0, Math.min(duration, ratio * duration));
-
-  try {
-    if (typeof state.currentAudio.fastSeek === 'function') {
-      state.currentAudio.fastSeek(nextTime);
-    } else {
-      state.currentAudio.currentTime = nextTime;
-    }
-  } catch (err) {
-    try {
-      state.currentAudio.currentTime = nextTime;
-    } catch (fallbackErr) {
-      return false;
-    }
-  }
-
-  updateProgress(state.currentTrack.key, nextTime, duration);
-  syncNowPlayingPanel();
-  if (isHostRole()) {
-    requestHostLiveSeekSync({ finalize: Boolean(finalize) });
-  }
-  return true;
-}
-
-function cleanupNowPlayingSeekInteraction() {
-  if (nowPlayingControlBtn) {
-    nowPlayingControlBtn.classList.remove('is-seeking');
-    if (state.nowPlayingSeekPointerId !== null && typeof nowPlayingControlBtn.releasePointerCapture === 'function') {
-      try {
-        if (nowPlayingControlBtn.hasPointerCapture && nowPlayingControlBtn.hasPointerCapture(state.nowPlayingSeekPointerId)) {
-          nowPlayingControlBtn.releasePointerCapture(state.nowPlayingSeekPointerId);
-        }
-      } catch (err) {
-        // ignore pointer capture release errors
-      }
-    }
-  }
-  resetNowPlayingReelScrubSpeed();
-
-  state.nowPlayingSeekActive = false;
-  state.nowPlayingSeekMoved = false;
-  state.nowPlayingSeekPointerId = null;
-  state.nowPlayingSeekStartX = 0;
-  state.nowPlayingSeekLastX = 0;
-  state.nowPlayingSeekLastAt = 0;
-  state.nowPlayingSeekSmoothedSpeed = 0;
-  window.removeEventListener('pointermove', onNowPlayingSeekPointerMove, true);
-  window.removeEventListener('pointerup', onNowPlayingSeekPointerUp, true);
-  window.removeEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
-}
-
-function onNowPlayingSeekPointerMove(event) {
-  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
-  const threshold = event.pointerType === 'touch' ? 2 : NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX;
-  const distance = Math.abs(event.clientX - state.nowPlayingSeekStartX);
-  if (!state.nowPlayingSeekMoved && distance < threshold) return;
-  state.nowPlayingSeekMoved = true;
-  if (nowPlayingControlBtn) {
-    nowPlayingControlBtn.classList.add('is-seeking');
-  }
-  event.preventDefault();
-  updateNowPlayingReelScrubSpeed(
-    event.clientX,
-    Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now(),
-  );
-  applyNowPlayingSeekFromClientX(event.clientX, { finalize: false });
-}
-
-function onNowPlayingSeekPointerUp(event) {
-  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
-
-  if (state.nowPlayingSeekMoved) {
-    event.preventDefault();
-    applyNowPlayingSeekFromClientX(event.clientX, { finalize: true });
-    state.nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
-  } else if (
-    event.pointerType === 'touch' &&
-    !isNowPlayingToggleZone(event.clientX, event.clientY) &&
-    applyNowPlayingSeekFromClientX(event.clientX, { finalize: true })
-  ) {
-    // Touch tap outside the center toggle zone seeks immediately.
-    state.nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
-  }
-
-  cleanupNowPlayingSeekInteraction();
-}
-
-function onNowPlayingSeekPointerCancel(event) {
-  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
-  cleanupNowPlayingSeekInteraction();
-}
-
-function onNowPlayingControlPointerDown(event) {
-  if (!nowPlayingControlBtn) return;
-  if (!canSeekNowPlaying()) return;
-  if (!event.isPrimary) return;
-  if (event.button !== undefined && event.button !== 0) return;
-  if (state.nowPlayingSeekActive) {
-    cleanupNowPlayingSeekInteraction();
-  }
-
-  state.nowPlayingSeekActive = true;
-  state.nowPlayingSeekMoved = false;
-  state.nowPlayingSeekPointerId = event.pointerId;
-  state.nowPlayingSeekStartX = event.clientX;
-  state.nowPlayingSeekLastX = event.clientX;
-  state.nowPlayingSeekLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  state.nowPlayingSeekSmoothedSpeed = 0;
-  setNowPlayingReelScrubSpeed(0);
-
-  if (typeof nowPlayingControlBtn.setPointerCapture === 'function') {
-    try {
-      nowPlayingControlBtn.setPointerCapture(event.pointerId);
-    } catch (err) {
-      // ignore pointer capture errors
-    }
-  }
-
-  window.addEventListener('pointermove', onNowPlayingSeekPointerMove, true);
-  window.addEventListener('pointerup', onNowPlayingSeekPointerUp, true);
-  window.addEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
-}
-
-function onNowPlayingControlClick(event) {
-  if (Date.now() < state.nowPlayingSeekSuppressClickUntil) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
-  }
-  toggleNowPlayingPlayback();
 }
 
 function canPanZonesContainer() {
@@ -6624,10 +5215,6 @@ function normalizePlaylistAutoplayWithDap(flags, dapState, expectedLength) {
   return normalized;
 }
 
-function isDapEnabled(config = state.dapConfig) {
-  return Boolean(config && config.enabled && Number.isInteger(config.playlistIndex) && config.playlistIndex >= 0);
-}
-
 function getDapPlaylistIndex(config = state.dapConfig) {
   if (!isDapEnabled(config)) return null;
   return normalizePlaylistTrackIndex(config.playlistIndex);
@@ -6645,13 +5232,6 @@ function buildPlaylistRenderOrder(length, config = state.dapConfig) {
   if (dapPlaylistIndex === null) return order;
   if (dapPlaylistIndex < 0 || dapPlaylistIndex >= expectedLength) return order;
   return [dapPlaylistIndex, ...order.filter((index) => index !== dapPlaylistIndex)];
-}
-
-function isDapTrackContext(trackOrContext = null, config = state.dapConfig) {
-  if (!trackOrContext || typeof trackOrContext !== 'object') return false;
-  const playlistIndex = normalizePlaylistTrackIndex(trackOrContext.playlistIndex);
-  if (playlistIndex === null) return false;
-  return isDapPlaylistIndex(playlistIndex, config);
 }
 
 setConfigDeps({ normalizeDapVolumePercent, isDapEnabled, isDapTrackContext, rebuildVolumePresetButtons });
@@ -6903,19 +5483,6 @@ async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
   } finally {
     state.dapAutoStartInFlight = false;
   }
-}
-
-function startDapNoSilenceGuard() {
-  if (state.dapNoSilenceGuardTimer !== null) return;
-  state.dapNoSilenceGuardTimer = setInterval(() => {
-    ensureDapNoSilencePlayback({ reason: 'interval' }).catch(() => {});
-  }, DAP_NO_SILENCE_GUARD_INTERVAL_MS);
-}
-
-function stopDapNoSilenceGuard() {
-  if (state.dapNoSilenceGuardTimer === null) return;
-  clearInterval(state.dapNoSilenceGuardTimer);
-  state.dapNoSilenceGuardTimer = null;
 }
 
 function serializeLayout(playlists) {
@@ -10071,258 +8638,6 @@ function stopAudioCatalogAutoRefresh() {
   }
 }
 
-function initSettings() {
-  loadTrackTitleModesByTrackSetting();
-
-  overlayTimeInput.value = loadSetting(SETTINGS_KEYS.overlayTime, '0.3');
-  overlayCurveSelect.value = loadSetting(SETTINGS_KEYS.overlayCurve, 'linear');
-  stopFadeInput.value = loadSetting(SETTINGS_KEYS.stopFade, '0.4');
-  if (overlayEnabledToggle) {
-    overlayEnabledToggle.checked = loadBooleanSetting(SETTINGS_KEYS.overlayEnabled, true);
-  }
-  if (stopFadeEnabledToggle) {
-    stopFadeEnabledToggle.checked = loadBooleanSetting(SETTINGS_KEYS.stopFadeEnabled, true);
-  }
-  updateTransitionSettingsUi();
-
-  overlayTimeInput.addEventListener('change', () => {
-    const sanitized = Math.max(0, parseFloat(overlayTimeInput.value) || 0).toString();
-    overlayTimeInput.value = sanitized;
-    saveSetting(SETTINGS_KEYS.overlayTime, sanitized);
-  });
-
-  stopFadeInput.addEventListener('change', () => {
-    const sanitized = Math.max(0, parseFloat(stopFadeInput.value) || 0).toString();
-    stopFadeInput.value = sanitized;
-    saveSetting(SETTINGS_KEYS.stopFade, sanitized);
-  });
-
-  overlayCurveSelect.addEventListener('change', () => {
-    saveSetting(SETTINGS_KEYS.overlayCurve, overlayCurveSelect.value);
-  });
-
-  if (overlayEnabledToggle) {
-    overlayEnabledToggle.addEventListener('change', () => {
-      saveSetting(SETTINGS_KEYS.overlayEnabled, overlayEnabledToggle.checked ? 'true' : 'false');
-      updateTransitionSettingsUi();
-    });
-  }
-
-  if (stopFadeEnabledToggle) {
-    stopFadeEnabledToggle.addEventListener('change', () => {
-      saveSetting(SETTINGS_KEYS.stopFadeEnabled, stopFadeEnabledToggle.checked ? 'true' : 'false');
-      updateTransitionSettingsUi();
-    });
-  }
-}
-
-function setSidebarOpen(isOpen) {
-  if (!sidebar || !sidebarToggle) return;
-  sidebar.classList.toggle('collapsed', !isOpen);
-  sidebarToggle.textContent = isOpen ? '⟨' : '☰';
-  saveSetting(SETTINGS_KEYS.sidebarOpen, isOpen ? '1' : '0');
-}
-
-function initSidebarToggle() {
-  const saved = loadSetting(SETTINGS_KEYS.sidebarOpen, '1');
-  setSidebarOpen(saved !== '0');
-  sidebarToggle.addEventListener('click', () => {
-    const openNow = !sidebar.classList.contains('collapsed');
-    setSidebarOpen(!openNow);
-  });
-}
-
-async function stopServer({ requireConfirmation = true } = {}) {
-  if (!isHostRole()) {
-    setStatus('Остановку сервера может выполнить только хост (live).');
-    return;
-  }
-
-  if (requireConfirmation) {
-    const confirmed = window.confirm('Остановить сервер? Все подключенные клиенты будут отключены.');
-    if (!confirmed) {
-      setStatus('Остановка сервера отменена.');
-      return;
-    }
-  }
-
-  if (stopServerBtn) {
-    stopServerBtn.disabled = true;
-  }
-  setStatus('Останавливаем сервер...');
-
-  try {
-    const { ok: shutdownOk, data: shutdownData } = await api.postShutdown();
-    if (!shutdownOk) {
-      const message = shutdownData && (shutdownData.error || shutdownData.message);
-      throw new Error(message || 'Request failed');
-    }
-    setStatus('Сервер останавливается. Окно будет закрыто.');
-    setTimeout(() => {
-      try {
-        window.open('', '_self');
-        window.close();
-      } catch (err) {
-        console.error('Не удалось закрыть окно', err);
-      }
-    }, 300);
-  } catch (err) {
-    console.error(err);
-    setStatus(err.message || 'Не удалось остановить сервер. Попробуйте ещё раз.');
-    if (stopServerBtn) {
-      stopServerBtn.disabled = false;
-    }
-  }
-}
-
-async function logoutClient({ requireConfirmation = true } = {}) {
-  if (isHostRole()) return;
-  if (!clientLogoutBtn) return;
-
-  if (requireConfirmation) {
-    const confirmed = window.confirm('Отключиться от сервера? Понадобится повторный вход.');
-    if (!confirmed) {
-      setStatus('Отключение отменено.');
-      return;
-    }
-  }
-
-  clientLogoutBtn.disabled = true;
-  setStatus('Отключаемся...');
-
-  try {
-    const { ok, data } = await api.postAuthLogout();
-    if (!ok) {
-      const message = data && (data.error || data.message);
-      throw new Error(message || 'Не удалось отключиться');
-    }
-
-    closeLayoutStream();
-    stopHostProgressLoop();
-    stopCoHostProgressLoop();
-    stopAndClearLocalPlayback();
-
-    state.currentUser = null;
-    state.authUsersState = [];
-    applyRoleUi(ROLE_SLAVE);
-    setStatus('Вы отключены. Войдите снова.');
-
-    ensureAuthorizedUser()
-      .then((authorized) => {
-        if (!authorized) return;
-        connectLayoutStream();
-      })
-      .catch((err) => {
-        console.error(err);
-      });
-  } catch (err) {
-    console.error(err);
-    setStatus(err && err.message ? err.message : 'Не удалось отключиться.');
-    clientLogoutBtn.disabled = false;
-  }
-}
-
-function initServerControls() {
-  if (stopServerBtn) {
-    stopServerBtn.addEventListener('click', () => {
-      stopServer({ requireConfirmation: true });
-    });
-  }
-
-  if (clientLogoutBtn) {
-    clientLogoutBtn.addEventListener('click', () => {
-      logoutClient({ requireConfirmation: true });
-    });
-  }
-}
-
-function initDapSettingsControls() {
-  updateDapSettingsUi(state.currentRole);
-
-  if (dapEnabledToggle) {
-    dapEnabledToggle.addEventListener('change', async () => {
-      if (!isHostRole()) {
-        updateDapSettingsUi(state.currentRole);
-        setStatus('DAP может менять только хост.');
-        return;
-      }
-
-      const enabled = Boolean(dapEnabledToggle.checked);
-      let playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect ? dapPlaylistSelect.value : null);
-      if (playlistIndex === null) {
-        playlistIndex = normalizePlaylistTrackIndex(state.dapConfig.playlistIndex);
-      }
-      if (playlistIndex === null && state.layout.length > 0) {
-        playlistIndex = 0;
-      }
-      if (enabled && playlistIndex === null) {
-        updateDapSettingsUi(state.currentRole);
-        setStatus('Выберите плей-лист для DAP.');
-        return;
-      }
-
-      const nextDap = {
-        enabled,
-        playlistIndex,
-        volumePercent: normalizeDapVolumePercent(
-          dapVolumePercentInput ? dapVolumePercentInput.value : state.dapConfig.volumePercent,
-          state.dapConfig.volumePercent,
-        ),
-      };
-      const message = enabled
-        ? `DAP включен для плей-листа ${Number(playlistIndex) + 1}.`
-        : 'DAP выключен.';
-      await syncDapConfig(nextDap, { successMessage: message });
-    });
-  }
-
-  if (dapPlaylistSelect) {
-    dapPlaylistSelect.addEventListener('change', async () => {
-      if (!isHostRole()) {
-        updateDapSettingsUi(state.currentRole);
-        setStatus('DAP может менять только хост.');
-        return;
-      }
-
-      const playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect.value);
-      if (playlistIndex === null) {
-        updateDapSettingsUi(state.currentRole);
-        setStatus('Выберите плей-лист для DAP.');
-        return;
-      }
-
-      const nextDap = {
-        enabled: true,
-        playlistIndex,
-        volumePercent: normalizeDapVolumePercent(
-          dapVolumePercentInput ? dapVolumePercentInput.value : state.dapConfig.volumePercent,
-          state.dapConfig.volumePercent,
-        ),
-      };
-      await syncDapConfig(nextDap, { successMessage: `DAP переключен на плей-лист ${playlistIndex + 1}.` });
-    });
-  }
-
-  if (dapVolumePercentInput) {
-    dapVolumePercentInput.addEventListener('change', async () => {
-      if (!isHostRole()) {
-        updateDapSettingsUi(state.currentRole);
-        setStatus('DAP может менять только хост.');
-        return;
-      }
-
-      const nextVolumePercent = normalizeDapVolumePercent(dapVolumePercentInput.value, state.dapConfig.volumePercent);
-      dapVolumePercentInput.value = String(nextVolumePercent);
-      const nextDap = {
-        enabled: Boolean(state.dapConfig.enabled),
-        playlistIndex: normalizePlaylistTrackIndex(state.dapConfig.playlistIndex),
-        volumePercent: nextVolumePercent,
-      };
-      await syncDapConfig(nextDap, { successMessage: `Громкость DAP: ${nextVolumePercent}%.` });
-    });
-  }
-}
-
 function initPlaylistControls() {
   if (addPlaylistBtn) {
     addPlaylistBtn.addEventListener('click', addPlaylist);
@@ -10342,136 +8657,6 @@ function initPlaylistControls() {
   setPlaylistControlsLoading(false);
 }
 
-async function onVolumePresetButtonClick(event) {
-  const button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-  const presetKind = button && button.dataset.presetKind === 'dap' ? 'dap' : 'base';
-  const presetVolume = normalizeLiveVolumePreset(button ? button.dataset.volume : null, null);
-  if (presetVolume === null) return;
-  const dapPresetActive = isDapVolumePresetPlaybackActive();
-  if (dapPresetActive) {
-    if (presetKind === 'dap') {
-      setStatus(`DAP громкость ${formatVolumePresetLabel(presetVolume)} зафиксирована во время воспроизведения.`);
-    } else {
-      setStatus('Во время воспроизведения DAP доступен только DAP пресет громкости.');
-    }
-    updateVolumePresetsUi();
-    return;
-  }
-  if (presetKind === 'dap') return;
-
-  const activePreset = getActiveVolumePresetValue();
-  const shouldTurnOffPreset = activePreset !== null && isVolumePresetMatch(activePreset, presetVolume);
-  const targetVolume = shouldTurnOffPreset ? DEFAULT_LIVE_VOLUME : presetVolume;
-
-  if (isHostRole()) {
-    setLivePlaybackVolume(targetVolume, { sync: true, announce: true });
-    return;
-  }
-
-  if (!isCoHostRole()) return;
-
-  const previousVolume = getEffectiveLiveVolume();
-  setLivePlaybackVolume(targetVolume, { sync: false, announce: false });
-  try {
-    await requestCoHostSetLiveVolume(targetVolume);
-    setStatus(`Live громкость: ${formatVolumePresetLabel(targetVolume)}.`);
-  } catch (err) {
-    console.error(err);
-    const fallbackVolume = normalizeLiveVolumePreset(state.hostPlaybackState.volume, previousVolume);
-    setLivePlaybackVolume(fallbackVolume, { sync: false, announce: false });
-    setStatus(err && err.message ? err.message : 'Не удалось изменить live-громкость.');
-  }
-}
-
-function initVolumePresetControls() {
-  if (isHostRole()) {
-    setShowVolumePresetsEnabled(loadBooleanSetting(SETTINGS_KEYS.showVolumePresets, false), {
-      persist: false,
-      sync: false,
-    });
-  } else {
-    setShowVolumePresetsEnabled(false, { persist: false, sync: false });
-  }
-
-  if (showVolumePresetsToggle) {
-    showVolumePresetsToggle.checked = state.showVolumePresetsEnabled;
-    showVolumePresetsToggle.addEventListener('change', async () => {
-      const nextEnabled = Boolean(showVolumePresetsToggle.checked);
-      if (!nextEnabled && !canDisableVolumePresetsSetting()) {
-        showVolumePresetsToggle.checked = true;
-        setStatus('Сначала выключите активный пресет громкости.');
-        updateVolumePresetsUi();
-        return;
-      }
-
-      if (isHostRole()) {
-        setShowVolumePresetsEnabled(nextEnabled, { persist: true, sync: true });
-        return;
-      }
-
-      if (!isCoHostRole()) {
-        setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
-        return;
-      }
-
-      const previousEnabled = state.showVolumePresetsEnabled;
-      setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
-      try {
-        await requestCoHostSetVolumePresetsVisibility(nextEnabled);
-        setStatus(`Пресеты громкости ${nextEnabled ? 'включены' : 'выключены'} на live.`);
-      } catch (err) {
-        console.error(err);
-        setShowVolumePresetsEnabled(previousEnabled, { persist: false, sync: false });
-        setStatus(err && err.message ? err.message : 'Не удалось изменить режим пресетов громкости.');
-      }
-    });
-  }
-
-  if (isHostRole()) {
-    requestHostPlaybackSync(true);
-  }
-
-  updateVolumePresetsUi();
-}
-
-function initLiveSeekControls() {
-  if (isHostRole()) {
-    setLiveSeekEnabled(loadBooleanSetting(SETTINGS_KEYS.liveSeekEnabled, false), {
-      persist: false,
-      sync: false,
-    });
-  } else {
-    setLiveSeekEnabled(false, { persist: false, sync: false });
-  }
-
-  if (liveSeekEnabledToggle) {
-    liveSeekEnabledToggle.checked = state.liveSeekEnabled;
-    liveSeekEnabledToggle.addEventListener('change', async () => {
-      const nextEnabled = Boolean(liveSeekEnabledToggle.checked);
-
-      if (!isHostRole()) {
-        setLiveSeekEnabled(state.hostPlaybackState.allowLiveSeek, { persist: false, sync: false });
-        setStatus('Только хост может менять настройку live seek.');
-        return;
-      }
-
-      setLiveSeekEnabled(nextEnabled, { persist: true, sync: true, announce: true });
-    });
-  }
-
-  updateLiveSeekUi();
-}
-
-function initNowPlayingControls() {
-  if (!nowPlayingControlBtn) return;
-  nowPlayingControlBtn.addEventListener('pointerdown', onNowPlayingControlPointerDown);
-  nowPlayingControlBtn.addEventListener('click', onNowPlayingControlClick);
-  initLiveSeekControls();
-  initVolumePresetControls();
-  syncNowPlayingPanel();
-  syncHostNowPlayingPanel();
-}
-
 function initZonesPanControls() {
   if (!zonesContainer) return;
   zonesContainer.addEventListener('pointerdown', onZonesPanPointerDown);
@@ -10480,179 +8665,6 @@ function initZonesPanControls() {
   zonesContainer.addEventListener('touchmove', onZonesTouchMove, { passive: false });
   zonesContainer.addEventListener('touchend', onZonesTouchEnd, { passive: false });
   zonesContainer.addEventListener('touchcancel', onZonesTouchCancel, { passive: false });
-}
-
-function initUpdater() {
-  if (allowPrereleaseInput) {
-    allowPrereleaseInput.checked = loadBooleanSetting(SETTINGS_KEYS.allowPrerelease, false);
-    allowPrereleaseInput.addEventListener('change', () => {
-      if (!isHostRole()) {
-        allowPrereleaseInput.checked = false;
-        return;
-      }
-      saveSetting(SETTINGS_KEYS.allowPrerelease, allowPrereleaseInput.checked ? 'true' : 'false');
-      checkForUpdates();
-    });
-  }
-
-  updatePrereleaseSettingUi();
-
-  if (updateButton) {
-    updateButton.addEventListener('click', applyUpdate);
-  }
-  checkForUpdates();
-}
-
-async function loadVersion() {
-  if (!appVersionEl) return;
-
-  try {
-    const { ok, data } = await api.fetchVersion();
-    if (!ok) {
-      throw new Error('Request failed');
-    }
-    if (data && data.version) {
-      appVersionEl.textContent = `Версия: ${data.version}`;
-    } else {
-      appVersionEl.textContent = 'Версия: неизвестна';
-    }
-  } catch (err) {
-    console.error('Не удалось загрузить версию приложения', err);
-    appVersionEl.textContent = 'Версия: неизвестна';
-  }
-}
-
-function showUpdateBlock(isVisible) {
-  if (!updateInfoEl) return;
-  updateInfoEl.hidden = !(isVisible && isHostRole());
-}
-
-function resetUpdateUi() {
-  setUpdateMessage('');
-  setUpdateStatus('');
-  if (updateButton) {
-    updateButton.disabled = true;
-  }
-  showUpdateBlock(false);
-}
-
-function setUpdateMessage(text, linkUrl = null, linkLabel = '') {
-  if (!updateMessageEl) return;
-  if (linkUrl && linkLabel) {
-    updateMessageEl.textContent = '';
-    updateMessageEl.append(document.createTextNode(text || ''));
-    const linkEl = document.createElement('a');
-    linkEl.className = 'sidebar-repo__link';
-    linkEl.href = linkUrl;
-    linkEl.target = '_blank';
-    linkEl.rel = 'noopener noreferrer';
-    linkEl.textContent = linkLabel;
-    updateMessageEl.append(linkEl);
-    return;
-  }
-  updateMessageEl.textContent = text;
-}
-
-function setUpdateStatus(text) {
-  if (!updateStatusEl) return;
-  updateStatusEl.textContent = text;
-}
-
-function startShutdownCountdown(seconds = 20) {
-  let remaining = Math.max(0, Math.floor(seconds));
-
-  if (state.shutdownCountdownTimer) {
-    clearTimeout(state.shutdownCountdownTimer);
-    state.shutdownCountdownTimer = null;
-  }
-
-  const tick = () => {
-    if (remaining <= 0) {
-      state.shutdownCountdownTimer = null;
-      stopServer({ requireConfirmation: false });
-      return;
-    }
-
-    setUpdateMessage(`Приложение будет закрыто через ${remaining} с.`);
-    remaining -= 1;
-    state.shutdownCountdownTimer = setTimeout(tick, 1000);
-  };
-
-  tick();
-}
-
-async function checkForUpdates() {
-  if (!updateInfoEl || !updateMessageEl || !updateButton) return;
-  if (!isHostRole()) {
-    resetUpdateUi();
-    return;
-  }
-
-  resetUpdateUi();
-
-  const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
-
-  try {
-    const { ok, data } = await api.fetchUpdateCheck(allowPrerelease);
-    if (!ok) {
-      throw new Error('Request failed');
-    }
-
-    if (data && data.currentVersion && appVersionEl) {
-      appVersionEl.textContent = `Версия: ${data.currentVersion}`;
-    }
-
-    if (data && data.hasUpdate && data.latestVersion) {
-      const releaseLabel = data.releaseName || `v${data.latestVersion}`;
-      if (data.releaseUrl) {
-        setUpdateMessage('Доступен релиз: ', data.releaseUrl, releaseLabel);
-      } else {
-        setUpdateMessage(`Доступен релиз: ${releaseLabel}`);
-      }
-      updateButton.disabled = false;
-      showUpdateBlock(true);
-    }
-  } catch (err) {
-    console.error('Не удалось проверить обновления', err);
-    resetUpdateUi();
-  }
-}
-
-async function applyUpdate() {
-  if (!updateButton) return;
-  if (!isHostRole()) {
-    resetUpdateUi();
-    return;
-  }
-
-  updateButton.disabled = true;
-  setUpdateStatus('Скачиваем и устанавливаем обновление...');
-
-  const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
-
-  try {
-    const { ok, data } = await api.postUpdateApply(allowPrerelease);
-
-    if (!ok) {
-      const message = data && (data.error || data.message);
-      throw new Error(message || 'Не удалось выполнить запрос');
-    }
-
-    const message = (data && (data.message || data.error)) || 'Обновление выполнено';
-    const installed = ok && typeof message === 'string' && message.toLowerCase().includes('обновление установлено');
-
-    if (installed) {
-      setUpdateStatus('Обновление установлено.');
-      startShutdownCountdown(20);
-      return;
-    }
-
-    setUpdateStatus(message);
-  } catch (err) {
-    console.error('Ошибка при обновлении', err);
-    setUpdateStatus(err.message);
-    updateButton.disabled = false;
-  }
 }
 
 async function bootstrap() {
@@ -10751,6 +8763,111 @@ setAudioDeps({
   isDapEnabled,
   normalizeDapVolumePercent,
   triggerLiveDspTransitionForTrack,
+});
+
+setStatusDeps({
+  statusEl,
+  isTouchPlaylistCollapseEnabled,
+  getCollapsedPlaylistIndicesInRenderOrder,
+  sanitizePlaylistName,
+  restoreCollapsedPlaylistForLocalView,
+});
+
+setSettingsDeps({
+  overlayTimeInput, overlayCurveSelect, stopFadeInput,
+  overlayEnabledToggle, stopFadeEnabledToggle,
+  sidebar, sidebarToggle,
+  loadSetting, saveSetting, loadBooleanSetting,
+  loadTrackTitleModesByTrackSetting,
+});
+
+setAuthDeps({
+  authOverlay, authError, authForm, authUsernameInput, authPasswordInput, authSubmit,
+  cohostUsersEl,
+  serverPanelEl, clientSessionPanelEl, cohostPanelEl,
+  stopServerBtn, clientLogoutBtn, serverActionsHintEl,
+  setStatus,
+  applyRuntimeConfigFromSources,
+  stopCoHostProgressLoop, clearQueuedCoHostSeekCommands,
+  stopAndClearLocalPlayback,
+  isDspTransitionPlaybackActive, stopDspTransitionPlayback,
+  resetLiveDspNextTrackPreview,
+  stopHostProgressLoop, requestHostPlaybackSync,
+  syncNowPlayingPanel, syncHostNowPlayingPanel,
+  updateVolumePresetsUi, updateLiveSeekUi, updateDapSettingsUi,
+  updatePrereleaseSettingUi, updateDspSetupUi, refreshDspStatus,
+  renderZones,
+  closeLayoutStream, connectLayoutStream,
+  stopServer,
+});
+
+setDspDeps({
+  dspSetupPanelEl, dspInstallCommandEl, dspCopyInstallCommandBtn,
+  dspCheckInstallBtn, dspSetupStatusEl,
+  setStatus,
+  copyTextToClipboard,
+  clearLiveDspNextTrackHighlight, clearDspTransitionTrackHighlight,
+  isDspTransitionPlaybackActive, getTrackCardByContext,
+});
+
+setUpdaterDeps({
+  appVersionEl, updateInfoEl, updateMessageEl, updateButton, updateStatusEl,
+  allowPrereleaseInput, allowPrereleaseRow,
+  loadBooleanSetting, saveSetting,
+  stopServer,
+});
+
+setNowPlayingDeps({
+  nowPlayingTitleEl, nowPlayingControlBtn, nowPlayingControlLabelEl,
+  nowPlayingProgressEl, nowPlayingTimeEl, nowPlayingReelEl,
+  hostNowPlayingTitleEl, hostNowPlayingControlLabelEl,
+  hostNowPlayingProgressEl, hostNowPlayingTimeEl, hostNowPlayingReelEl,
+  dapNowPlayingTitleEl, dapNowPlayingControlLabelEl,
+  dapNowPlayingProgressEl, dapNowPlayingTimeEl, dapNowPlayingReelEl,
+  liveSeekToggleRow, liveSeekEnabledToggle,
+  setNowPlayingProgress, setNowPlayingReelActive, setNowPlayingTime,
+  setHostNowPlayingProgress, setHostNowPlayingReelActive, setHostNowPlayingTime,
+  setDapNowPlayingProgress, setDapNowPlayingReelActive, setDapNowPlayingTime,
+  setDspTransitionReelReverse,
+  getProgressUiFrameIntervalMs,
+  buildHostTrackHighlightDescriptor, clearHostTrackHighlight,
+  normalizePlaylistTrackIndex, getTrackCardByContext,
+  trackDisplayName,
+  getHostPlaybackElapsedSeconds, getDapPlaybackElapsedSeconds,
+  getCurrentTrackRemainingSeconds, getCurrentTrackDurationSeconds,
+  getHostPlaybackDurationSeconds, getDspTransitionDurationSeconds,
+  refreshTrackDurationLabels,
+  buildDapPlaybackSnapshotForSync, sanitizeIncomingDapPlaybackState,
+  isDapTrackContext, isDapPauseLocked, isDspTransitionPlaybackActive,
+  updateVolumePresetsUi,
+  requestHostPlaybackSync, requestHostLiveSeekSync,
+  queueCoHostSeekCurrentPlayback, clearQueuedCoHostSeekCommands,
+  seekDspTransitionPlaybackByRatio, updateProgress,
+  toggleNowPlayingPlayback,
+  initVolumePresetControls,
+  setStatus,
+  saveSetting, loadBooleanSetting,
+});
+
+setDapDeps({
+  dapSettingsPanelEl, dapEnabledToggle, dapPlaylistSelect, dapVolumePercentInput,
+  ensurePlaylists, normalizeDapConfig, normalizePlaylistTrackIndex,
+  isDapPlaylistIndex, getPlaylistDisplayLabel,
+  normalizeDapVolumePercent, syncDapConfig,
+  ensureDapNoSilencePlayback,
+  setStatus,
+});
+
+setVolumeDeps({
+  localVolumePresetsEl,
+  showVolumePresetsToggle, showVolumePresetsToggleRow,
+  setStatus,
+  getLocalVolumePresetButtons: () => localVolumePresetButtons,
+  setLocalVolumePresetButtons: (v) => { localVolumePresetButtons = v; },
+  getEffectiveLiveVolume,
+  requestCoHostSetLiveVolume, requestCoHostSetVolumePresetsVisibility,
+  requestHostPlaybackSync,
+  saveSetting, loadBooleanSetting,
 });
 
 bootstrap();
