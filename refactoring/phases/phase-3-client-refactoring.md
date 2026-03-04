@@ -1,23 +1,55 @@
 # Фаза 3 — Клиентский рефакторинг (script.js)
 
-## Цель
-Разбить монолитный `public/script.js` (11972 строк, 584 функции) на модули.
-Фаза 3 — отдельный трек, не блокирует фазу 2.
+## Результат
+Монолит `public/script.js` (11,972 строк) разбит на 25 ES-модулей + доменный слой.
 
-## Текущее состояние
-- Один файл `public/script.js` — 12K строк
-- Vanilla JS, нет build-системы/bundler'а
-- Тесно связанные блоки: UI rendering, state management, network, audio, drag-and-drop
+### Phase 3A (c7779c9): Domain Layer + Module Infrastructure
+- `shared/playback/` — 8 ESM-модулей (source of truth для browser + server):
+  AudioEngine, BrowserAudioEngine, PlaybackController, PlaylistRepository,
+  PlaylistEditor, PlaybackCommandBus, RolePolicy
+- Серверный маршрут `/shared/*` для browser ESM imports
+- Клиентские адаптеры: api-domain.js, layout-sync.js, config-manager.js,
+  model-converter.js (legacy↔M2A), bootstrap.js
 
-## Предварительный план
+### Phase 3C (3129ca7): Client Decomposition
+- `script.js` → 575 строк (bootstrap + wiring)
+- 25 модулей в `public/modules/` (12,627 строк):
 
-### PR-A — Ввести ES modules или bundler
-- Выбрать подход: ES modules (`<script type="module">`) или simple bundler (esbuild)
-- Создать entry point, разбить на logical modules
+**Core:**
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| state.js | 352 | Constants, shared state, DOM refs |
+| config.js | 342 | Runtime config, volume presets |
+| audio.js | 535 | createAudio, handlePlay, fade, overlay |
+| sse.js | 80 | SSE layout stream |
+| roles.js | 38 | isHostRole, isSlaveRole, etc. |
+| utils.js | 22 | Shared utilities |
 
-### PR-B — Network layer extraction
-- `src/client/api.js` — fetch-обёртки для всех API endpoints
-- `src/client/sse.js` — SSE client (layout stream)
+**Features:**
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| playlists.js | 2943 | Zone rendering, playlist CRUD, tracks |
+| playback-sync.js | 1834 | Host/slave sync, progress, DSP |
+| dnd.js | 1193 | Desktop drag-and-drop |
+| touch.js | 1832 | Touch gestures, pan, collapse, reorder |
+| dsp-live.js | 679 | DSP live transitions, autoplay |
+
+**UI Panels:**
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| ui/auth.js | 538 | Auth overlay, server controls |
+| ui/nowplaying.js | 678 | Now playing, seek, progress |
+| ui/volume.js | 242 | Volume presets UI |
+| ui/dap.js | 175 | DAP settings |
+| ui/dsp.js | 177 | DSP setup |
+| ui/updater.js | 197 | Version check, update |
+| ui/settings.js | 89 | Transition settings |
+| ui/status.js | 109 | Status bar, overlays |
+
+### Phase 3B: Server Data Model Migration — DEFERRED
+- model-converter.js handles legacy↔M2A conversion on the client
+- Server keeps array-of-paths format for now
+- Can be migrated later when client M2A integration deepens
 
 ### PR-C — Audio player extraction
 - `src/client/audio/player.js` — Web Audio API wrapper
