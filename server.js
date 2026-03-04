@@ -15,6 +15,8 @@ const { AuthService } = require('./src/auth/AuthService');
 const { createAuthGuard } = require('./src/http/middlewares/auth');
 const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
 const { DspJobManager } = require('./src/dsp/DspJobManager');
+const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
+const { UpdateService } = require('./src/update/UpdateService');
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
@@ -2110,6 +2112,18 @@ async function findExtractedRoot(tempDir) {
 async function copyReleaseContents(sourceDir, targetDir) {
   await fs.promises.cp(sourceDir, targetDir, { recursive: true, force: true });
 }
+
+const updateService = new UpdateService({
+  currentVersion: appVersion,
+  getLatestReleaseInfo,
+  compareVersions,
+  downloadFile,
+  extractTarball,
+  findExtractedRoot,
+  copyReleaseContents,
+  appDir: __dirname,
+  parseBooleanParam,
+});
 
 function safeResolve(baseDirResolved, requestPath) {
   // requestPath must be without leading slashes
@@ -4695,9 +4709,20 @@ async function collectAudioCatalog() {
   };
 }
 
+const audioCatalog = new AudioCatalogService({
+  collectCatalog: collectAudioCatalog,
+  getAttributesCached: getAudioAttributesCached,
+  buildDisplayName: buildAudioAttributeDisplayName,
+  normalizePath: normalizeAudioRelativePath,
+  safeResolve: safeResolve,
+  isAudioFile: isAudioFile,
+  stripExtension: stripFileExtension,
+  audioDir: AUDIO_DIR_RESOLVED,
+});
+
 async function handleApiAudio(req, res) {
   try {
-    const catalog = await collectAudioCatalog();
+    const catalog = await audioCatalog.getCatalog();
     sendJson(res, 200, catalog);
   } catch (err) {
     console.error('Failed to read audio directory', err);
@@ -4712,19 +4737,19 @@ async function handleApiAudioAttributes(req, res, requestUrl) {
     return;
   }
 
-  const normalizedFile = normalizeAudioRelativePath(rawFile.trim());
+  const normalizedFile = audioCatalog.normalizePath(rawFile.trim());
   if (!normalizedFile) {
     sendJson(res, 400, { error: 'Неверное имя файла' });
     return;
   }
 
-  const absoluteFilePath = safeResolve(AUDIO_DIR_RESOLVED, normalizedFile);
+  const absoluteFilePath = audioCatalog.resolveAudioPath(normalizedFile);
   if (!absoluteFilePath) {
     sendJson(res, 400, { error: 'Неверный путь к файлу' });
     return;
   }
 
-  if (!isAudioFile(absoluteFilePath)) {
+  if (!audioCatalog.isAudioFile(absoluteFilePath)) {
     sendJson(res, 400, { error: 'Неверный тип файла' });
     return;
   }
@@ -4748,9 +4773,9 @@ async function handleApiAudioAttributes(req, res, requestUrl) {
   }
 
   try {
-    const attributes = await getAudioAttributesCached(normalizedFile, absoluteFilePath, fileStat);
-    const fallbackName = stripFileExtension(path.basename(normalizedFile));
-    const displayName = buildAudioAttributeDisplayName(attributes, fallbackName);
+    const attributes = await audioCatalog.getAttributes(normalizedFile, absoluteFilePath, fileStat);
+    const fallbackName = audioCatalog.stripExtension(path.basename(normalizedFile));
+    const displayName = audioCatalog.buildDisplayName(attributes, fallbackName);
 
     sendJson(res, 200, {
       file: normalizedFile,
@@ -5153,19 +5178,8 @@ async function handleApiPlaybackCommand(req, res) {
 async function handleUpdateCheck(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const allowPrerelease = parseBooleanParam(url, 'allowPrerelease');
-    const { latestVersion, htmlUrl, isPrerelease, releaseName } = await getLatestReleaseInfo(appVersion, allowPrerelease);
-    const comparableLatest = latestVersion || null;
-    const hasUpdate = comparableLatest ? compareVersions(comparableLatest, appVersion) > 0 : false;
-
-    sendJson(res, 200, {
-      currentVersion: appVersion,
-      latestVersion: comparableLatest,
-      hasUpdate,
-      releaseUrl: htmlUrl || null,
-      isPrerelease: Boolean(isPrerelease),
-      releaseName: releaseName || null,
-    });
+    const result = await updateService.checkForUpdate(url);
+    sendJson(res, 200, result);
   } catch (err) {
     console.error('Update check failed', err);
     sendJson(res, 500, { error: 'Не удалось проверить наличие обновлений', details: err.message });
@@ -5173,43 +5187,13 @@ async function handleUpdateCheck(req, res) {
 }
 
 async function handleUpdateApply(req, res) {
-  if (updateInProgress) {
-    sendJson(res, 409, { message: 'Обновление уже выполняется' });
-    return;
-  }
-
-  updateInProgress = true;
-
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const allowPrerelease = parseBooleanParam(url, 'allowPrerelease');
-    const { latestVersion, tarballUrl } = await getLatestReleaseInfo(appVersion, allowPrerelease);
-    const comparableLatest = latestVersion || null;
-    const hasUpdate = comparableLatest ? compareVersions(comparableLatest, appVersion) > 0 : false;
-
-    if (!hasUpdate) {
-      sendJson(res, 200, { message: 'Установлена последняя версия приложения' });
-      return;
-    }
-
-    if (!tarballUrl) {
-      throw new Error('Не удалось найти архив релиза для загрузки');
-    }
-
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'djtron-update-'));
-    const archivePath = path.join(tempDir, 'release.tar.gz');
-
-    await downloadFile(tarballUrl, archivePath);
-    await extractTarball(archivePath, tempDir);
-    const extractedRoot = await findExtractedRoot(tempDir);
-    await copyReleaseContents(extractedRoot, __dirname);
-
-    sendJson(res, 200, { message: 'Обновление установлено. Приложение будет закрыто.' });
+    const { status, body } = await updateService.applyUpdate(url);
+    sendJson(res, status, body);
   } catch (err) {
     console.error('Update apply failed', err);
     sendJson(res, 500, { error: 'Не удалось выполнить обновление', details: err.message });
-  } finally {
-    updateInProgress = false;
   }
 }
 
