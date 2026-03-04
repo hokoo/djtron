@@ -13,36 +13,16 @@ const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
 const { HttpRouter } = require('./src/http/HttpRouter');
 const { AuthService } = require('./src/auth/AuthService');
 const { createAuthGuard } = require('./src/http/middlewares/auth');
+const { ConfigManager } = require('./src/config/ConfigManager');
 const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
 const { DspJobManager } = require('./src/dsp/DspJobManager');
 const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
 const { UpdateService } = require('./src/update/UpdateService');
 
+const configManager = new ConfigManager({ appDir: __dirname });
+
 function loadEnvFile() {
-  const envPath = path.join(__dirname, '.env');
-
-  if (!fs.existsSync(envPath)) return;
-
-  const content = fs.readFileSync(envPath, 'utf8');
-  content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .forEach((line) => {
-      if (!line || line.startsWith('#')) return;
-
-      const eqIndex = line.indexOf('=');
-      if (eqIndex === -1) return;
-
-      const key = line.slice(0, eqIndex).trim();
-      let value = line.slice(eqIndex + 1).trim();
-
-      if (key && process.env[key] === undefined) {
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-          value = value.slice(1, -1);
-        }
-        process.env[key] = value;
-      }
-    });
+  configManager.loadEnvFile();
 }
 
 const DEFAULT_PORT = 3000;
@@ -50,76 +30,19 @@ const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
 const ROOT_CONF_CANDIDATES = ['extra.conf'];
 
 function stripWrappingQuotes(value) {
-  if (typeof value !== 'string') return '';
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
+  return ConfigManager.stripWrappingQuotes(value);
 }
 
 function loadRootConfig() {
-  let confPath = null;
-  for (const candidate of ROOT_CONF_CANDIDATES) {
-    const absolutePath = path.join(__dirname, candidate);
-    if (fs.existsSync(absolutePath)) {
-      confPath = absolutePath;
-      break;
-    }
-  }
-
-  if (!confPath) return {};
-
-  try {
-    const content = fs.readFileSync(confPath, 'utf8');
-    const result = {};
-
-    content.split(/\r?\n/).forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) return;
-
-      const eqIndex = trimmed.indexOf('=');
-      const colonIndex = trimmed.indexOf(':');
-      const delimiterIndex =
-        eqIndex > 0 && colonIndex > 0 ? Math.min(eqIndex, colonIndex) : Math.max(eqIndex, colonIndex);
-
-      if (delimiterIndex <= 0) return;
-
-      const rawKey = trimmed.slice(0, delimiterIndex).trim().toLowerCase();
-      if (!rawKey) return;
-
-      const rawValue = trimmed.slice(delimiterIndex + 1).trim();
-      result[rawKey] = stripWrappingQuotes(rawValue);
-    });
-
-    return result;
-  } catch (err) {
-    console.error('Failed to read extra.conf file', err);
-    return {};
-  }
+  return configManager.loadRootConfig();
 }
 
 function pickConfigValue(config, keys) {
-  if (!config || typeof config !== 'object' || !Array.isArray(keys)) return undefined;
-  for (const key of keys) {
-    if (typeof key !== 'string') continue;
-    if (Object.prototype.hasOwnProperty.call(config, key)) {
-      return config[key];
-    }
-  }
-  return undefined;
+  return ConfigManager.pickConfigValue(config, keys);
 }
 
 function parseBooleanConfigValue(value, fallback = false) {
-  if (typeof value === 'boolean') return value;
-  if (value === null || value === undefined) return fallback;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return fallback;
-  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
-  return fallback;
+  return ConfigManager.parseBooleanConfigValue(value, fallback);
 }
 
 function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
@@ -195,33 +118,19 @@ function serializeVolumePresetPercentValues(values) {
 }
 
 function parsePortCandidate(value) {
-  if (value === null || value === undefined) return null;
-  const numeric = Number.parseInt(String(value).trim(), 10);
-  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 65535) return null;
-  return numeric;
+  return ConfigManager.parsePortCandidate(value);
 }
 
 function resolvePortValue(envValue, configValue, fallback = DEFAULT_PORT) {
-  const fromEnv = parsePortCandidate(envValue);
-  if (fromEnv !== null) return fromEnv;
-  const fromConfig = parsePortCandidate(configValue);
-  if (fromConfig !== null) return fromConfig;
-  return fallback;
+  return ConfigManager.resolvePortValue(envValue, configValue, fallback);
 }
 
-function parseBoundedNumberConfigValue(value, fallback, { min = null, max = null } = {}) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  if (Number.isFinite(min) && numeric < min) return fallback;
-  if (Number.isFinite(max) && numeric > max) return fallback;
-  return numeric;
+function parseBoundedNumberConfigValue(value, fallback, bounds = {}) {
+  return ConfigManager.parseBoundedNumberConfigValue(value, fallback, bounds);
 }
 
 function parseDspTransitionOutputFormat(value, fallback = 'wav') {
-  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (normalized === 'mp3') return 'mp3';
-  if (normalized === 'wav') return 'wav';
-  return fallback;
+  return ConfigManager.parseDspTransitionOutputFormat(value, fallback);
 }
 
 loadEnvFile();
