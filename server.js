@@ -11,7 +11,7 @@ const { version: appVersion } = require('./package.json');
 const { PlaybackCommandBus } = require('./lib/playback/commandBus');
 const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
 const { HttpRouter } = require('./src/http/HttpRouter');
-const { AuthService } = require('./src/auth/AuthService');
+const { AuthSessionManager } = require('./src/auth/AuthSessionManager');
 const { createAuthGuard } = require('./src/http/middlewares/auth');
 const { ConfigManager } = require('./src/config/ConfigManager');
 const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
@@ -419,7 +419,7 @@ const DSP_TEMPO_HOP_SAMPLES = 512;
 
 let shuttingDown = false;
 let updateInProgress = false;
-const authSessions = new Map();
+// authSessions managed by AuthSessionManager (instantiated after helper functions are defined)
 const audioAttributesCache = new Map();
 // layoutSubscribers moved into LayoutStateService
 const githubCache = {
@@ -664,200 +664,54 @@ function safeCompareStrings(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function createSessionToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
+// --- Auth Session Manager ---
+const authSessionManager = new AuthSessionManager({
+  config: {
+    SESSION_TOKEN_PATTERN,
+    USERNAME_PATTERN,
+    SESSION_TTL_MS,
+    ROLE_HOST,
+    ROLE_COHOST,
+    ROLE_SLAVE,
+    SESSIONS_STATE_PATH,
+    SESSION_COOKIE_NAME,
+  },
+  deps: {
+    crypto,
+    fs,
+    isServerRequest,
+    parseCookies,
+    onSessionsChanged: () => broadcastAuthUsersUpdate(),
+  },
+});
 
 function sanitizeSessionRole(value) {
-  return value === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
-}
-
-function sanitizeSessionRecord(token, rawSession, now) {
-  if (!SESSION_TOKEN_PATTERN.test(token)) return null;
-  if (!rawSession || typeof rawSession !== 'object') return null;
-
-  const username = typeof rawSession.username === 'string' ? rawSession.username : '';
-  const expiresAt = Number(rawSession.expiresAt);
-  const role = sanitizeSessionRole(rawSession.role);
-
-  if (!USERNAME_PATTERN.test(username)) return null;
-  if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
-
-  return { username, expiresAt, role };
+  return AuthSessionManager.sanitizeSessionRole(value, ROLE_COHOST, ROLE_SLAVE);
 }
 
 function collectActiveAuthUsers() {
-  const now = Date.now();
-  const groupedByUsername = new Map();
-  let hasInvalidEntries = false;
-
-  for (const [token, rawSession] of authSessions.entries()) {
-    const session = sanitizeSessionRecord(token, rawSession, now);
-    if (!session) {
-      authSessions.delete(token);
-      hasInvalidEntries = true;
-      continue;
-    }
-
-    const existing = groupedByUsername.get(session.username) || {
-      username: session.username,
-      role: ROLE_SLAVE,
-      sessionCount: 0,
-      expiresAt: 0,
-    };
-    existing.sessionCount += 1;
-    if (session.role === ROLE_COHOST) {
-      existing.role = ROLE_COHOST;
-    }
-    if (session.expiresAt > existing.expiresAt) {
-      existing.expiresAt = session.expiresAt;
-    }
-    groupedByUsername.set(session.username, existing);
-  }
-
-  if (hasInvalidEntries) {
-    persistSessions();
-  }
-
-  return Array.from(groupedByUsername.values()).sort((left, right) => left.username.localeCompare(right.username, 'ru'));
+  return authSessionManager.collectActiveAuthUsers();
 }
 
 function buildAuthUsersPayload(sourceClientId = null) {
-  return {
-    users: collectActiveAuthUsers(),
-    sourceClientId,
-  };
-}
-
-function persistSessions() {
-  try {
-    const now = Date.now();
-    const serialized = {};
-
-    for (const [token, rawSession] of authSessions.entries()) {
-      const session = sanitizeSessionRecord(token, rawSession, now);
-      if (!session) {
-        authSessions.delete(token);
-        continue;
-      }
-
-      serialized[token] = session;
-    }
-
-    fs.writeFileSync(SESSIONS_STATE_PATH, JSON.stringify(serialized, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Failed to persist auth sessions cache', err);
-  }
-}
-
-function loadPersistedSessions() {
-  try {
-    if (!fs.existsSync(SESSIONS_STATE_PATH)) return;
-
-    const raw = fs.readFileSync(SESSIONS_STATE_PATH, 'utf8');
-    if (!raw.trim()) return;
-
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Invalid auth sessions cache format');
-    }
-
-    const now = Date.now();
-    let hasInvalidEntries = false;
-
-    for (const [token, rawSession] of Object.entries(parsed)) {
-      const session = sanitizeSessionRecord(token, rawSession, now);
-      if (!session) {
-        hasInvalidEntries = true;
-        continue;
-      }
-
-      authSessions.set(token, session);
-    }
-
-    if (hasInvalidEntries) {
-      persistSessions();
-    }
-  } catch (err) {
-    console.error('Failed to load auth sessions cache', err);
-  }
-}
-
-function resolveDefaultRoleForUsername(username) {
-  const normalizedUsername = normalizeUsername(username);
-  if (!normalizedUsername) return ROLE_SLAVE;
-
-  for (const session of authSessions.values()) {
-    if (!session || session.username !== normalizedUsername) continue;
-    if (sanitizeSessionRole(session.role) === ROLE_COHOST) {
-      return ROLE_COHOST;
-    }
-  }
-
-  return ROLE_SLAVE;
+  return authSessionManager.buildAuthUsersPayload(sourceClientId);
 }
 
 function createSession(username) {
-  const sessionRole = resolveDefaultRoleForUsername(username);
-  const token = createSessionToken();
-  authSessions.set(token, {
-    username,
-    expiresAt: Date.now() + SESSION_TTL_MS,
-    role: sessionRole,
-  });
-  persistSessions();
-  layoutService.broadcastAuthUsersUpdate();
-  return { token, role: sessionRole };
-}
-
-function getSessionByToken(token) {
-  if (!token) return null;
-  const session = authSessions.get(token);
-  if (!session) return null;
-  if (session.expiresAt <= Date.now()) {
-    authSessions.delete(token);
-    persistSessions();
-    layoutService.broadcastAuthUsersUpdate();
-    return null;
-  }
-  return session;
+  return authSessionManager.createSession(username);
 }
 
 function destroySession(token) {
-  if (!token) return;
-  if (authSessions.delete(token)) {
-    persistSessions();
-    layoutService.broadcastAuthUsersUpdate();
-  }
+  return authSessionManager.destroySession(token);
 }
 
-function cleanupExpiredSessions() {
-  const now = Date.now();
-  let changed = false;
-
-  for (const [token, session] of authSessions.entries()) {
-    if (!session || session.expiresAt <= now) {
-      authSessions.delete(token);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    persistSessions();
-    layoutService.broadcastAuthUsersUpdate();
-  }
-}
-
-loadPersistedSessions();
-setInterval(cleanupExpiredSessions, 5 * 60 * 1000).unref();
 
 function setSessionCookie(res, token) {
-  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+  return authSessionManager.setSessionCookie(res, token);
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  return authSessionManager.clearSessionCookie(res);
 }
 
 function extractPasswordFromFile(content) {
@@ -943,134 +797,20 @@ function readJsonBody(req, limitBytes = AUTH_BODY_LIMIT_BYTES) {
 }
 
 function getAuthState(req) {
-  if (isServerRequest(req)) {
-    return {
-      authenticated: true,
-      isServer: true,
-      role: ROLE_HOST,
-      username: 'server',
-    };
-  }
-
-  const cookies = parseCookies(req);
-  const token = cookies[SESSION_COOKIE_NAME];
-  const session = getSessionByToken(token);
-
-  if (!session) {
-    return {
-      authenticated: false,
-      isServer: false,
-      role: null,
-      username: null,
-      token: null,
-    };
-  }
-
-  return {
-    authenticated: true,
-    isServer: false,
-    role: sanitizeSessionRole(session.role),
-    username: session.username,
-    token,
-  };
-}
-
-function requireAuthorizedRequest(req, res, responseKind = 'json') {
-  const auth = getAuthState(req);
-  if (auth.authenticated) return auth;
-
-  if (responseKind === 'text') {
-    res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Unauthorized');
-    return null;
-  }
-
-  sendJson(res, 401, { error: 'Требуется авторизация' });
-  return null;
-}
-
-function requireHostRequest(req, res) {
-  const auth = getAuthState(req);
-  if (!auth.authenticated) {
-    sendJson(res, 401, { error: 'Требуется авторизация' });
-    return null;
-  }
-  if (auth.isServer) return auth;
-  sendJson(res, 403, { error: 'Только хост может выполнять это действие' });
-  return null;
+  return authSessionManager.getAuthState(req);
 }
 
 function sanitizeManagedUserRole(value) {
-  return value === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
+  return AuthSessionManager.sanitizeManagedUserRole(value, ROLE_COHOST, ROLE_SLAVE);
 }
 
 function setRoleForActiveUserSessions(username, role) {
-  const normalizedUsername = normalizeUsername(username);
-  if (!normalizedUsername) {
-    return { matchedSessions: 0, changed: false };
-  }
-
-  const nextRole = sanitizeManagedUserRole(role);
-  const now = Date.now();
-  let matchedSessions = 0;
-  let changed = false;
-  let hasInvalidEntries = false;
-
-  for (const [token, rawSession] of authSessions.entries()) {
-    const session = sanitizeSessionRecord(token, rawSession, now);
-    if (!session) {
-      authSessions.delete(token);
-      hasInvalidEntries = true;
-      continue;
-    }
-
-    if (session.username !== normalizedUsername) continue;
-    matchedSessions += 1;
-    const currentRole = session.role;
-    if (currentRole === nextRole) continue;
-    rawSession.role = nextRole;
-    changed = true;
-  }
-
-  if (hasInvalidEntries || changed) {
-    persistSessions();
-  }
-  if (changed || hasInvalidEntries) {
-    layoutService.broadcastAuthUsersUpdate();
-  }
-
-  return { matchedSessions, changed };
+  return authSessionManager.setRoleForActiveUserSessions(username, role);
 }
 
 function disconnectActiveUserSessions(username) {
-  const normalizedUsername = normalizeUsername(username);
-  if (!normalizedUsername) {
-    return { removedSessions: 0 };
-  }
-
-  const now = Date.now();
-  let removedSessions = 0;
-  let hasInvalidEntries = false;
-
-  for (const [token, rawSession] of authSessions.entries()) {
-    const session = sanitizeSessionRecord(token, rawSession, now);
-    if (!session) {
-      authSessions.delete(token);
-      hasInvalidEntries = true;
-      continue;
-    }
-
-    if (session.username !== normalizedUsername) continue;
-    authSessions.delete(token);
-    removedSessions += 1;
-  }
-
-  if (removedSessions > 0 || hasInvalidEntries) {
-    persistSessions();
-    layoutService.broadcastAuthUsersUpdate();
-  }
-
-  return { removedSessions };
+  return authSessionManager.disconnectActiveUserSessions(username);
+}
 }
 
 function sanitizePlaybackCommand(rawCommand) {
@@ -2475,9 +2215,8 @@ function handlePublic(req, res, pathname) {
 }
 
 
-// --- HttpRouter + AuthService wiring (PR1) ---
-const authService = new AuthService({ getAuthStateFn: getAuthState });
-const authGuard = createAuthGuard(authService);
+// --- HttpRouter + AuthSessionManager wiring ---
+const authGuard = createAuthGuard(authSessionManager);
 const router = new HttpRouter({ authGuard });
 
 // Auth endpoints
