@@ -18,6 +18,7 @@ const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
 const { DspJobManager } = require('./src/dsp/DspJobManager');
 const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
 const { UpdateService } = require('./src/update/UpdateService');
+const { LayoutStateService } = require('./src/layout/LayoutStateService');
 
 const configManager = new ConfigManager({ appDir: __dirname });
 
@@ -420,7 +421,7 @@ let shuttingDown = false;
 let updateInProgress = false;
 const authSessions = new Map();
 const audioAttributesCache = new Map();
-const layoutSubscribers = new Set();
+// layoutSubscribers moved into LayoutStateService
 const dspTransitions = new Map();
 const dspQueue = [];
 let dspWorkerScheduled = false;
@@ -509,652 +510,23 @@ const updateCheckCache = {
   prerelease: { lastChecked: persistedUpdateState.prerelease.lastChecked, result: persistedUpdateState.prerelease.result },
 };
 
-function getDefaultLayoutState() {
-  return {
-    version: 0,
-    updatedAt: 0,
-    layout: [[]],
-    playlistNames: ['Плей-лист 1'],
-    playlistMeta: [{ type: 'manual' }],
-    playlistAutoplay: [false],
-    playlistDsp: [false],
-    dapConfig: { ...DEFAULT_DAP_CONFIG },
-    trackTitleModesByTrack: {},
-  };
-}
-
-function getDefaultPlaybackState() {
-  return {
-    trackFile: null,
-    paused: false,
-    currentTime: 0,
-    duration: null,
-    volume: DEFAULT_LIVE_VOLUME,
-    showVolumePresets: false,
-    allowLiveSeek: false,
-    dapPlayback: getDefaultDapPlaybackState(),
-    overlaySeconds: 0,
-    nextDspSliceSeconds: 0,
-    nextDspSourceSeconds: 0,
-    playlistIndex: null,
-    playlistPosition: null,
-    updatedAt: 0,
-  };
-}
-
-function getDefaultDapPlaybackState() {
-  return {
-    trackFile: null,
-    paused: false,
-    currentTime: 0,
-    duration: null,
-    playlistIndex: null,
-    playlistPosition: null,
-    interrupted: false,
-    updatedAt: 0,
-  };
-}
-
-function defaultPlaylistName(index) {
-  return `Плей-лист ${index + 1}`;
-}
-
-function sanitizePlaylistName(value, index) {
-  if (typeof value !== 'string') {
-    return defaultPlaylistName(index);
-  }
-
-  const normalized = value.trim().replace(/\s+/g, ' ');
-  if (!normalized) {
-    return defaultPlaylistName(index);
-  }
-
-  return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
-}
-
-function sanitizeLayout(layout) {
-  if (!Array.isArray(layout)) return null;
-
-  const normalized = [];
-
-  layout.forEach((playlist) => {
-    if (!Array.isArray(playlist)) return;
-
-    const clean = [];
-    playlist.forEach((value) => {
-      if (typeof value !== 'string') return;
-      const file = value.trim();
-      if (!file) return;
-      clean.push(file);
-    });
-
-    normalized.push(clean);
-  });
-
-  return normalized;
-}
-
-function normalizePlaylistNames(playlistNames, layoutLength) {
-  const result = [];
-
-  for (let index = 0; index < layoutLength; index += 1) {
-    const rawName = Array.isArray(playlistNames) ? playlistNames[index] : null;
-    result.push(sanitizePlaylistName(rawName, index));
-  }
-
-  return result;
-}
-
-function normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
-  const result = [];
-
-  for (let index = 0; index < layoutLength; index += 1) {
-    const rawValue = Array.isArray(playlistAutoplay) ? playlistAutoplay[index] : false;
-    result.push(Boolean(rawValue));
-  }
-
-  return result;
-}
-
-function normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layoutLength) {
-  const normalizedAutoplay = normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
-  const result = [];
-
-  for (let index = 0; index < layoutLength; index += 1) {
-    const rawValue = Array.isArray(playlistDsp) ? playlistDsp[index] : false;
-    result.push(Boolean(rawValue) && Boolean(normalizedAutoplay[index]));
-  }
-
-  return result;
-}
-
-function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return normalizeDapVolumePercent(fallback, DAP_DEFAULT_VOLUME_PERCENT);
-  }
-
-  const rounded = Math.round(numeric);
-  if (rounded < DAP_MIN_VOLUME_PERCENT) return DAP_MIN_VOLUME_PERCENT;
-  if (rounded > DAP_MAX_VOLUME_PERCENT) return DAP_MAX_VOLUME_PERCENT;
-  return rounded;
-}
-
-function sanitizeDapConfig(dapConfig, layoutLength, fallback = DEFAULT_DAP_CONFIG) {
-  const expectedLayoutLength = Number.isInteger(layoutLength) && layoutLength >= 0 ? layoutLength : 0;
-  const safeFallback =
-    fallback && typeof fallback === 'object'
-      ? {
-          enabled: Boolean(fallback.enabled),
-          playlistIndex: normalizePlaylistTrackIndex(fallback.playlistIndex),
-          volumePercent: normalizeDapVolumePercent(fallback.volumePercent, DAP_DEFAULT_VOLUME_PERCENT),
-        }
-      : { ...DEFAULT_DAP_CONFIG };
-  const rawConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : null;
-
-  const requestedEnabled =
-    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'enabled')
-      ? Boolean(rawConfig.enabled)
-      : safeFallback.enabled;
-  const requestedPlaylistIndex =
-    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'playlistIndex')
-      ? normalizePlaylistTrackIndex(rawConfig.playlistIndex)
-      : safeFallback.playlistIndex;
-  const playlistIndex =
-    requestedPlaylistIndex !== null &&
-    requestedPlaylistIndex >= 0 &&
-    requestedPlaylistIndex < expectedLayoutLength
-      ? requestedPlaylistIndex
-      : null;
-  const volumePercent = normalizeDapVolumePercent(
-    rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'volumePercent')
-      ? rawConfig.volumePercent
-      : safeFallback.volumePercent,
-    safeFallback.volumePercent,
-  );
-  const enabled = Boolean(requestedEnabled && playlistIndex !== null);
-
-  return {
-    enabled,
-    playlistIndex,
-    volumePercent,
-  };
-}
-
-function normalizePlaylistAutoplayWithDap(playlistAutoplay, dapConfig, layoutLength) {
-  const normalized = normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
-  const sanitizedDap = sanitizeDapConfig(dapConfig, layoutLength, DEFAULT_DAP_CONFIG);
-  if (sanitizedDap.enabled && sanitizedDap.playlistIndex !== null) {
-    normalized[sanitizedDap.playlistIndex] = true;
-  }
-  return normalized;
-}
-
-function sanitizeTrackTitleMode(value) {
-  return value === TRACK_TITLE_MODE_ATTRIBUTES ? TRACK_TITLE_MODE_ATTRIBUTES : null;
-}
-
-function sanitizeTrackTitleModesByTrack(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  const result = {};
-  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right, 'ru'));
-
-  for (const [rawKey, rawMode] of entries) {
-    if (typeof rawKey !== 'string') continue;
-    const normalizedKey = rawKey.trim().slice(0, TRACK_TITLE_KEY_MAX_LENGTH);
-    if (!normalizedKey) continue;
-
-    const normalizedMode = sanitizeTrackTitleMode(rawMode);
-    if (!normalizedMode) continue;
-
-    result[normalizedKey] = normalizedMode;
-  }
-
-  return result;
-}
-
-function sanitizeFolderKey(value) {
-  if (typeof value !== 'string') return null;
-  const normalized = value
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+/g, '/');
-  if (!normalized) return null;
-  return normalized.slice(0, 512);
-}
-
-function sanitizeFolderOriginalName(value, fallback) {
-  if (typeof value === 'string') {
-    const normalized = value.trim().replace(/\s+/g, ' ');
-    if (normalized) {
-      return normalized.slice(0, PLAYLIST_NAME_MAX_LENGTH);
-    }
-  }
-
-  if (typeof fallback === 'string') {
-    const normalizedFallback = fallback.trim().replace(/\s+/g, ' ');
-    if (normalizedFallback) {
-      return normalizedFallback.slice(0, PLAYLIST_NAME_MAX_LENGTH);
-    }
-  }
-
-  return '';
-}
-
-function sanitizePlaylistMetaEntry(value) {
-  if (!value || typeof value !== 'object') {
-    return { type: 'manual' };
-  }
-
-  if (value.type !== 'folder') {
-    return { type: 'manual' };
-  }
-
-  const folderKey = sanitizeFolderKey(value.folderKey);
-  if (!folderKey) {
-    return { type: 'manual' };
-  }
-
-  const fallbackName = path.basename(folderKey) || folderKey;
-  return {
-    type: 'folder',
-    folderKey,
-    folderOriginalName: sanitizeFolderOriginalName(value.folderOriginalName, fallbackName),
-  };
-}
-
-function normalizePlaylistMeta(playlistMeta, layoutLength) {
-  const result = [];
-
-  for (let index = 0; index < layoutLength; index += 1) {
-    const rawValue = Array.isArray(playlistMeta) ? playlistMeta[index] : null;
-    result.push(sanitizePlaylistMetaEntry(rawValue));
-  }
-
-  return result;
-}
-
-function normalizePlaylistTrackIndex(value) {
-  const numeric = Number.parseInt(value, 10);
-  if (!Number.isInteger(numeric) || numeric < 0) return null;
-  return numeric;
-}
-
-function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  const normalized = Math.max(0, Math.min(1, numeric));
-
-  if (Math.abs(normalized - 1) < 0.0001) {
-    return 1;
-  }
-  return normalized;
-}
-
-function hasActiveVolumePreset(value) {
-  const normalized = normalizeLiveVolumePreset(value, DEFAULT_LIVE_VOLUME);
-  for (const preset of LIVE_VOLUME_PRESET_VALUES) {
-    if (Math.abs(normalized - preset) < 0.0001) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function normalizePlaybackSeekRatio(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return null;
-  if (numeric <= 0) return 0;
-  if (numeric >= 1) return 1;
-  return numeric;
-}
-
-function sanitizeDapPlaybackState(rawPlayback) {
-  const base = getDefaultDapPlaybackState();
-  if (!rawPlayback || typeof rawPlayback !== 'object') {
-    return base;
-  }
-
-  const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
-  if (!trackFile) {
-    const updatedAt = Number(rawPlayback.updatedAt);
-    if (Number.isFinite(updatedAt) && updatedAt > 0) {
-      base.updatedAt = updatedAt;
-    }
-    return base;
-  }
-
-  const rawCurrentTime = Number(rawPlayback.currentTime);
-  let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
-
-  const rawDuration = Number(rawPlayback.duration);
-  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
-  if (duration !== null && currentTime > duration) {
-    currentTime = duration;
-  }
-
-  const updatedAt = Number(rawPlayback.updatedAt);
-  return {
-    trackFile,
-    paused: Boolean(rawPlayback.paused),
-    currentTime,
-    duration,
-    playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
-    interrupted: Boolean(rawPlayback.interrupted),
-    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
-  };
-}
-
-function sanitizePlaybackState(rawPlayback) {
-  if (!rawPlayback || typeof rawPlayback !== 'object') {
-    return {
-      ...getDefaultPlaybackState(),
-      updatedAt: Date.now(),
-    };
-  }
-
-  const dapPlayback = sanitizeDapPlaybackState(rawPlayback.dapPlayback);
-  const volume = normalizeLiveVolumePreset(rawPlayback.volume, DEFAULT_LIVE_VOLUME);
-  const hasExplicitShowVolumePresets = Object.prototype.hasOwnProperty.call(rawPlayback, 'showVolumePresets');
-  let showVolumePresets = hasExplicitShowVolumePresets ? Boolean(rawPlayback.showVolumePresets) : hasActiveVolumePreset(volume);
-  if (!showVolumePresets && hasActiveVolumePreset(volume)) {
-    showVolumePresets = true;
-  }
-  const allowLiveSeek = Boolean(rawPlayback.allowLiveSeek);
-  const overlaySeconds = parseBoundedNumberConfigValue(rawPlayback.overlaySeconds, 0, { min: 0, max: 120 });
-  const nextDspSliceSeconds = parseBoundedNumberConfigValue(rawPlayback.nextDspSliceSeconds, 0, { min: 0, max: 120 });
-  let nextDspSourceSeconds = parseBoundedNumberConfigValue(rawPlayback.nextDspSourceSeconds, 0, {
-    min: 0,
-    max: 120,
-  });
-  if (nextDspSliceSeconds <= 0) {
-    nextDspSourceSeconds = 0;
-  } else if (nextDspSourceSeconds > nextDspSliceSeconds) {
-    nextDspSourceSeconds = nextDspSliceSeconds;
-  }
-  const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
-  if (!trackFile) {
-    return {
-      ...getDefaultPlaybackState(),
-      volume,
-      showVolumePresets,
-      allowLiveSeek,
-      dapPlayback,
-      overlaySeconds,
-      nextDspSliceSeconds: 0,
-      nextDspSourceSeconds: 0,
-      updatedAt: Date.now(),
-    };
-  }
-
-  const rawCurrentTime = Number(rawPlayback.currentTime);
-  let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
-
-  const rawDuration = Number(rawPlayback.duration);
-  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
-  if (duration !== null && currentTime > duration) {
-    currentTime = duration;
-  }
-
-  return {
-    trackFile,
-    paused: Boolean(rawPlayback.paused),
-    currentTime,
-    duration,
-    volume,
-    showVolumePresets,
-    allowLiveSeek,
-    dapPlayback,
-    overlaySeconds,
-    nextDspSliceSeconds,
-    nextDspSourceSeconds,
-    playlistIndex: normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
-    updatedAt: Date.now(),
-  };
-}
-
-function hasLivePlaybackTrack(state) {
-  return Boolean(state && typeof state.trackFile === 'string' && state.trackFile.trim());
-}
-
-function isDeletingLivePlaybackPlaylist(nextLayout) {
-  if (!hasLivePlaybackTrack(sharedPlaybackState)) return false;
-
-  const livePlaylistIndex = normalizePlaylistTrackIndex(sharedPlaybackState.playlistIndex);
-  if (livePlaylistIndex === null) return false;
-
-  if (!Array.isArray(sharedLayoutState.layout[livePlaylistIndex])) return false;
-  return !Array.isArray(nextLayout[livePlaylistIndex]);
-}
-
-function detectRemovedPlaylistIndex(previousLayout, nextLayout) {
-  if (!Array.isArray(previousLayout) || !Array.isArray(nextLayout)) return null;
-  if (previousLayout.length !== nextLayout.length + 1) return null;
-
-  const serializedPrevious = previousLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
-  const serializedNext = nextLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
-
-  let removedIndex = -1;
-  for (let index = 0; index < serializedNext.length; index += 1) {
-    if (serializedPrevious[index] === serializedNext[index]) continue;
-    removedIndex = index;
-    break;
-  }
-
-  if (removedIndex === -1) {
-    return previousLayout.length - 1;
-  }
-
-  for (let index = removedIndex; index < serializedNext.length; index += 1) {
-    if (serializedPrevious[index + 1] !== serializedNext[index]) {
-      return null;
-    }
-  }
-
-  return removedIndex;
-}
-
-function loadPersistedLayoutState() {
-  try {
-    if (!fs.existsSync(LAYOUT_STATE_PATH)) {
-      return getDefaultLayoutState();
-    }
-
-    const raw = fs.readFileSync(LAYOUT_STATE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    const sanitizedLayout = sanitizeLayout(parsed.layout);
-    if (!sanitizedLayout) {
-      return getDefaultLayoutState();
-    }
-    const sanitizedNames = normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
-    const sanitizedMeta = normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
-    const persistedDap = sanitizeDapConfig(parsed.dapConfig, sanitizedLayout.length, DEFAULT_DAP_CONFIG);
-    // DAP must always start disabled after server reboot, while preserving selected playlist/volume.
-    const sanitizedDap = {
-      ...persistedDap,
-      enabled: false,
-    };
-    const sanitizedAutoplay = normalizePlaylistAutoplayWithDap(
-      parsed.playlistAutoplay,
-      sanitizedDap,
-      sanitizedLayout.length,
-    );
-    const sanitizedDsp = normalizePlaylistDspFlags(parsed.playlistDsp, sanitizedAutoplay, sanitizedLayout.length);
-    const sanitizedTrackTitleModes = sanitizeTrackTitleModesByTrack(parsed.trackTitleModesByTrack);
-
-    const version = Number(parsed.version);
-    const updatedAt = Number(parsed.updatedAt);
-
-    return {
-      version: Number.isFinite(version) && version >= 0 ? version : 0,
-      updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
-      layout: sanitizedLayout,
-      playlistNames: sanitizedNames,
-      playlistMeta: sanitizedMeta,
-      playlistAutoplay: sanitizedAutoplay,
-      playlistDsp: sanitizedDsp,
-      dapConfig: sanitizedDap,
-      trackTitleModesByTrack: sanitizedTrackTitleModes,
-    };
-  } catch (err) {
-    console.error('Failed to load layout state cache', err);
-    return getDefaultLayoutState();
-  }
-}
-
-function persistLayoutState(state) {
-  try {
-    fs.writeFileSync(LAYOUT_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Failed to persist layout state cache', err);
-  }
-}
-
-function sanitizeClientId(value) {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim();
-  if (!normalized) return null;
-  return normalized.slice(0, 128);
-}
-
-function serializePlaybackState(state) {
-  return JSON.stringify({
-    trackFile: typeof state.trackFile === 'string' ? state.trackFile : null,
-    paused: Boolean(state.paused),
-    currentTime: Number.isFinite(state.currentTime) && state.currentTime >= 0 ? state.currentTime : 0,
-    duration: Number.isFinite(state.duration) && state.duration > 0 ? state.duration : null,
-    volume: normalizeLiveVolumePreset(state.volume, DEFAULT_LIVE_VOLUME),
-    showVolumePresets: Boolean(state.showVolumePresets),
-    allowLiveSeek: Boolean(state.allowLiveSeek),
-    dapPlayback: (() => {
-      const normalizedDap = sanitizeDapPlaybackState(state.dapPlayback);
-      return {
-        trackFile: normalizedDap.trackFile,
-        paused: normalizedDap.paused,
-        currentTime: normalizedDap.currentTime,
-        duration: normalizedDap.duration,
-        playlistIndex: normalizedDap.playlistIndex,
-        playlistPosition: normalizedDap.playlistPosition,
-        interrupted: normalizedDap.interrupted,
-      };
-    })(),
-    overlaySeconds: parseBoundedNumberConfigValue(state.overlaySeconds, 0, { min: 0, max: 120 }),
-    nextDspSliceSeconds: parseBoundedNumberConfigValue(state.nextDspSliceSeconds, 0, { min: 0, max: 120 }),
-    nextDspSourceSeconds: parseBoundedNumberConfigValue(state.nextDspSourceSeconds, 0, { min: 0, max: 120 }),
-    playlistIndex: normalizePlaylistTrackIndex(state.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(state.playlistPosition),
-  });
-}
-
-function buildLayoutPayload(sourceClientId = null) {
-  return {
-    layout: sharedLayoutState.layout,
-    playlistNames: sharedLayoutState.playlistNames,
-    playlistMeta: sharedLayoutState.playlistMeta,
-    playlistAutoplay: sharedLayoutState.playlistAutoplay,
-    playlistDsp: sharedLayoutState.playlistDsp,
-    dapConfig: sharedLayoutState.dapConfig,
-    trackTitleModesByTrack: sharedLayoutState.trackTitleModesByTrack,
-    version: sharedLayoutState.version,
-    updatedAt: sharedLayoutState.updatedAt,
-    sourceClientId,
-  };
-}
-
-function buildPlaybackPayload(sourceClientId = null) {
-  const normalizedDapPlayback = sanitizeDapPlaybackState(sharedPlaybackState.dapPlayback);
-  return {
-    trackFile: sharedPlaybackState.trackFile,
-    paused: sharedPlaybackState.paused,
-    currentTime: sharedPlaybackState.currentTime,
-    duration: sharedPlaybackState.duration,
-    volume: sharedPlaybackState.volume,
-    showVolumePresets: Boolean(sharedPlaybackState.showVolumePresets),
-    allowLiveSeek: Boolean(sharedPlaybackState.allowLiveSeek),
-    dapPlayback: {
-      trackFile: normalizedDapPlayback.trackFile,
-      paused: normalizedDapPlayback.paused,
-      currentTime: normalizedDapPlayback.currentTime,
-      duration: normalizedDapPlayback.duration,
-      playlistIndex: normalizedDapPlayback.playlistIndex,
-      playlistPosition: normalizedDapPlayback.playlistPosition,
-      interrupted: normalizedDapPlayback.interrupted,
-      updatedAt: normalizedDapPlayback.updatedAt,
-    },
-    overlaySeconds: parseBoundedNumberConfigValue(sharedPlaybackState.overlaySeconds, 0, { min: 0, max: 120 }),
-    nextDspSliceSeconds: parseBoundedNumberConfigValue(sharedPlaybackState.nextDspSliceSeconds, 0, {
-      min: 0,
-      max: 120,
-    }),
-    nextDspSourceSeconds: parseBoundedNumberConfigValue(sharedPlaybackState.nextDspSourceSeconds, 0, {
-      min: 0,
-      max: 120,
-    }),
-    playlistIndex: sharedPlaybackState.playlistIndex,
-    playlistPosition: sharedPlaybackState.playlistPosition,
-    updatedAt: sharedPlaybackState.updatedAt,
-    sourceClientId,
-  };
-}
-
-function sendSseEvent(res, eventName, payload) {
-  res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
-
-function broadcastLayoutUpdate(sourceClientId = null) {
-  const payload = buildLayoutPayload(sourceClientId);
-
-  for (const res of layoutSubscribers) {
-    try {
-      sendSseEvent(res, 'layout', payload);
-    } catch (err) {
-      layoutSubscribers.delete(res);
-    }
-  }
-}
-
-function broadcastPlaybackUpdate(sourceClientId = null) {
-  const payload = buildPlaybackPayload(sourceClientId);
-
-  for (const res of layoutSubscribers) {
-    try {
-      sendSseEvent(res, 'playback', payload);
-    } catch (err) {
-      layoutSubscribers.delete(res);
-    }
-  }
-}
-
-function broadcastAuthUsersUpdate(sourceClientId = null) {
-  const payload = buildAuthUsersPayload(sourceClientId);
-
-  for (const res of layoutSubscribers) {
-    try {
-      sendSseEvent(res, 'auth-users', payload);
-    } catch (err) {
-      layoutSubscribers.delete(res);
-    }
-  }
-}
-
-function broadcastPlaybackCommand(commandPayload) {
-  if (!commandPayload || typeof commandPayload !== 'object') return;
-
-  for (const res of layoutSubscribers) {
-    try {
-      sendSseEvent(res, 'playback-command', commandPayload);
-    } catch (err) {
-      layoutSubscribers.delete(res);
-    }
-  }
-}
+// Layout state management is handled by LayoutStateService (see src/layout/LayoutStateService.js)
+
+const layoutService = new LayoutStateService({
+  config: {
+    LAYOUT_STATE_PATH,
+    DEFAULT_DAP_CONFIG,
+    DAP_DEFAULT_VOLUME_PERCENT,
+    DAP_MIN_VOLUME_PERCENT,
+    DAP_MAX_VOLUME_PERCENT,
+    DEFAULT_LIVE_VOLUME,
+    LIVE_VOLUME_PRESET_VALUES,
+    PLAYLIST_NAME_MAX_LENGTH,
+    TRACK_TITLE_MODE_ATTRIBUTES,
+    TRACK_TITLE_KEY_MAX_LENGTH,
+  },
+  deps: { fs, path, buildAuthUsersPayload },
+});
 
 const livePlaybackCommandBus = new PlaybackCommandBus({
   authorize: ({ sourceRole, commandType, isServer }) =>
@@ -1164,33 +536,23 @@ const livePlaybackCommandBus = new PlaybackCommandBus({
       isServer,
     }),
   execute: (payload) => {
-    broadcastPlaybackCommand(payload);
+    layoutService.broadcastPlaybackCommand(payload);
   },
 });
 
-function keepLayoutStreamAlive() {
-  for (const res of layoutSubscribers) {
-    try {
-      res.write(': ping\n\n');
-    } catch (err) {
-      layoutSubscribers.delete(res);
-    }
-  }
-}
-
-let sharedLayoutState = loadPersistedLayoutState();
-let sharedPlaybackState = getDefaultPlaybackState();
-setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
+layoutService.layoutState = layoutService.loadPersistedLayoutState();
+layoutService.playbackState = layoutService.getDefaultPlaybackState();
+setInterval(() => layoutService.keepLayoutStreamAlive(), 25 * 1000).unref();
 
 const playbackGateway = new PlaybackGateway({
-  getState: () => sharedPlaybackState,
-  setState: (next) => { sharedPlaybackState = next; },
-  sanitizeState: sanitizePlaybackState,
-  serializeState: serializePlaybackState,
-  buildPayload: buildPlaybackPayload,
-  broadcastUpdate: broadcastPlaybackUpdate,
+  getState: () => layoutService.playbackState,
+  setState: (next) => { layoutService.playbackState = next; },
+  sanitizeState: (s) => layoutService.sanitizePlaybackState(s),
+  serializeState: (s) => layoutService.serializePlaybackState(s),
+  buildPayload: (cid) => layoutService.buildPlaybackPayload(cid),
+  broadcastUpdate: (cid) => layoutService.broadcastPlaybackUpdate(cid),
   sanitizeCommand: sanitizePlaybackCommand,
-  sanitizeClientId,
+  sanitizeClientId: LayoutStateService.sanitizeClientId,
   sanitizeSessionRole,
   commandBus: livePlaybackCommandBus,
   ROLE_HOST,
@@ -1457,7 +819,7 @@ function createSession(username) {
     role: sessionRole,
   });
   persistSessions();
-  broadcastAuthUsersUpdate();
+  layoutService.broadcastAuthUsersUpdate();
   return { token, role: sessionRole };
 }
 
@@ -1468,7 +830,7 @@ function getSessionByToken(token) {
   if (session.expiresAt <= Date.now()) {
     authSessions.delete(token);
     persistSessions();
-    broadcastAuthUsersUpdate();
+    layoutService.broadcastAuthUsersUpdate();
     return null;
   }
   return session;
@@ -1478,7 +840,7 @@ function destroySession(token) {
   if (!token) return;
   if (authSessions.delete(token)) {
     persistSessions();
-    broadcastAuthUsersUpdate();
+    layoutService.broadcastAuthUsersUpdate();
   }
 }
 
@@ -1495,7 +857,7 @@ function cleanupExpiredSessions() {
 
   if (changed) {
     persistSessions();
-    broadcastAuthUsersUpdate();
+    layoutService.broadcastAuthUsersUpdate();
   }
 }
 
@@ -1687,7 +1049,7 @@ function setRoleForActiveUserSessions(username, role) {
     persistSessions();
   }
   if (changed || hasInvalidEntries) {
-    broadcastAuthUsersUpdate();
+    layoutService.broadcastAuthUsersUpdate();
   }
 
   return { matchedSessions, changed };
@@ -1718,7 +1080,7 @@ function disconnectActiveUserSessions(username) {
 
   if (removedSessions > 0 || hasInvalidEntries) {
     persistSessions();
-    broadcastAuthUsersUpdate();
+    layoutService.broadcastAuthUsersUpdate();
   }
 
   return { removedSessions };
@@ -1733,7 +1095,7 @@ function sanitizePlaybackCommand(rawCommand) {
   }
 
   if (commandType === 'set-volume') {
-    const volume = normalizeLiveVolumePreset(rawCommand.volume, null);
+    const volume = layoutService.normalizeLiveVolumePreset(rawCommand.volume, null);
     if (volume === null) return null;
     return { type: 'set-volume', volume };
   }
@@ -1753,7 +1115,7 @@ function sanitizePlaybackCommand(rawCommand) {
   }
 
   if (commandType === 'seek-current') {
-    const positionRatio = normalizePlaybackSeekRatio(rawCommand.positionRatio);
+    const positionRatio = LayoutStateService.normalizePlaybackSeekRatio(rawCommand.positionRatio);
     if (positionRatio === null) return null;
     return {
       type: 'seek-current',
@@ -1773,8 +1135,8 @@ function sanitizePlaybackCommand(rawCommand) {
     type: 'play-track',
     file,
     basePath: '/audio',
-    playlistIndex: normalizePlaylistTrackIndex(rawCommand.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(rawCommand.playlistPosition),
+    playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistIndex),
+    playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistPosition),
   };
 }
 
@@ -4196,8 +3558,8 @@ async function handleApiDspTransitionsPost(req, res) {
   }
 
   const result = dspJobManager.enqueueBatch(body, {
-    layout: sharedLayoutState.layout,
-    playlistDsp: sharedLayoutState.playlistDsp,
+    layout: layoutService.layoutState.layout,
+    playlistDsp: layoutService.layoutState.playlistDsp,
   });
 
   if (result.error) {
@@ -4719,26 +4081,26 @@ function handleApiConfig(req, res) {
 }
 
 function handleApiLayoutGet(req, res) {
-  sendJson(res, 200, buildLayoutPayload(null));
+  sendJson(res, 200, layoutService.buildLayoutPayload(null));
 }
 
 function handleApiLayoutReset(req, res) {
-  sharedLayoutState = {
-    ...getDefaultLayoutState(),
-    version: sharedLayoutState.version + 1,
+  layoutService.layoutState = {
+    ...layoutService.getDefaultLayoutState(),
+    version: layoutService.layoutState.version + 1,
     updatedAt: Date.now(),
   };
 
-  persistLayoutState(sharedLayoutState);
-  broadcastLayoutUpdate(null);
-  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
+  layoutService.persistLayoutState(layoutService.layoutState);
+  layoutService.broadcastLayoutUpdate(null);
+  dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
     source: 'layout-update',
     priority: 'normal',
     force: false,
-    playlistDspFlags: sharedLayoutState.playlistDsp,
+    playlistDspFlags: layoutService.layoutState.playlistDsp,
   });
 
-  sendJson(res, 200, buildLayoutPayload(null));
+  sendJson(res, 200, layoutService.buildLayoutPayload(null));
 }
 
 function handleApiPlaybackGet(req, res) {
@@ -4765,33 +4127,33 @@ async function handleApiLayoutUpdate(req, res) {
     return;
   }
 
-  const nextLayout = sanitizeLayout(body.layout);
+  const nextLayout = LayoutStateService.sanitizeLayout(body.layout);
   if (!nextLayout) {
     sendJson(res, 400, { error: 'Неверный формат плей-листов' });
     return;
   }
 
-  if (isDeletingLivePlaybackPlaylist(nextLayout)) {
+  if (layoutService.isDeletingLivePlaybackPlaylist(nextLayout)) {
     sendJson(res, 409, { error: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' });
     return;
   }
 
-  const nextPlaylistNames = normalizePlaylistNames(body.playlistNames, nextLayout.length);
-  const nextPlaylistMeta = normalizePlaylistMeta(
-    Array.isArray(body.playlistMeta) ? body.playlistMeta : sharedLayoutState.playlistMeta,
+  const nextPlaylistNames = layoutService.normalizePlaylistNames(body.playlistNames, nextLayout.length);
+  const nextPlaylistMeta = layoutService.normalizePlaylistMeta(
+    Array.isArray(body.playlistMeta) ? body.playlistMeta : layoutService.layoutState.playlistMeta,
     nextLayout.length,
   );
   let nextDapConfig = auth.isServer
-    ? sanitizeDapConfig(
-        body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : sharedLayoutState.dapConfig,
+    ? layoutService.sanitizeDapConfig(
+        body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : layoutService.layoutState.dapConfig,
         nextLayout.length,
-        sharedLayoutState.dapConfig,
+        layoutService.layoutState.dapConfig,
       )
-    : sanitizeDapConfig(sharedLayoutState.dapConfig, nextLayout.length, sharedLayoutState.dapConfig);
+    : layoutService.sanitizeDapConfig(layoutService.layoutState.dapConfig, nextLayout.length, layoutService.layoutState.dapConfig);
   if (!auth.isServer) {
-    const currentDapIndex = normalizePlaylistTrackIndex(sharedLayoutState.dapConfig && sharedLayoutState.dapConfig.playlistIndex);
-    const isCurrentDapEnabled = Boolean(sharedLayoutState.dapConfig && sharedLayoutState.dapConfig.enabled);
-    const removedPlaylistIndex = detectRemovedPlaylistIndex(sharedLayoutState.layout, nextLayout);
+    const currentDapIndex = LayoutStateService.normalizePlaylistTrackIndex(layoutService.layoutState.dapConfig && layoutService.layoutState.dapConfig.playlistIndex);
+    const isCurrentDapEnabled = Boolean(layoutService.layoutState.dapConfig && layoutService.layoutState.dapConfig.enabled);
+    const removedPlaylistIndex = LayoutStateService.detectRemovedPlaylistIndex(layoutService.layoutState.layout, nextLayout);
     if (currentDapIndex !== null && removedPlaylistIndex !== null) {
       if (isCurrentDapEnabled && removedPlaylistIndex === currentDapIndex) {
         sendJson(res, 409, { error: 'Нельзя удалить плей-лист, выбранный для DAP.' });
@@ -4799,48 +4161,48 @@ async function handleApiLayoutUpdate(req, res) {
       }
 
       if (removedPlaylistIndex < currentDapIndex) {
-        nextDapConfig = sanitizeDapConfig(
+        nextDapConfig = layoutService.sanitizeDapConfig(
           {
-            ...sharedLayoutState.dapConfig,
+            ...layoutService.layoutState.dapConfig,
             enabled: isCurrentDapEnabled,
             playlistIndex: currentDapIndex - 1,
           },
           nextLayout.length,
-          sharedLayoutState.dapConfig,
+          layoutService.layoutState.dapConfig,
         );
       }
     }
   }
   const nextPlaylistAutoplay = auth.isServer
-    ? normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
-    : normalizePlaylistAutoplayWithDap(sharedLayoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
+    ? layoutService.normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
+    : layoutService.normalizePlaylistAutoplayWithDap(layoutService.layoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
   const nextPlaylistDsp = auth.isServer
-    ? normalizePlaylistDspFlags(
+    ? LayoutStateService.normalizePlaylistDspFlags(
         body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
           ? body.playlistDsp
-          : sharedLayoutState.playlistDsp,
+          : layoutService.layoutState.playlistDsp,
         nextPlaylistAutoplay,
         nextLayout.length,
       )
-    : normalizePlaylistDspFlags(sharedLayoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
-  const nextTrackTitleModesByTrack = sanitizeTrackTitleModesByTrack(
+    : LayoutStateService.normalizePlaylistDspFlags(layoutService.layoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
+  const nextTrackTitleModesByTrack = layoutService.sanitizeTrackTitleModesByTrack(
     body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
       ? body.trackTitleModesByTrack
-      : sharedLayoutState.trackTitleModesByTrack,
+      : layoutService.layoutState.trackTitleModesByTrack,
   );
 
-  const sourceClientId = sanitizeClientId(body.clientId);
+  const sourceClientId = LayoutStateService.sanitizeClientId(body.clientId);
   const hasChanged =
-    JSON.stringify(nextLayout) !== JSON.stringify(sharedLayoutState.layout) ||
-    JSON.stringify(nextPlaylistNames) !== JSON.stringify(sharedLayoutState.playlistNames) ||
-    JSON.stringify(nextPlaylistMeta) !== JSON.stringify(sharedLayoutState.playlistMeta) ||
-    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(sharedLayoutState.playlistAutoplay) ||
-    JSON.stringify(nextPlaylistDsp) !== JSON.stringify(sharedLayoutState.playlistDsp) ||
-    JSON.stringify(nextDapConfig) !== JSON.stringify(sharedLayoutState.dapConfig) ||
-    JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(sharedLayoutState.trackTitleModesByTrack);
+    JSON.stringify(nextLayout) !== JSON.stringify(layoutService.layoutState.layout) ||
+    JSON.stringify(nextPlaylistNames) !== JSON.stringify(layoutService.layoutState.playlistNames) ||
+    JSON.stringify(nextPlaylistMeta) !== JSON.stringify(layoutService.layoutState.playlistMeta) ||
+    JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(layoutService.layoutState.playlistAutoplay) ||
+    JSON.stringify(nextPlaylistDsp) !== JSON.stringify(layoutService.layoutState.playlistDsp) ||
+    JSON.stringify(nextDapConfig) !== JSON.stringify(layoutService.layoutState.dapConfig) ||
+    JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(layoutService.layoutState.trackTitleModesByTrack);
 
   if (hasChanged) {
-    sharedLayoutState = {
+    layoutService.layoutState = {
       layout: nextLayout,
       playlistNames: nextPlaylistNames,
       playlistMeta: nextPlaylistMeta,
@@ -4848,20 +4210,20 @@ async function handleApiLayoutUpdate(req, res) {
       playlistDsp: nextPlaylistDsp,
       dapConfig: nextDapConfig,
       trackTitleModesByTrack: nextTrackTitleModesByTrack,
-      version: sharedLayoutState.version + 1,
+      version: layoutService.layoutState.version + 1,
       updatedAt: Date.now(),
     };
-    persistLayoutState(sharedLayoutState);
-    broadcastLayoutUpdate(sourceClientId);
-    dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
+    layoutService.persistLayoutState(layoutService.layoutState);
+    layoutService.broadcastLayoutUpdate(sourceClientId);
+    dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
       source: 'layout-update',
       priority: 'normal',
       force: false,
-      playlistDspFlags: sharedLayoutState.playlistDsp,
+      playlistDspFlags: layoutService.layoutState.playlistDsp,
     });
   }
 
-  sendJson(res, 200, buildLayoutPayload(sourceClientId));
+  sendJson(res, 200, layoutService.buildLayoutPayload(sourceClientId));
 }
 
 async function handleApiPlaybackUpdate(req, res) {
@@ -4896,13 +4258,13 @@ function handleApiLayoutStream(req, res) {
   });
   res.write(': connected\n\n');
 
-  layoutSubscribers.add(res);
-  sendSseEvent(res, 'layout', buildLayoutPayload(null));
-  sendSseEvent(res, 'playback', buildPlaybackPayload(null));
-  sendSseEvent(res, 'auth-users', buildAuthUsersPayload(null));
+  layoutService.layoutSubscribers.add(res);
+  LayoutStateService.sendSseEvent(res, 'layout', layoutService.buildLayoutPayload(null));
+  LayoutStateService.sendSseEvent(res, 'playback', layoutService.buildPlaybackPayload(null));
+  LayoutStateService.sendSseEvent(res, 'auth-users', buildAuthUsersPayload(null));
 
   req.on('close', () => {
-    layoutSubscribers.delete(res);
+    layoutService.layoutSubscribers.delete(res);
   });
 }
 
@@ -5230,11 +4592,11 @@ if (DSP_ENABLED) {
     noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
     tempoCacheItems: dspTempoCache.size,
   });
-  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
+  dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
     source: 'startup',
     priority: 'normal',
     force: false,
-    playlistDspFlags: sharedLayoutState.playlistDsp,
+    playlistDspFlags: layoutService.layoutState.playlistDsp,
   });
 }
 
