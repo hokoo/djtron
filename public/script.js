@@ -37,6 +37,19 @@ import { state, SETTINGS_KEYS, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, CLIENT_ID_
   DAP_NOW_PLAYING_IDLE_TITLE } from './modules/state.js';
 import * as api from './modules/api.js';
 import { createLayoutStream, closeLayoutStream, scheduleReconnect } from './modules/sse.js';
+import { isHostRole, isSlaveRole, isCoHostRole, isRemoteLiveMirrorRole,
+  updateDapNowPlayingVisibility, setRoleDeps } from './modules/roles.js';
+import { parseBooleanConfigValue, normalizeVolumePresetValues, parseVolumePresetsConfigValue,
+  parsePortCandidate, parseDspCompensationMsConfigValue, getDefaultRuntimeConfigSchema,
+  sanitizeRuntimeOverrideScope, sanitizeRuntimeConfigSchema, sanitizeRuntimeConfigPayload,
+  getRuntimeLocalOverrideScope, canUseRuntimeLocalOverride, readRuntimeLocalOverrides,
+  readStoredValueByKeys, setContextMenuBlocked, preventContextMenu,
+  applyRuntimeClientConfig, applyRuntimeConfigFromSources, fetchRuntimeConfig,
+  clampVolume, normalizeLiveVolumePreset, isVolumePresetMatch, getActiveVolumePresetValue,
+  getDapVolumePresetValue, isDapVolumePresetPlaybackActive, formatVolumePresetLabel,
+  hasActiveStandardVolumePreset, canDisableVolumePresetsSetting,
+  normalizePlaybackSeekRatio, setConfigDeps } from './modules/config.js';
+import { trackKey, getOrCreateSet, addToMultiMap, getFirstFromSet } from './modules/utils.js';
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
@@ -113,326 +126,6 @@ const dapNowPlayingReelEl = document.getElementById('dapNowPlayingReel');
 
 const clientId = getClientId();
 
-function isHostRole(role = state.currentRole) {
-  return role === ROLE_HOST;
-}
-
-function isSlaveRole(role = state.currentRole) {
-  return role === ROLE_SLAVE;
-}
-
-function isCoHostRole(role = state.currentRole) {
-  return role === ROLE_COHOST;
-}
-
-function isRemoteLiveMirrorRole(role = state.currentRole) {
-  return role === ROLE_SLAVE || role === ROLE_COHOST;
-}
-
-function updateDapNowPlayingVisibility(role = state.currentRole) {
-  if (!dapNowPlayingEl) return false;
-  const shouldShow = (isHostRole(role) || isCoHostRole(role)) && isDapEnabled(state.dapConfig);
-  dapNowPlayingEl.hidden = !shouldShow;
-  if (nowPlayingGridEl) {
-    const shouldCenterSingle = (isHostRole(role) || isCoHostRole(role)) && !shouldShow;
-    nowPlayingGridEl.classList.toggle('now-playing-grid--single', shouldCenterSingle);
-  }
-  return shouldShow;
-}
-
-function clampVolume(value) {
-  if (!Number.isFinite(value)) return 0;
-  if (value < 0) return 0;
-  if (value > 1) return 1;
-  return value;
-}
-
-function normalizeLiveVolumePreset(value, fallback = DEFAULT_LIVE_VOLUME) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  const normalized = clampVolume(numeric);
-  if (Math.abs(normalized - 1) < 0.0001) {
-    return 1;
-  }
-  return normalized;
-}
-
-function isVolumePresetMatch(left, right) {
-  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  return Math.abs(left - right) < 0.0001;
-}
-
-function getActiveVolumePresetValue(volume = state.livePlaybackVolume, presets = state.LIVE_VOLUME_PRESET_VALUES) {
-  const normalized = normalizeLiveVolumePreset(volume, DEFAULT_LIVE_VOLUME);
-  const source = Array.isArray(presets) ? presets : [];
-  for (const preset of source) {
-    if (isVolumePresetMatch(normalized, preset)) {
-      return preset;
-    }
-  }
-  return null;
-}
-
-function getDapVolumePresetValue(config = state.dapConfig) {
-  return clampVolume(normalizeDapVolumePercent(config ? config.volumePercent : null, DAP_DEFAULT_VOLUME_PERCENT) / 100);
-}
-
-function isDapVolumePresetPlaybackActive(role = state.currentRole, config = state.dapConfig) {
-  if (!isDapEnabled(config)) return false;
-
-  if (isHostRole(role)) {
-    return Boolean(state.currentTrack && state.currentAudio && !state.currentAudio.paused && isDapTrackContext(state.currentTrack, config));
-  }
-
-  if (isCoHostRole(role)) {
-    const hasLiveTrack =
-      state.hostPlaybackState &&
-      typeof state.hostPlaybackState.trackFile === 'string' &&
-      state.hostPlaybackState.trackFile.trim();
-    if (!hasLiveTrack) return false;
-    return Boolean(!state.hostPlaybackState.paused && isDapTrackContext(state.hostPlaybackState, config));
-  }
-
-  return false;
-}
-
-function formatVolumePresetLabel(volume) {
-  return `${Math.round(clampVolume(volume) * 100)}%`;
-}
-
-function hasActiveStandardVolumePreset(volume = state.livePlaybackVolume) {
-  if (isDapVolumePresetPlaybackActive()) return false;
-  return getActiveVolumePresetValue(volume) !== null;
-}
-
-function canDisableVolumePresetsSetting(volume = state.livePlaybackVolume) {
-  return !hasActiveStandardVolumePreset(volume);
-}
-
-function normalizePlaybackSeekRatio(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return null;
-  if (numeric <= 0) return 0;
-  if (numeric >= 1) return 1;
-  return numeric;
-}
-
-function readStoredValueByKeys(keys) {
-  if (!Array.isArray(keys)) return null;
-  for (const key of keys) {
-    if (typeof key !== 'string' || !key) continue;
-    const value = localStorage.getItem(key);
-    if (value !== null) return value;
-  }
-  return null;
-}
-
-function parseBooleanConfigValue(value, fallback = null) {
-  if (typeof value === 'boolean') return value;
-  if (value === null || value === undefined) return fallback;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return fallback;
-  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
-  return fallback;
-}
-
-function normalizeVolumePresetValues(values, fallback = DEFAULT_LIVE_VOLUME_PRESET_VALUES) {
-  const source = Array.isArray(values) ? values : [];
-  const normalized = [];
-  const seen = new Set();
-
-  for (const rawValue of source) {
-    const numericValue = Number(rawValue);
-    if (!Number.isFinite(numericValue)) continue;
-
-    let ratioValue = null;
-    if (numericValue > 0 && numericValue < 1) {
-      ratioValue = numericValue;
-    } else if (numericValue >= 1 && numericValue < 100) {
-      ratioValue = numericValue / 100;
-    }
-    if (!Number.isFinite(ratioValue)) continue;
-
-    const rounded = Math.round(ratioValue * 1000) / 1000;
-    if (rounded <= 0 || rounded >= 1) continue;
-    const dedupeKey = rounded.toFixed(3);
-    if (seen.has(dedupeKey)) continue;
-
-    seen.add(dedupeKey);
-    normalized.push(rounded);
-    if (normalized.length >= 8) break;
-  }
-
-  if (normalized.length) return normalized;
-  if (Array.isArray(fallback)) return fallback.slice();
-  return DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
-}
-
-function parseVolumePresetsConfigValue(value, fallback = null) {
-  const fallbackArray = Array.isArray(fallback) ? fallback : null;
-
-  if (Array.isArray(value)) {
-    const normalized = normalizeVolumePresetValues(value, []);
-    if (normalized.length) return normalized;
-    return fallbackArray ? fallbackArray.slice() : null;
-  }
-
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const normalized = normalizeVolumePresetValues([value], []);
-    if (normalized.length) return normalized;
-    return fallbackArray ? fallbackArray.slice() : null;
-  }
-
-  if (typeof value !== 'string') return fallbackArray ? fallbackArray.slice() : null;
-  const trimmed = value.trim();
-  if (!trimmed) return fallbackArray ? fallbackArray.slice() : null;
-
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        const normalized = normalizeVolumePresetValues(parsed, []);
-        if (normalized.length) return normalized;
-        return fallbackArray ? fallbackArray.slice() : null;
-      }
-    } catch (err) {
-      // fallback to token parsing
-    }
-  }
-
-  const tokens = trimmed.split(/[,\s;|]+/).filter(Boolean);
-  if (!tokens.length) return fallbackArray ? fallbackArray.slice() : null;
-  const normalized = normalizeVolumePresetValues(tokens, []);
-  if (normalized.length) return normalized;
-  return fallbackArray ? fallbackArray.slice() : null;
-}
-
-function parsePortCandidate(value, fallback = null) {
-  if (value === null || value === undefined) return fallback;
-  const numeric = Number.parseInt(String(value).trim(), 10);
-  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 65535) return fallback;
-  return numeric;
-}
-
-function parseDspCompensationMsConfigValue(value, fallback = null) {
-  if (value === null || value === undefined) return fallback;
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  const normalized = Math.trunc(numeric);
-  if (normalized < 0 || normalized > 250) return fallback;
-  return normalized;
-}
-
-function getDefaultRuntimeConfigSchema() {
-  return {
-    port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-    allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
-    volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
-    dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-    dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-  };
-}
-
-function sanitizeRuntimeOverrideScope(value, fallback = RUNTIME_OVERRIDE_SCOPE_NONE) {
-  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (
-    normalized === RUNTIME_OVERRIDE_SCOPE_NONE ||
-    normalized === RUNTIME_OVERRIDE_SCOPE_CLIENT ||
-    normalized === RUNTIME_OVERRIDE_SCOPE_HOST
-  ) {
-    return normalized;
-  }
-  return fallback;
-}
-
-function sanitizeRuntimeConfigSchema(rawSchema) {
-  const schema = getDefaultRuntimeConfigSchema();
-  if (!rawSchema || typeof rawSchema !== 'object') return schema;
-
-  for (const key of Object.keys(schema)) {
-    const rawEntry = rawSchema[key];
-    if (!rawEntry || typeof rawEntry !== 'object') continue;
-    schema[key].localOverride = sanitizeRuntimeOverrideScope(rawEntry.localOverride, schema[key].localOverride);
-  }
-
-  return schema;
-}
-
-function sanitizeRuntimeConfigPayload(rawPayload) {
-  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
-  const payloadValues = payload.values && typeof payload.values === 'object' ? payload.values : payload;
-  const schema = sanitizeRuntimeConfigSchema(payload.schema);
-
-  return {
-    port: parsePortCandidate(payloadValues.port, null),
-    allowContextMenu: parseBooleanConfigValue(payloadValues.allowContextMenu, false),
-    volumePresets: parseVolumePresetsConfigValue(payloadValues.volumePresets, DEFAULT_LIVE_VOLUME_PRESET_VALUES),
-    dspEntryCompensationMs: parseDspCompensationMsConfigValue(
-      payloadValues.dspEntryCompensationMs,
-      DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
-    ),
-    dspExitCompensationMs: parseDspCompensationMsConfigValue(
-      payloadValues.dspExitCompensationMs,
-      DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
-    ),
-    schema,
-  };
-}
-
-function getRuntimeLocalOverrideScope(configKey, schema = state.runtimeServerConfig.schema) {
-  const fallbackScope = DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey]
-    ? DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey].localOverride
-    : RUNTIME_OVERRIDE_SCOPE_NONE;
-  if (!schema || typeof schema !== 'object') return fallbackScope;
-  const schemaEntry = schema[configKey];
-  if (!schemaEntry || typeof schemaEntry !== 'object') return fallbackScope;
-  return sanitizeRuntimeOverrideScope(schemaEntry.localOverride, fallbackScope);
-}
-
-function canUseRuntimeLocalOverride(configKey, role = state.currentRole, schema = state.runtimeServerConfig.schema) {
-  const scope = getRuntimeLocalOverrideScope(configKey, schema);
-  if (scope === RUNTIME_OVERRIDE_SCOPE_CLIENT) return true;
-  if (scope === RUNTIME_OVERRIDE_SCOPE_HOST) return isHostRole(role);
-  return false;
-}
-
-function readRuntimeLocalOverrides(schema = state.runtimeServerConfig.schema, role = state.currentRole) {
-  const overrides = {
-    allowContextMenu: null,
-    volumePresets: null,
-  };
-
-  if (canUseRuntimeLocalOverride('allowContextMenu', role, schema)) {
-    const allowContextMenuRaw = readStoredValueByKeys(RUNTIME_LOCAL_OVERRIDE_KEYS.allowContextMenu);
-    overrides.allowContextMenu = parseBooleanConfigValue(allowContextMenuRaw, null);
-  }
-
-  if (canUseRuntimeLocalOverride('volumePresets', role, schema)) {
-    const volumePresetsRaw = readStoredValueByKeys(RUNTIME_LOCAL_OVERRIDE_KEYS.volumePresets);
-    overrides.volumePresets = parseVolumePresetsConfigValue(volumePresetsRaw, null);
-  }
-
-  return overrides;
-}
-
-function setContextMenuBlocked(blocked) {
-  const shouldBlock = Boolean(blocked);
-  if (shouldBlock === state.contextMenuGuardAttached) return;
-
-  if (shouldBlock) {
-    document.addEventListener('contextmenu', preventContextMenu);
-  } else {
-    document.removeEventListener('contextmenu', preventContextMenu);
-  }
-  state.contextMenuGuardAttached = shouldBlock;
-}
-
-function preventContextMenu(event) {
-  event.preventDefault();
-}
-
 function rebuildVolumePresetButtons() {
   if (!localVolumePresetsEl) {
     localVolumePresetButtons = [];
@@ -442,40 +135,6 @@ function rebuildVolumePresetButtons() {
 
   state.volumePresetButtonsSignature = '';
   updateVolumePresetsUi();
-}
-
-function applyRuntimeClientConfig() {
-  setContextMenuBlocked(!state.runtimeAllowContextMenu);
-  state.LIVE_VOLUME_PRESET_VALUES = normalizeVolumePresetValues(state.LIVE_VOLUME_PRESET_VALUES);
-  rebuildVolumePresetButtons();
-}
-
-function applyRuntimeConfigFromSources(serverConfig = null) {
-  if (serverConfig && typeof serverConfig === 'object') {
-    state.runtimeServerConfig = sanitizeRuntimeConfigPayload(serverConfig);
-  }
-
-  const schema = state.runtimeServerConfig.schema || getDefaultRuntimeConfigSchema();
-  const localOverrides = readRuntimeLocalOverrides(schema, state.currentRole);
-
-  state.runtimeAllowContextMenu =
-    localOverrides.allowContextMenu !== null ? localOverrides.allowContextMenu : state.runtimeServerConfig.allowContextMenu;
-  state.LIVE_VOLUME_PRESET_VALUES =
-    localOverrides.volumePresets && localOverrides.volumePresets.length
-      ? localOverrides.volumePresets.slice()
-      : state.runtimeServerConfig.volumePresets.slice();
-  state.liveDspEntryCompensationSeconds = state.runtimeServerConfig.dspEntryCompensationMs / 1000;
-  state.liveDspExitCompensationSeconds = state.runtimeServerConfig.dspExitCompensationMs / 1000;
-
-  applyRuntimeClientConfig();
-}
-
-async function fetchRuntimeConfig() {
-  const { ok, data } = await api.fetchConfig();
-  if (!ok) {
-    throw new Error('Не удалось загрузить runtime-конфиг');
-  }
-  return data && typeof data === 'object' ? data : {};
 }
 
 function isOverlayEnabled() {
@@ -946,27 +605,6 @@ function updateVolumePresetsUi() {
         : `Громкость ${formatVolumePresetLabel(buttonVolume !== null ? buttonVolume : DEFAULT_LIVE_VOLUME)}`;
     }
   }
-}
-
-function trackKey(file, basePath = '/audio') {
-  return `${basePath}|${file}`;
-}
-
-function getOrCreateSet(map, key) {
-  const existing = map.get(key);
-  if (existing) return existing;
-  const created = new Set();
-  map.set(key, created);
-  return created;
-}
-
-function addToMultiMap(map, key, value) {
-  getOrCreateSet(map, key).add(value);
-}
-
-function getFirstFromSet(values) {
-  if (!values || !values.size) return null;
-  return values.values().next().value || null;
 }
 
 function cloneLayoutState(layoutState) {
@@ -7060,6 +6698,9 @@ function isDapTrackContext(trackOrContext = null, config = state.dapConfig) {
   if (playlistIndex === null) return false;
   return isDapPlaylistIndex(playlistIndex, config);
 }
+
+setConfigDeps({ normalizeDapVolumePercent, isDapEnabled, isDapTrackContext, rebuildVolumePresetButtons });
+setRoleDeps({ isDapEnabled });
 
 function getEffectiveLiveVolumeForTrack(trackOrContext = null) {
   if (!isHostRole()) {
