@@ -1,3 +1,42 @@
+import { state, SETTINGS_KEYS, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, CLIENT_ID_STORAGE_KEY,
+  RUNTIME_LOCAL_OVERRIDE_KEYS, RUNTIME_OVERRIDE_SCOPE_NONE, RUNTIME_OVERRIDE_SCOPE_CLIENT,
+  RUNTIME_OVERRIDE_SCOPE_HOST, DEFAULT_RUNTIME_CONFIG_SCHEMA, LAYOUT_STREAM_RETRY_MS,
+  PLAYLIST_NAME_MAX_LENGTH, HOST_PLAYBACK_SYNC_INTERVAL_MS, AUDIO_CATALOG_POLL_INTERVAL_MS,
+  DAP_NO_SILENCE_GUARD_INTERVAL_MS, QUEUE_NEXT_CHAIN_WINDOW_MS, TRACK_RELOCATE_HIGHLIGHT_MS,
+  TOUCH_COPY_HOLD_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX,
+  PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX,
+  TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_START_MOVE_PX, TOUCH_DRAG_COMMIT_PX,
+  TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, DESKTOP_TRACK_DRAG_HOLD_MS, DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX,
+  TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME,
+  TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS,
+  COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS,
+  COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_HINT_DURATION_MS,
+  NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX, NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS,
+  NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX, NOW_PLAYING_REEL_BASE_SPIN_SECONDS,
+  NOW_PLAYING_REEL_FAST_SPIN_SECONDS, NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC,
+  COHOST_SEEK_COMMAND_INTERVAL_MS, HOST_LIVE_SEEK_SYNC_INTERVAL_MS,
+  ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_TWO_FINGER_PAN_TOUCH_GAIN,
+  ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS,
+  ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX,
+  PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX,
+  PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX,
+  MOBILE_PROGRESS_UI_MAX_FPS, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS,
+  TRACK_TITLE_MODE_FILE, TRACK_TITLE_MODE_ATTRIBUTES,
+  PLAYLIST_TYPE_MANUAL, PLAYLIST_TYPE_FOLDER, ROLE_HOST, ROLE_SLAVE, ROLE_COHOST,
+  DAP_DEFAULT_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DEFAULT_DAP_CONFIG,
+  PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYBACK_COMMAND_SET_VOLUME,
+  PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED,
+  PLAYBACK_COMMAND_SEEK_CURRENT, DEFAULT_LIVE_VOLUME_PRESET_VALUES, DEFAULT_DSP_WINGET_COMMAND,
+  LIVE_DSP_POLL_INTERVAL_MS, LIVE_DSP_POLL_TIMEOUT_MS, LIVE_DSP_RENDER_SOURCE,
+  LIVE_DSP_HANDOFF_LEAD_SECONDS, DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
+  DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS, LIVE_DSP_WARMUP_TIMEOUT_MS, LIVE_DSP_WARMUP_MAX_TRACKED,
+  LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED, DEFAULT_LIVE_VOLUME,
+  AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS, AUTOPLAY_OVERLAY_STATE_IDLE,
+  AUTOPLAY_OVERLAY_STATE_PENDING, AUTOPLAY_OVERLAY_STATE_STARTED, AUTOPLAY_OVERLAY_STATE_FAILED,
+  HOST_SERVER_HINT, NOW_PLAYING_IDLE_TITLE, HOST_NOW_PLAYING_IDLE_TITLE,
+  DAP_NOW_PLAYING_IDLE_TITLE } from './modules/state.js';
+import * as api from './modules/api.js';
+import { createLayoutStream, closeLayoutStream, scheduleReconnect } from './modules/sse.js';
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
 const addPlaylistBtn = document.getElementById('addPlaylist');
@@ -57,7 +96,6 @@ const localVolumePresetsEl = document.getElementById('localVolumePresets');
 let localVolumePresetButtons = localVolumePresetsEl
   ? Array.from(localVolumePresetsEl.querySelectorAll('.volume-presets__button'))
   : [];
-let volumePresetButtonsSignature = '';
 const hostNowPlayingTitleEl = document.getElementById('hostNowPlayingTitle');
 const hostNowPlayingControlEl = document.getElementById('hostNowPlayingControl');
 const hostNowPlayingControlLabelEl = document.getElementById('hostNowPlayingControlLabel');
@@ -72,352 +110,28 @@ const dapNowPlayingProgressEl = document.getElementById('dapNowPlayingProgress')
 const dapNowPlayingTimeEl = document.getElementById('dapNowPlayingTime');
 const dapNowPlayingReelEl = document.getElementById('dapNowPlayingReel');
 
-const SETTINGS_KEYS = {
-  overlayTime: 'player:overlayTime',
-  overlayCurve: 'player:overlayCurve',
-  stopFade: 'player:stopFade',
-  overlayEnabled: 'player:overlayEnabled',
-  stopFadeEnabled: 'player:stopFadeEnabled',
-  sidebarOpen: 'player:sidebarOpen',
-  allowPrerelease: 'player:allowPrerelease',
-  showVolumePresets: 'player:showVolumePresets',
-  liveSeekEnabled: 'player:liveSeekEnabled',
-  trackTitleModesByTrack: 'player:trackTitleModesByTrack',
-};
-const LAYOUT_STORAGE_KEY = 'player:playlists';
-const LEGACY_LAYOUT_KEY = 'player:zones';
-const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
-const RUNTIME_LOCAL_OVERRIDE_KEYS = {
-  allowContextMenu: ['djtron:config:allowContextMenu', 'djtron:allowContextMenu'],
-  volumePresets: ['djtron:config:volumePresets', 'djtron:volumePresets'],
-};
-const RUNTIME_OVERRIDE_SCOPE_NONE = 'none';
-const RUNTIME_OVERRIDE_SCOPE_CLIENT = 'client';
-const RUNTIME_OVERRIDE_SCOPE_HOST = 'host';
-const DEFAULT_RUNTIME_CONFIG_SCHEMA = Object.freeze({
-  port: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-  allowContextMenu: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT }),
-  volumePresets: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_HOST }),
-  dspEntryCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-  dspExitCompensationMs: Object.freeze({ localOverride: RUNTIME_OVERRIDE_SCOPE_NONE }),
-});
-const LAYOUT_STREAM_RETRY_MS = 1500;
-const PLAYLIST_NAME_MAX_LENGTH = 80;
-const HOST_PLAYBACK_SYNC_INTERVAL_MS = 900;
-const AUDIO_CATALOG_POLL_INTERVAL_MS = 4000;
-const DAP_NO_SILENCE_GUARD_INTERVAL_MS = 320;
-const QUEUE_NEXT_CHAIN_WINDOW_MS = 10000;
-const TRACK_RELOCATE_HIGHLIGHT_MS = 3000;
-const TOUCH_COPY_HOLD_MS = 360;
-const PLAYLIST_COLLAPSE_HOLD_MS = 480;
-const PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX = 24;
-const PLAYLIST_REORDER_HOLD_MS = 420;
-const PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX = 20;
-const TOUCH_DRAG_ACTIVATION_DELAY_MS = 220;
-const TOUCH_DRAG_START_MOVE_PX = 12;
-const TOUCH_DRAG_COMMIT_PX = 6;
-const TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS = 900;
-const DESKTOP_TRACK_DRAG_HOLD_MS = 400;
-const DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX = 8;
-const TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX = 54;
-const TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME = 0.8;
-const TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME = 7;
-const COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS = 260;
-const COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX = 16;
-const COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS = 520;
-const COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX = 44;
-const COLLAPSED_PLAYLIST_HINT_DURATION_MS = 1400;
-const NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX = 6;
-const NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS = 320;
-const NOW_PLAYING_TOGGLE_ZONE_HALF_WIDTH_PX = 32;
-const NOW_PLAYING_REEL_BASE_SPIN_SECONDS = 1.8;
-const NOW_PLAYING_REEL_FAST_SPIN_SECONDS = 0.24;
-const NOW_PLAYING_REEL_MAX_SCRUB_SPEED_PX_PER_SEC = 1600;
-const COHOST_SEEK_COMMAND_INTERVAL_MS = 40;
-const HOST_LIVE_SEEK_SYNC_INTERVAL_MS = 40;
-const ZONES_PAN_DRAG_THRESHOLD_PX = 4;
-const ZONES_PAN_TOUCH_GAIN = 2.4;
-const ZONES_TWO_FINGER_PAN_TOUCH_GAIN = 2.0;
-const ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS = 0.16;
-const ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS = 0.02;
-const ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME = 0.92;
-const ZONES_WHEEL_SMOOTH_EASE = 0.24;
-const ZONES_WHEEL_SMOOTH_MIN_DELTA_PX = 0.45;
-const PLAYLIST_VIRTUALIZATION_MIN_ITEMS = 120;
-const PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX = 45;
-const PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS = 8;
-const PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX = 420;
-const MOBILE_PROGRESS_UI_MAX_FPS = 30;
-const MOBILE_PROGRESS_UI_MIN_INTERVAL_MS = Math.round(1000 / MOBILE_PROGRESS_UI_MAX_FPS);
-const TRACK_TITLE_MODE_FILE = 'file';
-const TRACK_TITLE_MODE_ATTRIBUTES = 'attributes';
-const PLAYLIST_TYPE_MANUAL = 'manual';
-const PLAYLIST_TYPE_FOLDER = 'folder';
-const ROLE_HOST = 'host';
-const ROLE_SLAVE = 'slave';
-const ROLE_COHOST = 'co-host';
-const DAP_DEFAULT_VOLUME_PERCENT = 5;
-const DAP_MIN_VOLUME_PERCENT = 0;
-const DAP_MAX_VOLUME_PERCENT = 100;
-const DEFAULT_DAP_CONFIG = Object.freeze({
-  enabled: false,
-  playlistIndex: null,
-  volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
-});
-const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
-const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
-const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
-const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible';
-const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
-const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
-const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
-const DEFAULT_DSP_WINGET_COMMAND = 'winget install "FFmpeg (Essentials Build)"';
-const LIVE_DSP_POLL_INTERVAL_MS = 1100;
-const LIVE_DSP_POLL_TIMEOUT_MS = 2 * 60 * 1000;
-const LIVE_DSP_RENDER_SOURCE = 'live-play-start';
-const LIVE_DSP_HANDOFF_LEAD_SECONDS = 0.055;
-const DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS = 22;
-const DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS = 19;
-const LIVE_DSP_WARMUP_TIMEOUT_MS = 12 * 1000;
-const LIVE_DSP_WARMUP_MAX_TRACKED = 64;
-const LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED = 24;
-let LIVE_VOLUME_PRESET_VALUES = DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice();
-let liveDspEntryCompensationSeconds = DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS / 1000;
-let liveDspExitCompensationSeconds = DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS / 1000;
-const DEFAULT_LIVE_VOLUME = 1;
-const AUTOPLAY_OVERLAY_TRIGGER_EPSILON_SECONDS = 0.04;
-const AUTOPLAY_OVERLAY_STATE_IDLE = 'idle';
-const AUTOPLAY_OVERLAY_STATE_PENDING = 'pending';
-const AUTOPLAY_OVERLAY_STATE_STARTED = 'started';
-const AUTOPLAY_OVERLAY_STATE_FAILED = 'failed';
 
-let currentAudio = null;
-let currentTrack = null; // { file, basePath, key }
-let fadeCancel = { cancelled: false };
-let buttonsByFile = new Map();
-let cardsByFile = new Map();
-let durationLabelsByFile = new Map();
-let playlistDurationLabelsByIndex = new Map();
-let trackNameLabelsByFile = new Map();
-let knownTrackDurations = new Map();
-let durationLoadPromises = new Map();
-let trackAttributesByFile = new Map();
-let trackAttributeLoadPromisesByFile = new Map();
-let trackTitleModesByTrack = new Map();
-let activeDurationTrackKey = null;
-let progressRaf = null;
-let progressAudio = null;
-let liveAudioInstances = new Set();
-let draggingCard = null;
-let dragDropHandled = false;
-let dragContext = null;
-let layout = [[]]; // array of playlists -> array of filenames
-let playlistNames = ['Плей-лист 1'];
-let playlistMeta = [{ type: PLAYLIST_TYPE_MANUAL }];
-let playlistAutoplay = [false];
-let playlistDsp = [false];
-let dapConfig = { ...DEFAULT_DAP_CONFIG };
-let availableFiles = [];
-let availableFolders = [];
-let audioCatalogSignature = '';
-let audioCatalogPollTimer = null;
-let audioCatalogPollInFlight = false;
-let tracksReloadInFlight = false;
-let tracksReloadQueued = false;
-let tracksReloadQueuedReason = 'auto';
-let dapNoSilenceGuardTimer = null;
-let dapAutoStartInFlight = false;
-let autoplayStartInFlight = false;
-let overlayHandoffInFlight = false;
-let dapNoSilenceArmedPlaylistIndex = null;
-let dapInterruptedPlaybackSnapshot = null;
-let syncedDapInterruptedUiState = null;
-let shutdownCountdownTimer = null;
-let currentUser = null;
-let currentRole = null;
-let showVolumePresetsEnabled = false;
-let liveSeekEnabled = false;
-let livePlaybackVolume = DEFAULT_LIVE_VOLUME;
-let layoutVersion = 0;
-let layoutStream = null;
-let layoutStreamReconnectTimer = null;
-let hostPlaybackState = getDefaultHostPlaybackState();
-let hostPlaybackSyncInFlight = false;
-let hostPlaybackSyncQueued = false;
-let hostPlaybackSyncQueuedForce = false;
-let lastHostPlaybackSyncAt = 0;
-let lastHostLiveSeekSyncAt = 0;
-let hostProgressRaf = null;
-let cohostProgressRaf = null;
-let hostHighlightedDescriptor = '';
-let authUsersState = [];
-let cohostRoleUpdatesInFlight = new Set();
-let cohostDisconnectUpdatesInFlight = new Set();
-let authRecoveryInProgress = false;
-let runtimeAllowContextMenu = false;
-let contextMenuGuardAttached = false;
-let runtimeServerConfig = {
-  port: null,
-  allowContextMenu: false,
-  volumePresets: DEFAULT_LIVE_VOLUME_PRESET_VALUES.slice(),
-  dspEntryCompensationMs: DEFAULT_LIVE_DSP_ENTRY_COMPENSATION_MS,
-  dspExitCompensationMs: DEFAULT_LIVE_DSP_EXIT_COMPENSATION_MS,
-  schema: {
-    port: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-    allowContextMenu: { localOverride: RUNTIME_OVERRIDE_SCOPE_CLIENT },
-    volumePresets: { localOverride: RUNTIME_OVERRIDE_SCOPE_HOST },
-    dspEntryCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-    dspExitCompensationMs: { localOverride: RUNTIME_OVERRIDE_SCOPE_NONE },
-  },
-};
-let dspStatusState = {
-  enabled: null,
-  ffmpegAvailable: null,
-  ffmpegError: null,
-  wingetCommand: DEFAULT_DSP_WINGET_COMMAND,
-  checkedAt: 0,
-};
-let dspStatusRequestInFlight = false;
-let liveDspRenderToken = 0;
-let liveDspNextReadyDescriptor = '';
-let liveDspNextReadySliceSeconds = null;
-let dspTransitionPlayback = null;
-let dspTransitionWarmupPromises = new Map();
-let liveDspContinuationWarmupPromises = new Map();
-let touchHoldTimer = null;
-let touchHoldPointerId = null;
-let touchHoldStartX = 0;
-let touchHoldStartY = 0;
-let touchHoldStartedAt = 0;
-let touchHoldCard = null;
-let desktopDragHoldTimer = null;
-let desktopDragHoldPointerId = null;
-let desktopDragHoldStartedAt = 0;
-let desktopDragHoldStartX = 0;
-let desktopDragHoldStartY = 0;
-let desktopDragHoldCard = null;
-let desktopDragHoldReady = false;
-let touchCopyDragActive = false;
-let touchCopyDragPointerId = null;
-let touchCopyDragGhost = null;
-let touchCopyDragStartX = 0;
-let touchCopyDragStartY = 0;
-let touchCopyDragMoved = false;
-let touchCopyDragLastClientX = 0;
-let touchCopyDragLastClientY = 0;
-let touchCopyDragEdgeScrollRaf = null;
-let touchCopyDragEdgeScrollVelocity = 0;
-let touchDragMode = null;
-let playlistCollapseHoldTimer = null;
-let playlistCollapseHoldPointerId = null;
-let playlistCollapseHoldStartX = 0;
-let playlistCollapseHoldStartY = 0;
-let playlistCollapseHoldPlaylistIndex = null;
-let playlistCollapseHoldTarget = null;
-let playlistCollapseHoldZone = null;
-let playlistCollapseHoldTriggered = false;
-let playlistReorderHoldTimer = null;
-let playlistReorderHoldPointerId = null;
-let playlistReorderHoldStartX = 0;
-let playlistReorderHoldStartY = 0;
-let playlistReorderHoldPlaylistIndex = null;
-let playlistReorderHoldTarget = null;
-let playlistReorderHoldSourceZone = null;
-let playlistReorderHoldTargetZone = null;
-let playlistReorderHoldTargetPlaylistIndex = null;
-let playlistReorderHoldInitialVisibleOrder = null;
-let playlistReorderHoldCandidateOrder = null;
-let playlistReorderHoldCandidateCenters = null;
-let playlistReorderHoldCurrentSlot = null;
-let playlistReorderHoldPreviewSignature = '';
-let playlistReorderHoldTriggered = false;
-let lastTouchPointerDownAt = 0;
-let dragPreviewCard = null;
-let desktopDragGhost = null;
-let desktopDragGhostOffsetX = 16;
-let desktopDragGhostOffsetY = 16;
-let emptyDragImage = null;
-let trashDropzoneEl = null;
-let queueNextDropzoneEl = null;
-let queueNextChainAnchor = null;
-let queueNextChainExpiresAt = 0;
-let queueNextCountdownTimer = null;
-let trackRelocationHighlights = new Map();
-let trackRelocationHighlightTimer = null;
-let trackRelocationUndoActions = new Map();
-let trackRelocationUndoSeq = 0;
-let nowPlayingSeekActive = false;
-let nowPlayingSeekMoved = false;
-let nowPlayingSeekPointerId = null;
-let nowPlayingSeekStartX = 0;
-let nowPlayingSeekSuppressClickUntil = 0;
-let nowPlayingSeekLastX = 0;
-let nowPlayingSeekLastAt = 0;
-let nowPlayingSeekSmoothedSpeed = 0;
-let cohostSeekCommandTimer = null;
-let cohostSeekCommandInFlight = false;
-let cohostSeekPendingRatio = null;
-let cohostSeekPendingFinalize = false;
-let cohostSeekLastSentAt = 0;
-let zonesPanActive = false;
-let zonesPanMoved = false;
-let zonesPanPointerId = null;
-let zonesPanStartX = 0;
-let zonesPanStartY = 0;
-let zonesPanStartScrollLeft = 0;
-let zonesPanPreferHorizontal = false;
-let zonesPanPointerType = '';
-let zonesPanMoveGain = 1;
-let zonesPanLastX = 0;
-let zonesPanLastAt = 0;
-let zonesPanVelocityX = 0;
-let zonesPanMomentumRaf = null;
-let zonesTouchPanActive = false;
-let zonesTouchPanMoved = false;
-let zonesTouchPanStartMidX = 0;
-let zonesTouchPanStartMidY = 0;
-let zonesTouchPanStartScrollLeft = 0;
-let zonesTouchPanLastMidX = 0;
-let zonesTouchPanLastAt = 0;
-let zonesTouchPanVelocityX = 0;
-let zonesFreeAreaTapCandidate = null;
-let zonesFreeAreaTapCount = 0;
-let zonesFreeAreaLastTapAt = 0;
-let zonesFreeAreaLastTapX = 0;
-let zonesFreeAreaLastTapY = 0;
-const zonesWheelTargets = new Map();
-let zonesWheelSmoothRaf = null;
-let zoneBodiesCache = [];
-const collapsedPlaylistIndices = new Set();
-let collapsedPlaylistsOverlayEl = null;
-let collapsedPlaylistsHintTimer = null;
-let collapsedPlaylistsHintEl = null;
-let collapsedPlaylistLayoutLength = null;
-const HOST_SERVER_HINT = 'Если нужно завершить работу, нажмите кнопку ниже. Сервер остановится и страница перестанет отвечать.';
-const NOW_PLAYING_IDLE_TITLE = 'Ничего не играет';
-const HOST_NOW_PLAYING_IDLE_TITLE = 'Live: ничего не играет';
-const DAP_NOW_PLAYING_IDLE_TITLE = 'DAP: ничего не играет';
 const clientId = getClientId();
 
-function isHostRole(role = currentRole) {
+function isHostRole(role = state.currentRole) {
   return role === ROLE_HOST;
 }
 
-function isSlaveRole(role = currentRole) {
+function isSlaveRole(role = state.currentRole) {
   return role === ROLE_SLAVE;
 }
 
-function isCoHostRole(role = currentRole) {
+function isCoHostRole(role = state.currentRole) {
   return role === ROLE_COHOST;
 }
 
-function isRemoteLiveMirrorRole(role = currentRole) {
+function isRemoteLiveMirrorRole(role = state.currentRole) {
   return role === ROLE_SLAVE || role === ROLE_COHOST;
 }
 
-function updateDapNowPlayingVisibility(role = currentRole) {
+function updateDapNowPlayingVisibility(role = state.currentRole) {
   if (!dapNowPlayingEl) return false;
-  const shouldShow = (isHostRole(role) || isCoHostRole(role)) && isDapEnabled(dapConfig);
+  const shouldShow = (isHostRole(role) || isCoHostRole(role)) && isDapEnabled(state.dapConfig);
   dapNowPlayingEl.hidden = !shouldShow;
   if (nowPlayingGridEl) {
     const shouldCenterSingle = (isHostRole(role) || isCoHostRole(role)) && !shouldShow;
@@ -448,7 +162,7 @@ function isVolumePresetMatch(left, right) {
   return Math.abs(left - right) < 0.0001;
 }
 
-function getActiveVolumePresetValue(volume = livePlaybackVolume, presets = LIVE_VOLUME_PRESET_VALUES) {
+function getActiveVolumePresetValue(volume = state.livePlaybackVolume, presets = state.LIVE_VOLUME_PRESET_VALUES) {
   const normalized = normalizeLiveVolumePreset(volume, DEFAULT_LIVE_VOLUME);
   const source = Array.isArray(presets) ? presets : [];
   for (const preset of source) {
@@ -459,24 +173,24 @@ function getActiveVolumePresetValue(volume = livePlaybackVolume, presets = LIVE_
   return null;
 }
 
-function getDapVolumePresetValue(config = dapConfig) {
+function getDapVolumePresetValue(config = state.dapConfig) {
   return clampVolume(normalizeDapVolumePercent(config ? config.volumePercent : null, DAP_DEFAULT_VOLUME_PERCENT) / 100);
 }
 
-function isDapVolumePresetPlaybackActive(role = currentRole, config = dapConfig) {
+function isDapVolumePresetPlaybackActive(role = state.currentRole, config = state.dapConfig) {
   if (!isDapEnabled(config)) return false;
 
   if (isHostRole(role)) {
-    return Boolean(currentTrack && currentAudio && !currentAudio.paused && isDapTrackContext(currentTrack, config));
+    return Boolean(state.currentTrack && state.currentAudio && !state.currentAudio.paused && isDapTrackContext(state.currentTrack, config));
   }
 
   if (isCoHostRole(role)) {
     const hasLiveTrack =
-      hostPlaybackState &&
-      typeof hostPlaybackState.trackFile === 'string' &&
-      hostPlaybackState.trackFile.trim();
+      state.hostPlaybackState &&
+      typeof state.hostPlaybackState.trackFile === 'string' &&
+      state.hostPlaybackState.trackFile.trim();
     if (!hasLiveTrack) return false;
-    return Boolean(!hostPlaybackState.paused && isDapTrackContext(hostPlaybackState, config));
+    return Boolean(!state.hostPlaybackState.paused && isDapTrackContext(state.hostPlaybackState, config));
   }
 
   return false;
@@ -486,12 +200,12 @@ function formatVolumePresetLabel(volume) {
   return `${Math.round(clampVolume(volume) * 100)}%`;
 }
 
-function hasActiveStandardVolumePreset(volume = livePlaybackVolume) {
+function hasActiveStandardVolumePreset(volume = state.livePlaybackVolume) {
   if (isDapVolumePresetPlaybackActive()) return false;
   return getActiveVolumePresetValue(volume) !== null;
 }
 
-function canDisableVolumePresetsSetting(volume = livePlaybackVolume) {
+function canDisableVolumePresetsSetting(volume = state.livePlaybackVolume) {
   return !hasActiveStandardVolumePreset(volume);
 }
 
@@ -667,7 +381,7 @@ function sanitizeRuntimeConfigPayload(rawPayload) {
   };
 }
 
-function getRuntimeLocalOverrideScope(configKey, schema = runtimeServerConfig.schema) {
+function getRuntimeLocalOverrideScope(configKey, schema = state.runtimeServerConfig.schema) {
   const fallbackScope = DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey]
     ? DEFAULT_RUNTIME_CONFIG_SCHEMA[configKey].localOverride
     : RUNTIME_OVERRIDE_SCOPE_NONE;
@@ -677,14 +391,14 @@ function getRuntimeLocalOverrideScope(configKey, schema = runtimeServerConfig.sc
   return sanitizeRuntimeOverrideScope(schemaEntry.localOverride, fallbackScope);
 }
 
-function canUseRuntimeLocalOverride(configKey, role = currentRole, schema = runtimeServerConfig.schema) {
+function canUseRuntimeLocalOverride(configKey, role = state.currentRole, schema = state.runtimeServerConfig.schema) {
   const scope = getRuntimeLocalOverrideScope(configKey, schema);
   if (scope === RUNTIME_OVERRIDE_SCOPE_CLIENT) return true;
   if (scope === RUNTIME_OVERRIDE_SCOPE_HOST) return isHostRole(role);
   return false;
 }
 
-function readRuntimeLocalOverrides(schema = runtimeServerConfig.schema, role = currentRole) {
+function readRuntimeLocalOverrides(schema = state.runtimeServerConfig.schema, role = state.currentRole) {
   const overrides = {
     allowContextMenu: null,
     volumePresets: null,
@@ -705,14 +419,14 @@ function readRuntimeLocalOverrides(schema = runtimeServerConfig.schema, role = c
 
 function setContextMenuBlocked(blocked) {
   const shouldBlock = Boolean(blocked);
-  if (shouldBlock === contextMenuGuardAttached) return;
+  if (shouldBlock === state.contextMenuGuardAttached) return;
 
   if (shouldBlock) {
     document.addEventListener('contextmenu', preventContextMenu);
   } else {
     document.removeEventListener('contextmenu', preventContextMenu);
   }
-  contextMenuGuardAttached = shouldBlock;
+  state.contextMenuGuardAttached = shouldBlock;
 }
 
 function preventContextMenu(event) {
@@ -722,46 +436,45 @@ function preventContextMenu(event) {
 function rebuildVolumePresetButtons() {
   if (!localVolumePresetsEl) {
     localVolumePresetButtons = [];
-    volumePresetButtonsSignature = '';
+    state.volumePresetButtonsSignature = '';
     return;
   }
 
-  volumePresetButtonsSignature = '';
+  state.volumePresetButtonsSignature = '';
   updateVolumePresetsUi();
 }
 
 function applyRuntimeClientConfig() {
-  setContextMenuBlocked(!runtimeAllowContextMenu);
-  LIVE_VOLUME_PRESET_VALUES = normalizeVolumePresetValues(LIVE_VOLUME_PRESET_VALUES);
+  setContextMenuBlocked(!state.runtimeAllowContextMenu);
+  state.LIVE_VOLUME_PRESET_VALUES = normalizeVolumePresetValues(state.LIVE_VOLUME_PRESET_VALUES);
   rebuildVolumePresetButtons();
 }
 
 function applyRuntimeConfigFromSources(serverConfig = null) {
   if (serverConfig && typeof serverConfig === 'object') {
-    runtimeServerConfig = sanitizeRuntimeConfigPayload(serverConfig);
+    state.runtimeServerConfig = sanitizeRuntimeConfigPayload(serverConfig);
   }
 
-  const schema = runtimeServerConfig.schema || getDefaultRuntimeConfigSchema();
-  const localOverrides = readRuntimeLocalOverrides(schema, currentRole);
+  const schema = state.runtimeServerConfig.schema || getDefaultRuntimeConfigSchema();
+  const localOverrides = readRuntimeLocalOverrides(schema, state.currentRole);
 
-  runtimeAllowContextMenu =
-    localOverrides.allowContextMenu !== null ? localOverrides.allowContextMenu : runtimeServerConfig.allowContextMenu;
-  LIVE_VOLUME_PRESET_VALUES =
+  state.runtimeAllowContextMenu =
+    localOverrides.allowContextMenu !== null ? localOverrides.allowContextMenu : state.runtimeServerConfig.allowContextMenu;
+  state.LIVE_VOLUME_PRESET_VALUES =
     localOverrides.volumePresets && localOverrides.volumePresets.length
       ? localOverrides.volumePresets.slice()
-      : runtimeServerConfig.volumePresets.slice();
-  liveDspEntryCompensationSeconds = runtimeServerConfig.dspEntryCompensationMs / 1000;
-  liveDspExitCompensationSeconds = runtimeServerConfig.dspExitCompensationMs / 1000;
+      : state.runtimeServerConfig.volumePresets.slice();
+  state.liveDspEntryCompensationSeconds = state.runtimeServerConfig.dspEntryCompensationMs / 1000;
+  state.liveDspExitCompensationSeconds = state.runtimeServerConfig.dspExitCompensationMs / 1000;
 
   applyRuntimeClientConfig();
 }
 
 async function fetchRuntimeConfig() {
-  const response = await fetch('/api/config');
-  if (!response.ok) {
+  const { ok, data } = await api.fetchConfig();
+  if (!ok) {
     throw new Error('Не удалось загрузить runtime-конфиг');
   }
-  const data = await response.json().catch(() => ({}));
   return data && typeof data === 'object' ? data : {};
 }
 
@@ -798,14 +511,14 @@ function updateTransitionSettingsUi() {
 }
 
 function applyLiveVolumeToCurrentAudio() {
-  if (!currentAudio) return;
-  currentAudio.volume = getEffectiveLiveVolume(currentTrack);
+  if (!state.currentAudio) return;
+  state.currentAudio.volume = getEffectiveLiveVolume(state.currentTrack);
 }
 
 function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) {
-  const normalized = normalizeLiveVolumePreset(volume, livePlaybackVolume);
-  const changed = Math.abs(normalized - livePlaybackVolume) >= 0.0001;
-  livePlaybackVolume = normalized;
+  const normalized = normalizeLiveVolumePreset(volume, state.livePlaybackVolume);
+  const changed = Math.abs(normalized - state.livePlaybackVolume) >= 0.0001;
+  state.livePlaybackVolume = normalized;
 
   if (isHostRole()) {
     applyLiveVolumeToCurrentAudio();
@@ -816,7 +529,7 @@ function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) 
 
   updateVolumePresetsUi();
   if (announce) {
-    setStatus(`Громкость: ${formatVolumePresetLabel(livePlaybackVolume)}.`);
+    setStatus(`Громкость: ${formatVolumePresetLabel(state.livePlaybackVolume)}.`);
   }
   return changed;
 }
@@ -833,8 +546,8 @@ function setShowVolumePresetsEnabled(
   if (!normalized && !canDisableVolumePresetsSetting()) {
     normalized = true;
   }
-  const changed = normalized !== showVolumePresetsEnabled;
-  showVolumePresetsEnabled = normalized;
+  const changed = normalized !== state.showVolumePresetsEnabled;
+  state.showVolumePresetsEnabled = normalized;
 
   if (showVolumePresetsToggle) {
     showVolumePresetsToggle.checked = normalized;
@@ -864,29 +577,29 @@ function updateLiveSeekUi() {
   }
 
   if (liveSeekEnabledToggle) {
-    liveSeekEnabledToggle.checked = liveSeekEnabled;
+    liveSeekEnabledToggle.checked = state.liveSeekEnabled;
     liveSeekEnabledToggle.disabled = !isHost;
   }
 
   if (nowPlayingControlBtn) {
     const canTouchSeek =
       isSlaveRole() ||
-      ((isHostRole() || isCoHostRole()) && liveSeekEnabled);
+      ((isHostRole() || isCoHostRole()) && state.liveSeekEnabled);
     nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
   }
 }
 
 function getPlaylistDisplayLabel(playlistIndex) {
   const safeIndex = Number.isInteger(playlistIndex) && playlistIndex >= 0 ? playlistIndex : 0;
-  return sanitizePlaylistName(playlistNames[safeIndex], safeIndex);
+  return sanitizePlaylistName(state.playlistNames[safeIndex], safeIndex);
 }
 
-function updateDapSettingsUi(role = currentRole) {
+function updateDapSettingsUi(role = state.currentRole) {
   const isHost = isHostRole(role);
   const isHostOrCoHost = isHost || isCoHostRole(role);
-  const normalizedLayout = ensurePlaylists(layout);
-  const normalizedDap = normalizeDapConfig(dapConfig, normalizedLayout.length, dapConfig);
-  dapConfig = normalizedDap;
+  const normalizedLayout = ensurePlaylists(state.layout);
+  const normalizedDap = normalizeDapConfig(state.dapConfig, normalizedLayout.length, state.dapConfig);
+  state.dapConfig = normalizedDap;
   updateDapNowPlayingVisibility(role);
 
   if (dapSettingsPanelEl) {
@@ -934,7 +647,7 @@ function updateDapSettingsUi(role = currentRole) {
   }
 }
 
-function updatePrereleaseSettingUi(role = currentRole) {
+function updatePrereleaseSettingUi(role = state.currentRole) {
   const isHost = isHostRole(role);
   if (allowPrereleaseRow) {
     allowPrereleaseRow.style.display = isHost ? 'flex' : 'none';
@@ -952,7 +665,7 @@ function setDspSetupStatus(message) {
   dspSetupStatusEl.textContent = message || '';
 }
 
-function updateDspSetupUi(role = currentRole) {
+function updateDspSetupUi(role = state.currentRole) {
   if (!dspSetupPanelEl) return;
 
   const isHost = isHostRole(role);
@@ -961,11 +674,11 @@ function updateDspSetupUi(role = currentRole) {
     return;
   }
 
-  const enabled = dspStatusState.enabled;
-  const available = dspStatusState.ffmpegAvailable;
+  const enabled = state.dspStatusState.enabled;
+  const available = state.dspStatusState.ffmpegAvailable;
   const installCommand =
-    typeof dspStatusState.wingetCommand === 'string' && dspStatusState.wingetCommand.trim()
-      ? dspStatusState.wingetCommand.trim()
+    typeof state.dspStatusState.wingetCommand === 'string' && state.dspStatusState.wingetCommand.trim()
+      ? state.dspStatusState.wingetCommand.trim()
       : DEFAULT_DSP_WINGET_COMMAND;
 
   if (dspInstallCommandEl) {
@@ -977,13 +690,13 @@ function updateDspSetupUi(role = currentRole) {
   if (!shouldShowPanel) return;
 
   if (available === false) {
-    const details = dspStatusState.ffmpegError ? ` (${dspStatusState.ffmpegError})` : '';
+    const details = state.dspStatusState.ffmpegError ? ` (${state.dspStatusState.ffmpegError})` : '';
     setDspSetupStatus(`ffmpeg не найден${details}`);
     return;
   }
 
-  if (dspStatusState.ffmpegError) {
-    setDspSetupStatus(`Не удалось проверить ffmpeg: ${dspStatusState.ffmpegError}`);
+  if (state.dspStatusState.ffmpegError) {
+    setDspSetupStatus(`Не удалось проверить ffmpeg: ${state.dspStatusState.ffmpegError}`);
     return;
   }
 
@@ -1028,22 +741,22 @@ function parseDspStatusPayload(data) {
     throw new Error('Некорректный ответ DSP API');
   }
 
-  dspStatusState.enabled = Boolean(queue.enabled);
-  dspStatusState.ffmpegAvailable = typeof queue.ffmpegAvailable === 'boolean' ? queue.ffmpegAvailable : null;
-  dspStatusState.ffmpegError =
+  state.dspStatusState.enabled = Boolean(queue.enabled);
+  state.dspStatusState.ffmpegAvailable = typeof queue.ffmpegAvailable === 'boolean' ? queue.ffmpegAvailable : null;
+  state.dspStatusState.ffmpegError =
     typeof queue.ffmpegError === 'string' && queue.ffmpegError.trim() ? queue.ffmpegError.trim() : null;
-  dspStatusState.wingetCommand =
+  state.dspStatusState.wingetCommand =
     typeof queue.wingetCommand === 'string' && queue.wingetCommand.trim()
       ? queue.wingetCommand.trim()
       : DEFAULT_DSP_WINGET_COMMAND;
-  dspStatusState.checkedAt = Date.now();
+  state.dspStatusState.checkedAt = Date.now();
 }
 
 async function refreshDspStatus({ announceError = false, userInitiated = false } = {}) {
   if (!isHostRole()) return;
-  if (dspStatusRequestInFlight) return;
+  if (state.dspStatusRequestInFlight) return;
 
-  dspStatusRequestInFlight = true;
+  state.dspStatusRequestInFlight = true;
   if (dspCheckInstallBtn) {
     dspCheckInstallBtn.disabled = true;
   }
@@ -1053,33 +766,32 @@ async function refreshDspStatus({ announceError = false, userInitiated = false }
   }
 
   try {
-    const response = await fetch('/api/dsp/transitions?limit=1');
-    const data = await response.json().catch(() => ({}));
+    const { ok: response_ok, data } = await api.fetchDspStatus(1);
 
-    if (!response.ok) {
+    if (!response_ok) {
       const message = data && typeof data.error === 'string' && data.error ? data.error : 'Не удалось проверить DSP';
       throw new Error(message);
     }
 
     parseDspStatusPayload(data);
-    updateDspSetupUi(currentRole);
+    updateDspSetupUi(state.currentRole);
 
-    if (userInitiated && dspStatusState.ffmpegAvailable === true) {
+    if (userInitiated && state.dspStatusState.ffmpegAvailable === true) {
       setStatus('ffmpeg найден. DSP готов.');
     }
   } catch (err) {
     console.error('Не удалось проверить ffmpeg', err);
-    dspStatusState.enabled = true;
-    dspStatusState.ffmpegAvailable = null;
-    dspStatusState.ffmpegError = err && err.message ? err.message : 'Ошибка запроса';
-    dspStatusState.checkedAt = Date.now();
-    updateDspSetupUi(currentRole);
+    state.dspStatusState.enabled = true;
+    state.dspStatusState.ffmpegAvailable = null;
+    state.dspStatusState.ffmpegError = err && err.message ? err.message : 'Ошибка запроса';
+    state.dspStatusState.checkedAt = Date.now();
+    updateDspSetupUi(state.currentRole);
 
     if (announceError || userInitiated) {
-      setStatus(dspStatusState.ffmpegError || 'Не удалось проверить ffmpeg.');
+      setStatus(state.dspStatusState.ffmpegError || 'Не удалось проверить ffmpeg.');
     }
   } finally {
-    dspStatusRequestInFlight = false;
+    state.dspStatusRequestInFlight = false;
     if (dspCheckInstallBtn) {
       dspCheckInstallBtn.disabled = !isHostRole();
     }
@@ -1087,13 +799,13 @@ async function refreshDspStatus({ announceError = false, userInitiated = false }
 }
 
 function initDspSetupPanel() {
-  updateDspSetupUi(currentRole);
+  updateDspSetupUi(state.currentRole);
 
   if (dspCopyInstallCommandBtn) {
     dspCopyInstallCommandBtn.addEventListener('click', async () => {
       const command =
-        typeof dspStatusState.wingetCommand === 'string' && dspStatusState.wingetCommand.trim()
-          ? dspStatusState.wingetCommand.trim()
+        typeof state.dspStatusState.wingetCommand === 'string' && state.dspStatusState.wingetCommand.trim()
+          ? state.dspStatusState.wingetCommand.trim()
           : DEFAULT_DSP_WINGET_COMMAND;
       try {
         await copyTextToClipboard(command);
@@ -1122,10 +834,10 @@ function setLiveSeekEnabled(
   { persist = false, sync = false, announce = false } = {},
 ) {
   const normalized = Boolean(enabled);
-  const changed = normalized !== liveSeekEnabled;
-  liveSeekEnabled = normalized;
+  const changed = normalized !== state.liveSeekEnabled;
+  state.liveSeekEnabled = normalized;
 
-  if (!normalized && nowPlayingSeekActive) {
+  if (!normalized && state.nowPlayingSeekActive) {
     cleanupNowPlayingSeekInteraction();
   }
 
@@ -1161,7 +873,7 @@ function updateVolumePresetsUi() {
   const dapPresetActive = isDapVolumePresetPlaybackActive();
   const dapPresetVolume = getDapVolumePresetValue();
   const basePresetSource =
-    Array.isArray(LIVE_VOLUME_PRESET_VALUES) && LIVE_VOLUME_PRESET_VALUES.length
+    Array.isArray(state.LIVE_VOLUME_PRESET_VALUES) && state.LIVE_VOLUME_PRESET_VALUES.length
       ? LIVE_VOLUME_PRESET_VALUES
       : DEFAULT_LIVE_VOLUME_PRESET_VALUES;
   const basePresets = basePresetSource
@@ -1185,16 +897,16 @@ function updateVolumePresetsUi() {
     });
   }
 
-  const shouldShow = showVolumePresetsEnabled && canManagePresets;
+  const shouldShow = state.showVolumePresetsEnabled && canManagePresets;
   localVolumePresetsEl.hidden = !shouldShow;
   const activePreset = getActiveVolumePresetValue();
   if (showVolumePresetsToggle) {
-    showVolumePresetsToggle.checked = showVolumePresetsEnabled;
-    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(showVolumePresetsEnabled && !canDisableVolumePresetsSetting());
+    showVolumePresetsToggle.checked = state.showVolumePresetsEnabled;
+    showVolumePresetsToggle.disabled = !canManagePresets || Boolean(state.showVolumePresetsEnabled && !canDisableVolumePresetsSetting());
   }
 
   const layoutSignature = visiblePresetItems.map((item) => item.key).join('|');
-  if (layoutSignature !== volumePresetButtonsSignature) {
+  if (layoutSignature !== state.volumePresetButtonsSignature) {
     localVolumePresetsEl.textContent = '';
     localVolumePresetButtons = visiblePresetItems.map((item) => {
       const button = document.createElement('button');
@@ -1207,7 +919,7 @@ function updateVolumePresetsUi() {
       localVolumePresetsEl.append(button);
       return button;
     });
-    volumePresetButtonsSignature = layoutSignature;
+    state.volumePresetButtonsSignature = layoutSignature;
   }
 
   if (!localVolumePresetButtons.length) return;
@@ -1267,7 +979,7 @@ function clonePlaylistMetaState(metaState, lengthHint = null) {
       ? lengthHint
       : Array.isArray(metaState)
         ? metaState.length
-        : ensurePlaylists(layout).length;
+        : ensurePlaylists(state.layout).length;
   return normalizePlaylistMeta(metaState, expectedLength).map((meta) => ({ ...meta }));
 }
 
@@ -1338,7 +1050,7 @@ function normalizePlaylistMeta(meta, expectedLength) {
 }
 
 function serializePlaylistMeta(meta, lengthHint = null) {
-  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(state.layout).length;
   return JSON.stringify(normalizePlaylistMeta(meta, expectedLength));
 }
 
@@ -1348,7 +1060,7 @@ function playlistMetaEqual(left, right, expectedLength) {
 
 function getPlaylistMetaEntry(playlistIndex) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return defaultPlaylistMeta();
-  const normalized = normalizePlaylistMeta(playlistMeta, ensurePlaylists(layout).length);
+  const normalized = normalizePlaylistMeta(state.playlistMeta, ensurePlaylists(state.layout).length);
   return normalized[playlistIndex] || defaultPlaylistMeta();
 }
 
@@ -1417,7 +1129,7 @@ function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
     folderIndexByKey.set(meta.folderKey, index);
   });
 
-  availableFolders.forEach((folder) => {
+  state.availableFolders.forEach((folder) => {
     if (!folderIndexByKey.has(folder.key)) {
       nextLayout.push(folder.files.slice());
       nextNames.push(folder.name);
@@ -1443,7 +1155,7 @@ function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
   nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
   nextMeta = normalizePlaylistMeta(nextMeta, nextLayout.length);
 
-  const rootFiles = availableFiles.filter((file) => typeof file === 'string' && file && !file.includes('/'));
+  const rootFiles = state.availableFiles.filter((file) => typeof file === 'string' && file && !file.includes('/'));
 
   let manualIndex = getManualPlaylistIndex(nextMeta, nextLayout);
   if (manualIndex < 0 && rootFiles.length > 0) {
@@ -1462,7 +1174,7 @@ function ensureFolderPlaylistsCoverage(layoutState, namesState, metaState) {
     });
   }
 
-  availableFolders.forEach((folder) => {
+  state.availableFolders.forEach((folder) => {
     const folderIndex = folderIndexByKey.get(folder.key);
     if (!Number.isInteger(folderIndex) || folderIndex < 0 || folderIndex >= nextLayout.length) return;
 
@@ -1526,23 +1238,23 @@ function restorePlaylistBodyScrollTops(scrollTopsByPlaylist) {
 }
 
 function resolveRequestedCopyMode(event) {
-  if (touchCopyDragActive) {
-    return touchDragMode === 'copy';
+  if (state.touchCopyDragActive) {
+    return state.touchDragMode === 'copy';
   }
   return isCopyDragModifier(event);
 }
 
 function resolveEffectiveDragMode(event, targetZoneIndex = null) {
   const requestedCopy = resolveRequestedCopyMode(event);
-  if (!touchCopyDragActive) {
+  if (!state.touchCopyDragActive) {
     return requestedCopy ? 'copy' : 'move';
   }
 
-  if (!dragContext || dragContext.sourcePlaylistType !== PLAYLIST_TYPE_FOLDER) {
+  if (!state.dragContext || state.dragContext.sourcePlaylistType !== PLAYLIST_TYPE_FOLDER) {
     return requestedCopy ? 'copy' : 'move';
   }
 
-  const sourceZoneIndex = Number.isInteger(dragContext.sourceZoneIndex) ? dragContext.sourceZoneIndex : -1;
+  const sourceZoneIndex = Number.isInteger(state.dragContext.sourceZoneIndex) ? state.dragContext.sourceZoneIndex : -1;
   const hasTargetZone = Number.isInteger(targetZoneIndex) && targetZoneIndex >= 0;
   const isSameZone = hasTargetZone && sourceZoneIndex >= 0 && sourceZoneIndex === targetZoneIndex;
 
@@ -1579,15 +1291,15 @@ function clearDragModeBadgeFromElement(element) {
 
 function applyDragModeBadge(mode) {
   const normalizedMode = normalizeDragMode(mode);
-  applyDragModeBadgeToElement(draggingCard, normalizedMode);
-  applyDragModeBadgeToElement(dragPreviewCard, normalizedMode);
-  applyDragModeBadgeToElement(desktopDragGhost, normalizedMode);
+  applyDragModeBadgeToElement(state.draggingCard, normalizedMode);
+  applyDragModeBadgeToElement(state.dragPreviewCard, normalizedMode);
+  applyDragModeBadgeToElement(state.desktopDragGhost, normalizedMode);
 }
 
 function clearDragModeBadge() {
-  clearDragModeBadgeFromElement(draggingCard);
-  clearDragModeBadgeFromElement(dragPreviewCard);
-  clearDragModeBadgeFromElement(desktopDragGhost);
+  clearDragModeBadgeFromElement(state.draggingCard);
+  clearDragModeBadgeFromElement(state.dragPreviewCard);
+  clearDragModeBadgeFromElement(state.desktopDragGhost);
 }
 
 function isActiveCopyDrag(event, targetZoneIndex = null) {
@@ -1595,47 +1307,47 @@ function isActiveCopyDrag(event, targetZoneIndex = null) {
 }
 
 function clearDragPreviewCard() {
-  if (!dragPreviewCard) return;
-  dragPreviewCard.remove();
-  dragPreviewCard = null;
+  if (!state.dragPreviewCard) return;
+  state.dragPreviewCard.remove();
+  state.dragPreviewCard = null;
 }
 
 function ensureDragPreviewCard() {
-  if (dragPreviewCard) return dragPreviewCard;
-  if (!draggingCard) return null;
+  if (state.dragPreviewCard) return state.dragPreviewCard;
+  if (!state.draggingCard) return null;
 
-  const preview = draggingCard.cloneNode(true);
+  const preview = state.draggingCard.cloneNode(true);
   preview.classList.add('drag-copy-preview');
   preview.classList.remove('dragging');
   preview.removeAttribute('draggable');
   const playButton = preview.querySelector('button.play');
   if (playButton) playButton.disabled = true;
-  dragPreviewCard = preview;
-  if (draggingCard.classList.contains('has-drag-mode')) {
-    applyDragModeBadgeToElement(dragPreviewCard, draggingCard.dataset.dragMode || 'move');
+  state.dragPreviewCard = preview;
+  if (state.draggingCard.classList.contains('has-drag-mode')) {
+    applyDragModeBadgeToElement(state.dragPreviewCard, state.draggingCard.dataset.dragMode || 'move');
   }
-  return dragPreviewCard;
+  return state.dragPreviewCard;
 }
 
 function getEmptyDragImage() {
-  if (emptyDragImage) return emptyDragImage;
+  if (state.emptyDragImage) return state.emptyDragImage;
   const canvas = document.createElement('canvas');
   canvas.width = 1;
   canvas.height = 1;
-  emptyDragImage = canvas;
-  return emptyDragImage;
+  state.emptyDragImage = canvas;
+  return state.emptyDragImage;
 }
 
 function clearDesktopDragGhost() {
-  if (!desktopDragGhost) return;
-  desktopDragGhost.remove();
-  desktopDragGhost = null;
+  if (!state.desktopDragGhost) return;
+  state.desktopDragGhost.remove();
+  state.desktopDragGhost = null;
 }
 
 function updateDesktopDragGhostPosition(clientX, clientY) {
-  if (!desktopDragGhost) return;
+  if (!state.desktopDragGhost) return;
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
-  desktopDragGhost.style.transform = `translate(${clientX - desktopDragGhostOffsetX}px, ${clientY - desktopDragGhostOffsetY}px)`;
+  state.desktopDragGhost.style.transform = `translate(${clientX - state.desktopDragGhostOffsetX}px, ${clientY - state.desktopDragGhostOffsetY}px)`;
 }
 
 function createDesktopDragGhost(card, clientX, clientY) {
@@ -1652,25 +1364,25 @@ function createDesktopDragGhost(card, clientX, clientY) {
   if (playButton) playButton.disabled = true;
 
   ghost.style.width = `${rect.width}px`;
-  desktopDragGhost = ghost;
+  state.desktopDragGhost = ghost;
   document.body.appendChild(ghost);
 
-  if (draggingCard && draggingCard.classList.contains('has-drag-mode')) {
-    applyDragModeBadgeToElement(desktopDragGhost, draggingCard.dataset.dragMode || 'move');
+  if (state.draggingCard && state.draggingCard.classList.contains('has-drag-mode')) {
+    applyDragModeBadgeToElement(state.desktopDragGhost, state.draggingCard.dataset.dragMode || 'move');
   }
 
   if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
-    desktopDragGhostOffsetX = Math.max(0, Math.min(rect.width, clientX - rect.left));
-    desktopDragGhostOffsetY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    state.desktopDragGhostOffsetX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    state.desktopDragGhostOffsetY = Math.max(0, Math.min(rect.height, clientY - rect.top));
     updateDesktopDragGhostPosition(clientX, clientY);
   } else {
-    desktopDragGhostOffsetX = rect.width / 2;
-    desktopDragGhostOffsetY = rect.height / 2;
+    state.desktopDragGhostOffsetX = rect.width / 2;
+    state.desktopDragGhostOffsetY = rect.height / 2;
   }
 }
 
 function ensureTrashDropzone() {
-  if (trashDropzoneEl) return trashDropzoneEl;
+  if (state.trashDropzoneEl) return state.trashDropzoneEl;
 
   const trash = document.createElement('div');
   trash.className = 'drag-trash';
@@ -1679,7 +1391,7 @@ function ensureTrashDropzone() {
   document.body.appendChild(trash);
 
   trash.addEventListener('dragover', (event) => {
-    if (!draggingCard || !dragContext) return;
+    if (!state.draggingCard || !state.dragContext) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     trash.classList.add('is-active');
@@ -1692,7 +1404,7 @@ function ensureTrashDropzone() {
   });
 
   trash.addEventListener('drop', (event) => {
-    if (!draggingCard || !dragContext) return;
+    if (!state.draggingCard || !state.dragContext) return;
     event.preventDefault();
     event.stopPropagation();
     trash.classList.remove('is-active');
@@ -1702,8 +1414,8 @@ function ensureTrashDropzone() {
     });
   });
 
-  trashDropzoneEl = trash;
-  return trashDropzoneEl;
+  state.trashDropzoneEl = trash;
+  return state.trashDropzoneEl;
 }
 
 function showTrashDropzone() {
@@ -1713,13 +1425,13 @@ function showTrashDropzone() {
 }
 
 function hideTrashDropzone() {
-  if (trashDropzoneEl) {
-    trashDropzoneEl.classList.remove('is-visible', 'is-active');
+  if (state.trashDropzoneEl) {
+    state.trashDropzoneEl.classList.remove('is-visible', 'is-active');
   }
   stopQueueNextDropzoneCountdownLoop();
-  if (queueNextDropzoneEl) {
-    queueNextDropzoneEl.classList.remove('is-visible', 'is-active', 'has-timer');
-    const timerEl = queueNextDropzoneEl.querySelector('.drag-next__timer');
+  if (state.queueNextDropzoneEl) {
+    state.queueNextDropzoneEl.classList.remove('is-visible', 'is-active', 'has-timer');
+    const timerEl = state.queueNextDropzoneEl.querySelector('.drag-next__timer');
     if (timerEl instanceof HTMLElement) {
       timerEl.textContent = '';
     }
@@ -1727,51 +1439,51 @@ function hideTrashDropzone() {
 }
 
 function isTrashDropzoneTarget(target) {
-  if (!trashDropzoneEl || !(target instanceof Element)) return false;
-  return trashDropzoneEl.contains(target);
+  if (!state.trashDropzoneEl || !(target instanceof Element)) return false;
+  return state.trashDropzoneEl.contains(target);
 }
 
 function isPointOverTrashDropzone(clientX, clientY) {
-  if (!trashDropzoneEl || !trashDropzoneEl.classList.contains('is-visible')) return false;
+  if (!state.trashDropzoneEl || !state.trashDropzoneEl.classList.contains('is-visible')) return false;
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
-  const rect = trashDropzoneEl.getBoundingClientRect();
+  const rect = state.trashDropzoneEl.getBoundingClientRect();
   return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
 }
 
 function resolveQueueNextPlaybackAnchor() {
-  const localTrackFile = currentTrack && typeof currentTrack.file === 'string' ? currentTrack.file.trim() : '';
-  if (localTrackFile && currentAudio && !currentAudio.paused) {
+  const localTrackFile = state.currentTrack && typeof state.currentTrack.file === 'string' ? state.currentTrack.file.trim() : '';
+  if (localTrackFile && state.currentAudio && !state.currentAudio.paused) {
     return {
       file: localTrackFile,
-      playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
-      playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
+      playlistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
+      playlistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
     };
   }
 
   if (!isRemoteLiveMirrorRole()) return null;
-  const hostTrackFile = hostPlaybackState && typeof hostPlaybackState.trackFile === 'string'
-    ? hostPlaybackState.trackFile.trim()
+  const hostTrackFile = state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string'
+    ? state.hostPlaybackState.trackFile.trim()
     : '';
-  if (!hostTrackFile || hostPlaybackState.paused) return null;
+  if (!hostTrackFile || state.hostPlaybackState.paused) return null;
 
   return {
     file: hostTrackFile,
-    playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+    playlistIndex: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
   };
 }
 
 function clearQueueNextChainAnchor() {
-  queueNextChainAnchor = null;
-  queueNextChainExpiresAt = 0;
+  state.queueNextChainAnchor = null;
+  state.queueNextChainExpiresAt = 0;
 }
 
 function getQueueNextChainRemainingMs() {
-  if (!queueNextChainAnchor || !Number.isFinite(queueNextChainExpiresAt) || queueNextChainExpiresAt <= 0) {
+  if (!state.queueNextChainAnchor || !Number.isFinite(state.queueNextChainExpiresAt) || state.queueNextChainExpiresAt <= 0) {
     return 0;
   }
 
-  const remainingMs = queueNextChainExpiresAt - Date.now();
+  const remainingMs = state.queueNextChainExpiresAt - Date.now();
   if (remainingMs > 0) {
     return remainingMs;
   }
@@ -1786,15 +1498,15 @@ function setQueueNextChainAnchor(trackContext) {
     return;
   }
 
-  queueNextChainAnchor = {
+  state.queueNextChainAnchor = {
     file: trackContext.file.trim(),
     playlistIndex: normalizePlaylistTrackIndex(trackContext.playlistIndex),
     playlistPosition: normalizePlaylistTrackIndex(trackContext.playlistPosition),
   };
-  queueNextChainExpiresAt = Date.now() + QUEUE_NEXT_CHAIN_WINDOW_MS;
+  state.queueNextChainExpiresAt = Date.now() + QUEUE_NEXT_CHAIN_WINDOW_MS;
 }
 
-function resolveQueueNextInsertTargetFromAnchor(anchor, layoutState = layout) {
+function resolveQueueNextInsertTargetFromAnchor(anchor, layoutState = state.layout) {
   if (!anchor || typeof anchor.file !== 'string' || !anchor.file.trim()) return null;
 
   const normalizedLayout = ensurePlaylists(layoutState);
@@ -1815,27 +1527,27 @@ function resolveQueueNextInsertTargetFromAnchor(anchor, layoutState = layout) {
   };
 }
 
-function resolveQueueNextChainInsertTarget(layoutState = layout) {
-  if (!queueNextChainAnchor || !Number.isFinite(queueNextChainExpiresAt) || queueNextChainExpiresAt <= 0) {
+function resolveQueueNextChainInsertTarget(layoutState = state.layout) {
+  if (!state.queueNextChainAnchor || !Number.isFinite(state.queueNextChainExpiresAt) || state.queueNextChainExpiresAt <= 0) {
     return null;
   }
-  if (Date.now() > queueNextChainExpiresAt) {
+  if (Date.now() > state.queueNextChainExpiresAt) {
     clearQueueNextChainAnchor();
     return null;
   }
 
-  const target = resolveQueueNextInsertTargetFromAnchor(queueNextChainAnchor, layoutState);
+  const target = resolveQueueNextInsertTargetFromAnchor(state.queueNextChainAnchor, layoutState);
   if (!target) {
     clearQueueNextChainAnchor();
     return null;
   }
 
-  queueNextChainAnchor.playlistIndex = target.playlistIndex;
-  queueNextChainAnchor.playlistPosition = Math.max(0, target.insertIndex - 1);
+  state.queueNextChainAnchor.playlistIndex = target.playlistIndex;
+  state.queueNextChainAnchor.playlistPosition = Math.max(0, target.insertIndex - 1);
   return target;
 }
 
-function resolveQueueNextInsertTarget(layoutState = layout) {
+function resolveQueueNextInsertTarget(layoutState = state.layout) {
   const playbackAnchor = resolveQueueNextPlaybackAnchor();
   if (!playbackAnchor || !playbackAnchor.file) {
     clearQueueNextChainAnchor();
@@ -1848,7 +1560,7 @@ function resolveQueueNextInsertTarget(layoutState = layout) {
 }
 
 function ensureQueueNextDropzone() {
-  if (queueNextDropzoneEl) return queueNextDropzoneEl;
+  if (state.queueNextDropzoneEl) return state.queueNextDropzoneEl;
 
   const dropzone = document.createElement('div');
   dropzone.className = 'drag-next';
@@ -1858,8 +1570,8 @@ function ensureQueueNextDropzone() {
   document.body.appendChild(dropzone);
 
   dropzone.addEventListener('dragover', (event) => {
-    if (!draggingCard || !dragContext) return;
-    const queueTarget = resolveQueueNextInsertTarget(layout);
+    if (!state.draggingCard || !state.dragContext) return;
+    const queueTarget = resolveQueueNextInsertTarget(state.layout);
     if (!queueTarget) return;
     event.preventDefault();
     const mode = resolveEffectiveDragMode(event, queueTarget.playlistIndex);
@@ -1874,7 +1586,7 @@ function ensureQueueNextDropzone() {
   });
 
   dropzone.addEventListener('drop', (event) => {
-    if (!draggingCard || !dragContext) return;
+    if (!state.draggingCard || !state.dragContext) return;
     event.preventDefault();
     event.stopPropagation();
     dropzone.classList.remove('is-active');
@@ -1884,19 +1596,19 @@ function ensureQueueNextDropzone() {
     });
   });
 
-  queueNextDropzoneEl = dropzone;
-  return queueNextDropzoneEl;
+  state.queueNextDropzoneEl = dropzone;
+  return state.queueNextDropzoneEl;
 }
 
 function updateQueueNextDropzoneCountdownUi() {
-  if (!queueNextDropzoneEl) return;
-  const labelEl = queueNextDropzoneEl.querySelector('.drag-next__label');
-  const timerEl = queueNextDropzoneEl.querySelector('.drag-next__timer');
+  if (!state.queueNextDropzoneEl) return;
+  const labelEl = state.queueNextDropzoneEl.querySelector('.drag-next__label');
+  const timerEl = state.queueNextDropzoneEl.querySelector('.drag-next__timer');
   if (!(timerEl instanceof HTMLElement)) return;
 
   const remainingMs = getQueueNextChainRemainingMs();
   if (remainingMs <= 0) {
-    queueNextDropzoneEl.classList.remove('has-timer');
+    state.queueNextDropzoneEl.classList.remove('has-timer');
     timerEl.textContent = '';
     if (labelEl instanceof HTMLElement) {
       labelEl.textContent = 'воспроизвести следующим';
@@ -1905,7 +1617,7 @@ function updateQueueNextDropzoneCountdownUi() {
   }
 
   const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
-  queueNextDropzoneEl.classList.add('has-timer');
+  state.queueNextDropzoneEl.classList.add('has-timer');
   if (labelEl instanceof HTMLElement) {
     labelEl.textContent = 'Добавить в стек';
   }
@@ -1913,16 +1625,16 @@ function updateQueueNextDropzoneCountdownUi() {
 }
 
 function stopQueueNextDropzoneCountdownLoop() {
-  if (queueNextCountdownTimer === null) return;
-  clearInterval(queueNextCountdownTimer);
-  queueNextCountdownTimer = null;
+  if (state.queueNextCountdownTimer === null) return;
+  clearInterval(state.queueNextCountdownTimer);
+  state.queueNextCountdownTimer = null;
 }
 
 function startQueueNextDropzoneCountdownLoop() {
-  if (queueNextCountdownTimer !== null) return;
+  if (state.queueNextCountdownTimer !== null) return;
   updateQueueNextDropzoneCountdownUi();
-  queueNextCountdownTimer = setInterval(() => {
-    if (!queueNextDropzoneEl || !queueNextDropzoneEl.classList.contains('is-visible')) {
+  state.queueNextCountdownTimer = setInterval(() => {
+    if (!state.queueNextDropzoneEl || !state.queueNextDropzoneEl.classList.contains('is-visible')) {
       stopQueueNextDropzoneCountdownLoop();
       return;
     }
@@ -1931,10 +1643,10 @@ function startQueueNextDropzoneCountdownLoop() {
 }
 
 function syncQueueNextDropzoneVisibility() {
-  const dragActive = Boolean(draggingCard && dragContext);
-  if (!dragActive && !queueNextDropzoneEl) return;
+  const dragActive = Boolean(state.draggingCard && state.dragContext);
+  if (!dragActive && !state.queueNextDropzoneEl) return;
   const dropzone = ensureQueueNextDropzone();
-  const shouldShow = dragActive && Boolean(resolveQueueNextInsertTarget(layout));
+  const shouldShow = dragActive && Boolean(resolveQueueNextInsertTarget(state.layout));
   if (shouldShow) {
     dropzone.classList.add('is-visible');
     updateQueueNextDropzoneCountdownUi();
@@ -1954,23 +1666,23 @@ function syncQueueNextDropzoneVisibility() {
 }
 
 function isQueueNextDropzoneTarget(target) {
-  if (!queueNextDropzoneEl || !(target instanceof Element)) return false;
-  return queueNextDropzoneEl.contains(target);
+  if (!state.queueNextDropzoneEl || !(target instanceof Element)) return false;
+  return state.queueNextDropzoneEl.contains(target);
 }
 
 function isPointOverQueueNextDropzone(clientX, clientY) {
-  if (!queueNextDropzoneEl || !queueNextDropzoneEl.classList.contains('is-visible')) return false;
+  if (!state.queueNextDropzoneEl || !state.queueNextDropzoneEl.classList.contains('is-visible')) return false;
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
-  const rect = queueNextDropzoneEl.getBoundingClientRect();
+  const rect = state.queueNextDropzoneEl.getBoundingClientRect();
   return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
 }
 
 function handleGlobalDragOver(event) {
-  if (!draggingCard || !event.dataTransfer) return;
+  if (!state.draggingCard || !event.dataTransfer) return;
   updateDesktopDragGhostPosition(event.clientX, event.clientY);
   const target = event.target instanceof Element ? event.target : null;
   if (isQueueNextDropzoneTarget(target)) {
-    const queueTarget = resolveQueueNextInsertTarget(layout);
+    const queueTarget = resolveQueueNextInsertTarget(state.layout);
     if (queueTarget) {
       const mode = resolveEffectiveDragMode(event, queueTarget.playlistIndex);
       applyDragModeBadge('next');
@@ -2004,7 +1716,7 @@ function isLikelyTouchNativeDragEvent(event) {
   if (event.sourceCapabilities && event.sourceCapabilities.firesTouchEvents) {
     return true;
   }
-  return Date.now() - lastTouchPointerDownAt < TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS;
+  return Date.now() - state.lastTouchPointerDownAt < TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS;
 }
 
 function removeDesktopDragHoldListeners() {
@@ -2014,32 +1726,32 @@ function removeDesktopDragHoldListeners() {
 }
 
 function clearDesktopDragHold() {
-  if (desktopDragHoldTimer !== null) {
-    clearTimeout(desktopDragHoldTimer);
-    desktopDragHoldTimer = null;
+  if (state.desktopDragHoldTimer !== null) {
+    clearTimeout(state.desktopDragHoldTimer);
+    state.desktopDragHoldTimer = null;
   }
-  desktopDragHoldPointerId = null;
-  desktopDragHoldStartedAt = 0;
-  desktopDragHoldStartX = 0;
-  desktopDragHoldStartY = 0;
-  desktopDragHoldCard = null;
-  desktopDragHoldReady = false;
+  state.desktopDragHoldPointerId = null;
+  state.desktopDragHoldStartedAt = 0;
+  state.desktopDragHoldStartX = 0;
+  state.desktopDragHoldStartY = 0;
+  state.desktopDragHoldCard = null;
+  state.desktopDragHoldReady = false;
   removeDesktopDragHoldListeners();
 }
 
 function onDesktopDragHoldPointerMove(event) {
-  if (desktopDragHoldPointerId === null || event.pointerId !== desktopDragHoldPointerId) return;
-  if (desktopDragHoldReady) return;
+  if (state.desktopDragHoldPointerId === null || event.pointerId !== state.desktopDragHoldPointerId) return;
+  if (state.desktopDragHoldReady) return;
 
-  const deltaX = event.clientX - desktopDragHoldStartX;
-  const deltaY = event.clientY - desktopDragHoldStartY;
+  const deltaX = event.clientX - state.desktopDragHoldStartX;
+  const deltaY = event.clientY - state.desktopDragHoldStartY;
   if (Math.hypot(deltaX, deltaY) <= DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX) return;
 
   clearDesktopDragHold();
 }
 
 function onDesktopDragHoldPointerEnd(event) {
-  if (desktopDragHoldPointerId === null || event.pointerId !== desktopDragHoldPointerId) return;
+  if (state.desktopDragHoldPointerId === null || event.pointerId !== state.desktopDragHoldPointerId) return;
   clearDesktopDragHold();
 }
 
@@ -2047,43 +1759,43 @@ function startDesktopDragHold(card, event) {
   if (!card || !event) return;
   clearDesktopDragHold();
 
-  desktopDragHoldPointerId = Number.isInteger(event.pointerId) ? event.pointerId : null;
-  desktopDragHoldStartedAt = Date.now();
-  desktopDragHoldStartX = event.clientX;
-  desktopDragHoldStartY = event.clientY;
-  desktopDragHoldCard = card;
-  desktopDragHoldReady = false;
+  state.desktopDragHoldPointerId = Number.isInteger(event.pointerId) ? event.pointerId : null;
+  state.desktopDragHoldStartedAt = Date.now();
+  state.desktopDragHoldStartX = event.clientX;
+  state.desktopDragHoldStartY = event.clientY;
+  state.desktopDragHoldCard = card;
+  state.desktopDragHoldReady = false;
 
-  if (desktopDragHoldPointerId !== null) {
+  if (state.desktopDragHoldPointerId !== null) {
     window.addEventListener('pointermove', onDesktopDragHoldPointerMove, true);
     window.addEventListener('pointerup', onDesktopDragHoldPointerEnd, true);
     window.addEventListener('pointercancel', onDesktopDragHoldPointerEnd, true);
   }
 
-  desktopDragHoldTimer = setTimeout(() => {
-    desktopDragHoldTimer = null;
-    if (!desktopDragHoldCard || !desktopDragHoldCard.isConnected) {
+  state.desktopDragHoldTimer = setTimeout(() => {
+    state.desktopDragHoldTimer = null;
+    if (!state.desktopDragHoldCard || !state.desktopDragHoldCard.isConnected) {
       clearDesktopDragHold();
       return;
     }
-    desktopDragHoldReady = true;
+    state.desktopDragHoldReady = true;
   }, DESKTOP_TRACK_DRAG_HOLD_MS);
 }
 
 function isDesktopDragHoldReadyForPointer(pointerId) {
   return (
-    desktopDragHoldReady &&
-    desktopDragHoldPointerId !== null &&
-    pointerId === desktopDragHoldPointerId &&
-    !!desktopDragHoldCard
+    state.desktopDragHoldReady &&
+    state.desktopDragHoldPointerId !== null &&
+    pointerId === state.desktopDragHoldPointerId &&
+    !!state.desktopDragHoldCard
   );
 }
 
 function isDesktopDragHoldReadyForCard(card) {
-  if (!card || desktopDragHoldCard !== card) return false;
-  if (desktopDragHoldReady) return true;
-  if (!desktopDragHoldStartedAt) return false;
-  return Date.now() - desktopDragHoldStartedAt >= DESKTOP_TRACK_DRAG_HOLD_MS;
+  if (!card || state.desktopDragHoldCard !== card) return false;
+  if (state.desktopDragHoldReady) return true;
+  if (!state.desktopDragHoldStartedAt) return false;
+  return Date.now() - state.desktopDragHoldStartedAt >= DESKTOP_TRACK_DRAG_HOLD_MS;
 }
 
 function removeTouchHoldListeners() {
@@ -2093,46 +1805,46 @@ function removeTouchHoldListeners() {
 }
 
 function clearTouchCopyHold() {
-  const holdCard = touchHoldCard;
+  const holdCard = state.touchHoldCard;
   if (holdCard) {
     holdCard.classList.remove('touch-hold-copy');
   }
-  if (holdCard && touchHoldPointerId !== null && typeof holdCard.releasePointerCapture === 'function') {
+  if (holdCard && state.touchHoldPointerId !== null && typeof holdCard.releasePointerCapture === 'function') {
     try {
-      if (holdCard.hasPointerCapture && holdCard.hasPointerCapture(touchHoldPointerId)) {
-        holdCard.releasePointerCapture(touchHoldPointerId);
+      if (holdCard.hasPointerCapture && holdCard.hasPointerCapture(state.touchHoldPointerId)) {
+        holdCard.releasePointerCapture(state.touchHoldPointerId);
       }
     } catch (err) {
       // ignore pointer capture release errors from browsers that do not fully support it
     }
   }
 
-  if (touchHoldTimer !== null) {
-    clearTimeout(touchHoldTimer);
-    touchHoldTimer = null;
+  if (state.touchHoldTimer !== null) {
+    clearTimeout(state.touchHoldTimer);
+    state.touchHoldTimer = null;
   }
-  touchHoldPointerId = null;
-  touchHoldStartedAt = 0;
-  touchHoldCard = null;
+  state.touchHoldPointerId = null;
+  state.touchHoldStartedAt = 0;
+  state.touchHoldCard = null;
   removeTouchHoldListeners();
 }
 
 function onTouchHoldPointerMove(event) {
-  if (touchHoldPointerId === null || event.pointerId !== touchHoldPointerId) return;
-  const deltaX = event.clientX - touchHoldStartX;
-  const deltaY = event.clientY - touchHoldStartY;
+  if (state.touchHoldPointerId === null || event.pointerId !== state.touchHoldPointerId) return;
+  const deltaX = event.clientX - state.touchHoldStartX;
+  const deltaY = event.clientY - state.touchHoldStartY;
   const distance = Math.hypot(deltaX, deltaY);
   if (distance <= TOUCH_DRAG_START_MOVE_PX) return;
 
-  const elapsed = Date.now() - touchHoldStartedAt;
+  const elapsed = Date.now() - state.touchHoldStartedAt;
   if (elapsed < TOUCH_DRAG_ACTIVATION_DELAY_MS) {
     // Treat early movement as a regular scroll gesture, not as drag.
     clearTouchCopyHold();
     return;
   }
 
-  const heldCard = touchHoldCard;
-  const pointerId = touchHoldPointerId;
+  const heldCard = state.touchHoldCard;
+  const pointerId = state.touchHoldPointerId;
   clearTouchCopyHold();
   if (!heldCard || pointerId === null) return;
   event.preventDefault();
@@ -2144,23 +1856,23 @@ function onTouchHoldPointerMove(event) {
 }
 
 function onTouchHoldPointerEnd(event) {
-  if (touchHoldPointerId === null || event.pointerId !== touchHoldPointerId) return;
+  if (state.touchHoldPointerId === null || event.pointerId !== state.touchHoldPointerId) return;
   clearTouchCopyHold();
 }
 
 function updateTouchCopyGhostPosition(clientX, clientY) {
-  if (!touchCopyDragGhost) return;
+  if (!state.touchCopyDragGhost) return;
   const offsetX = 16;
   const offsetY = 16;
-  touchCopyDragGhost.style.transform = `translate(${clientX + offsetX}px, ${clientY + offsetY}px)`;
+  state.touchCopyDragGhost.style.transform = `translate(${clientX + offsetX}px, ${clientY + offsetY}px)`;
 }
 
 function stopTouchCopyDragEdgeAutoScroll() {
-  if (touchCopyDragEdgeScrollRaf !== null) {
-    cancelAnimationFrame(touchCopyDragEdgeScrollRaf);
-    touchCopyDragEdgeScrollRaf = null;
+  if (state.touchCopyDragEdgeScrollRaf !== null) {
+    cancelAnimationFrame(state.touchCopyDragEdgeScrollRaf);
+    state.touchCopyDragEdgeScrollRaf = null;
   }
-  touchCopyDragEdgeScrollVelocity = 0;
+  state.touchCopyDragEdgeScrollVelocity = 0;
 }
 
 function resolveTouchCopyDragEdgeScrollVelocity(clientX) {
@@ -2191,47 +1903,47 @@ function resolveTouchCopyDragEdgeScrollVelocity(clientX) {
 }
 
 function runTouchCopyDragEdgeAutoScrollStep() {
-  touchCopyDragEdgeScrollRaf = null;
-  if (!touchCopyDragActive || !zonesContainer) return;
-  if (Math.abs(touchCopyDragEdgeScrollVelocity) < 0.01) return;
+  state.touchCopyDragEdgeScrollRaf = null;
+  if (!state.touchCopyDragActive || !zonesContainer) return;
+  if (Math.abs(state.touchCopyDragEdgeScrollVelocity) < 0.01) return;
 
   const maxScrollLeft = Math.max(0, zonesContainer.scrollWidth - zonesContainer.clientWidth);
   if (maxScrollLeft <= 0) {
-    touchCopyDragEdgeScrollVelocity = 0;
+    state.touchCopyDragEdgeScrollVelocity = 0;
     return;
   }
 
   const previousScrollLeft = zonesContainer.scrollLeft;
   const nextScrollLeft = Math.max(
     0,
-    Math.min(maxScrollLeft, previousScrollLeft + touchCopyDragEdgeScrollVelocity),
+    Math.min(maxScrollLeft, previousScrollLeft + state.touchCopyDragEdgeScrollVelocity),
   );
   zonesContainer.scrollLeft = nextScrollLeft;
 
-  if (Number.isFinite(touchCopyDragLastClientX) && Number.isFinite(touchCopyDragLastClientY)) {
-    updateTouchCopyDragPreview(touchCopyDragLastClientX, touchCopyDragLastClientY);
+  if (Number.isFinite(state.touchCopyDragLastClientX) && Number.isFinite(state.touchCopyDragLastClientY)) {
+    updateTouchCopyDragPreview(state.touchCopyDragLastClientX, state.touchCopyDragLastClientY);
   }
 
   if (Math.abs(nextScrollLeft - previousScrollLeft) < 0.01) {
-    touchCopyDragEdgeScrollVelocity = 0;
+    state.touchCopyDragEdgeScrollVelocity = 0;
     return;
   }
 
-  touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
+  state.touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
 }
 
 function updateTouchCopyDragEdgeAutoScroll(clientX, clientY) {
-  touchCopyDragLastClientX = clientX;
-  touchCopyDragLastClientY = clientY;
+  state.touchCopyDragLastClientX = clientX;
+  state.touchCopyDragLastClientY = clientY;
   const velocity = resolveTouchCopyDragEdgeScrollVelocity(clientX);
   if (Math.abs(velocity) < 0.01) {
     stopTouchCopyDragEdgeAutoScroll();
     return;
   }
 
-  touchCopyDragEdgeScrollVelocity = velocity;
-  if (touchCopyDragEdgeScrollRaf === null) {
-    touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
+  state.touchCopyDragEdgeScrollVelocity = velocity;
+  if (state.touchCopyDragEdgeScrollRaf === null) {
+    state.touchCopyDragEdgeScrollRaf = requestAnimationFrame(runTouchCopyDragEdgeAutoScrollStep);
   }
 }
 
@@ -2247,9 +1959,9 @@ function clearZoneDragOverState() {
 
 function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
   stopTouchCopyDragEdgeAutoScroll();
-  if (touchCopyDragGhost) {
-    touchCopyDragGhost.remove();
-    touchCopyDragGhost = null;
+  if (state.touchCopyDragGhost) {
+    state.touchCopyDragGhost.remove();
+    state.touchCopyDragGhost = null;
   }
   hideTrashDropzone();
   clearDesktopDragGhost();
@@ -2259,21 +1971,21 @@ function cleanupTouchCopyDrag({ restoreLayout = false } = {}) {
   removeTouchCopyDragListeners();
   clearZoneDragOverState();
 
-  if (draggingCard) {
-    draggingCard.classList.remove('dragging');
+  if (state.draggingCard) {
+    state.draggingCard.classList.remove('dragging');
   }
 
-  const shouldRestoreLayout = restoreLayout && !dragDropHandled;
+  const shouldRestoreLayout = restoreLayout && !state.dragDropHandled;
 
-  draggingCard = null;
-  dragContext = null;
-  dragDropHandled = false;
-  touchCopyDragActive = false;
-  touchCopyDragPointerId = null;
-  touchCopyDragMoved = false;
-  touchCopyDragLastClientX = 0;
-  touchCopyDragLastClientY = 0;
-  touchDragMode = null;
+  state.draggingCard = null;
+  state.dragContext = null;
+  state.dragDropHandled = false;
+  state.touchCopyDragActive = false;
+  state.touchCopyDragPointerId = null;
+  state.touchCopyDragMoved = false;
+  state.touchCopyDragLastClientX = 0;
+  state.touchCopyDragLastClientY = 0;
+  state.touchDragMode = null;
 
   if (shouldRestoreLayout) {
     renderZones();
@@ -2296,46 +2008,46 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   syncQueueNextDropzoneVisibility();
 
   if (isPointOverQueueNextDropzone(clientX, clientY)) {
-    if (queueNextDropzoneEl) {
-      queueNextDropzoneEl.classList.add('is-active');
+    if (state.queueNextDropzoneEl) {
+      state.queueNextDropzoneEl.classList.add('is-active');
     }
-    if (trashDropzoneEl) {
-      trashDropzoneEl.classList.remove('is-active');
+    if (state.trashDropzoneEl) {
+      state.trashDropzoneEl.classList.remove('is-active');
     }
     applyDragModeBadge('next');
-    if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-delete');
-      touchCopyDragGhost.classList.add('is-next');
+    if (state.touchCopyDragGhost) {
+      state.touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-delete');
+      state.touchCopyDragGhost.classList.add('is-next');
     }
     return;
   }
 
-  if (queueNextDropzoneEl) {
-    queueNextDropzoneEl.classList.remove('is-active');
+  if (state.queueNextDropzoneEl) {
+    state.queueNextDropzoneEl.classList.remove('is-active');
   }
 
   if (isPointOverTrashDropzone(clientX, clientY)) {
-    if (trashDropzoneEl) {
-      trashDropzoneEl.classList.add('is-active');
+    if (state.trashDropzoneEl) {
+      state.trashDropzoneEl.classList.add('is-active');
     }
     applyDragModeBadge('delete');
-    if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-next');
-      touchCopyDragGhost.classList.add('is-delete');
+    if (state.touchCopyDragGhost) {
+      state.touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-cancel', 'is-next');
+      state.touchCopyDragGhost.classList.add('is-delete');
     }
     return;
   }
 
-  if (trashDropzoneEl) {
-    trashDropzoneEl.classList.remove('is-active');
+  if (state.trashDropzoneEl) {
+    state.trashDropzoneEl.classList.remove('is-active');
   }
 
   const zone = getZoneFromPoint(clientX, clientY);
   if (!zone) {
     applyDragModeBadge('cancel');
-    if (touchCopyDragGhost) {
-      touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-delete', 'is-next');
-      touchCopyDragGhost.classList.add('is-cancel');
+    if (state.touchCopyDragGhost) {
+      state.touchCopyDragGhost.classList.remove('is-copy', 'is-move', 'is-delete', 'is-next');
+      state.touchCopyDragGhost.classList.add('is-cancel');
     }
     return;
   }
@@ -2343,9 +2055,9 @@ function updateTouchCopyDragPreview(clientX, clientY) {
   const targetZoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
   const dropMode = resolveEffectiveDragMode(null, Number.isInteger(targetZoneIndex) ? targetZoneIndex : null);
   applyDragModeBadge(dropMode);
-  if (touchCopyDragGhost) {
-    touchCopyDragGhost.classList.remove('is-delete', 'is-cancel', 'is-copy', 'is-move', 'is-next');
-    touchCopyDragGhost.classList.add(dropMode === 'copy' ? 'is-copy' : 'is-move');
+  if (state.touchCopyDragGhost) {
+    state.touchCopyDragGhost.classList.remove('is-delete', 'is-cancel', 'is-copy', 'is-move', 'is-next');
+    state.touchCopyDragGhost.classList.add(dropMode === 'copy' ? 'is-copy' : 'is-move');
   }
 
   zone.classList.add('drag-over');
@@ -2360,10 +2072,10 @@ function updateTouchCopyDragPreview(clientX, clientY) {
 }
 
 async function finishTouchCopyDrag(clientX, clientY) {
-  if (!touchCopyDragActive) return;
-  const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+  if (!state.touchCopyDragActive) return;
+  const dropMode = state.touchDragMode === 'copy' ? 'copy' : 'move';
 
-  if (!touchCopyDragMoved) {
+  if (!state.touchCopyDragMoved) {
     cleanupTouchCopyDrag({ restoreLayout: true });
     setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
     return;
@@ -2412,23 +2124,23 @@ async function finishTouchCopyDrag(clientX, clientY) {
 }
 
 function onTouchCopyDragPointerMove(event) {
-  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
+  if (!state.touchCopyDragActive || event.pointerId !== state.touchCopyDragPointerId) return;
   event.preventDefault();
-  const deltaX = event.clientX - touchCopyDragStartX;
-  const deltaY = event.clientY - touchCopyDragStartY;
-  if (!touchCopyDragMoved && Math.hypot(deltaX, deltaY) > TOUCH_DRAG_COMMIT_PX) {
-    touchCopyDragMoved = true;
+  const deltaX = event.clientX - state.touchCopyDragStartX;
+  const deltaY = event.clientY - state.touchCopyDragStartY;
+  if (!state.touchCopyDragMoved && Math.hypot(deltaX, deltaY) > TOUCH_DRAG_COMMIT_PX) {
+    state.touchCopyDragMoved = true;
   }
   updateTouchCopyDragPreview(event.clientX, event.clientY);
   updateTouchCopyDragEdgeAutoScroll(event.clientX, event.clientY);
 }
 
 function onTouchCopyDragPointerUp(event) {
-  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
+  if (!state.touchCopyDragActive || event.pointerId !== state.touchCopyDragPointerId) return;
   event.preventDefault();
   finishTouchCopyDrag(event.clientX, event.clientY).catch((err) => {
     console.error(err);
-    const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+    const dropMode = state.touchDragMode === 'copy' ? 'copy' : 'move';
     cleanupTouchCopyDrag({ restoreLayout: true });
     setStatus(
       dropMode === 'copy'
@@ -2439,8 +2151,8 @@ function onTouchCopyDragPointerUp(event) {
 }
 
 function onTouchCopyDragPointerCancel(event) {
-  if (!touchCopyDragActive || event.pointerId !== touchCopyDragPointerId) return;
-  const dropMode = touchDragMode === 'copy' ? 'copy' : 'move';
+  if (!state.touchCopyDragActive || event.pointerId !== state.touchCopyDragPointerId) return;
+  const dropMode = state.touchDragMode === 'copy' ? 'copy' : 'move';
   cleanupTouchCopyDrag({ restoreLayout: true });
   setStatus(dropMode === 'copy' ? 'Копирование отменено.' : 'Перемещение отменено.');
 }
@@ -2464,68 +2176,68 @@ function startTouchCopyDrag(card, pointerId, clientX, clientY, { mode = 'copy', 
   const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
   const resolvedMode = mode === 'copy' ? 'copy' : 'move';
 
-  dragContext = {
+  state.dragContext = {
     file: card.dataset.file || '',
     sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
     sourceIndex,
     sourcePlaylistType,
-    snapshotLayout: cloneLayoutState(layout),
+    snapshotLayout: cloneLayoutState(state.layout),
   };
 
-  draggingCard = card;
-  dragDropHandled = false;
-  touchCopyDragActive = true;
-  touchCopyDragPointerId = pointerId;
-  touchCopyDragStartX = clientX;
-  touchCopyDragStartY = clientY;
-  touchCopyDragMoved = Boolean(moved);
-  touchCopyDragLastClientX = clientX;
-  touchCopyDragLastClientY = clientY;
-  touchDragMode = resolvedMode;
+  state.draggingCard = card;
+  state.dragDropHandled = false;
+  state.touchCopyDragActive = true;
+  state.touchCopyDragPointerId = pointerId;
+  state.touchCopyDragStartX = clientX;
+  state.touchCopyDragStartY = clientY;
+  state.touchCopyDragMoved = Boolean(moved);
+  state.touchCopyDragLastClientX = clientX;
+  state.touchCopyDragLastClientY = clientY;
+  state.touchDragMode = resolvedMode;
   card.classList.add('dragging');
 
   const ghost = card.cloneNode(true);
   ghost.classList.add('touch-drag-ghost');
-  ghost.classList.add(touchDragMode === 'copy' ? 'is-copy' : 'is-move');
+  ghost.classList.add(state.touchDragMode === 'copy' ? 'is-copy' : 'is-move');
   ghost.classList.remove('dragging');
-  touchCopyDragGhost = ghost;
+  state.touchCopyDragGhost = ghost;
   document.body.appendChild(ghost);
   updateTouchCopyGhostPosition(clientX, clientY);
   showTrashDropzone();
-  applyDragModeBadge(touchDragMode);
+  applyDragModeBadge(state.touchDragMode);
   updateTouchCopyDragEdgeAutoScroll(clientX, clientY);
 
   window.addEventListener('pointermove', onTouchCopyDragPointerMove, true);
   window.addEventListener('pointerup', onTouchCopyDragPointerUp, true);
   window.addEventListener('pointercancel', onTouchCopyDragPointerCancel, true);
   setStatus(
-    touchDragMode === 'copy'
+    state.touchDragMode === 'copy'
       ? 'Режим копирования: перетащите трек в нужный плей-лист.'
       : 'Режим перемещения: перетащите трек в нужный плей-лист.',
   );
 }
 
 function startTouchCopyHold(card, event) {
-  if (touchCopyDragActive) return;
+  if (state.touchCopyDragActive) return;
 
-  lastTouchPointerDownAt = Date.now();
+  state.lastTouchPointerDownAt = Date.now();
   clearTouchCopyHold();
-  touchHoldPointerId = event.pointerId;
-  touchHoldStartX = event.clientX;
-  touchHoldStartY = event.clientY;
-  touchHoldStartedAt = Date.now();
-  touchHoldCard = card;
+  state.touchHoldPointerId = event.pointerId;
+  state.touchHoldStartX = event.clientX;
+  state.touchHoldStartY = event.clientY;
+  state.touchHoldStartedAt = Date.now();
+  state.touchHoldCard = card;
   card.classList.add('touch-hold-copy');
 
   window.addEventListener('pointermove', onTouchHoldPointerMove, true);
   window.addEventListener('pointerup', onTouchHoldPointerEnd, true);
   window.addEventListener('pointercancel', onTouchHoldPointerEnd, true);
 
-  touchHoldTimer = setTimeout(() => {
-    const heldCard = touchHoldCard;
-    const pointerId = touchHoldPointerId;
-    const startX = touchHoldStartX;
-    const startY = touchHoldStartY;
+  state.touchHoldTimer = setTimeout(() => {
+    const heldCard = state.touchHoldCard;
+    const pointerId = state.touchHoldPointerId;
+    const startX = state.touchHoldStartX;
+    const startY = state.touchHoldStartY;
 
     clearTouchCopyHold();
 
@@ -2541,28 +2253,28 @@ function removePlaylistCollapseHoldListeners() {
 }
 
 function clearPlaylistCollapsePendingVisual() {
-  if (!playlistCollapseHoldZone) return;
-  playlistCollapseHoldZone.classList.remove('zone--collapse-pending');
-  playlistCollapseHoldZone = null;
+  if (!state.playlistCollapseHoldZone) return;
+  state.playlistCollapseHoldZone.classList.remove('zone--collapse-pending');
+  state.playlistCollapseHoldZone = null;
 }
 
 function clearPlaylistCollapseHold({ resetTriggered = true } = {}) {
-  if (playlistCollapseHoldTimer !== null) {
-    clearTimeout(playlistCollapseHoldTimer);
-    playlistCollapseHoldTimer = null;
+  if (state.playlistCollapseHoldTimer !== null) {
+    clearTimeout(state.playlistCollapseHoldTimer);
+    state.playlistCollapseHoldTimer = null;
   }
 
   if (
-    playlistCollapseHoldTarget &&
-    playlistCollapseHoldPointerId !== null &&
-    typeof playlistCollapseHoldTarget.releasePointerCapture === 'function'
+    state.playlistCollapseHoldTarget &&
+    state.playlistCollapseHoldPointerId !== null &&
+    typeof state.playlistCollapseHoldTarget.releasePointerCapture === 'function'
   ) {
     try {
       if (
-        playlistCollapseHoldTarget.hasPointerCapture &&
-        playlistCollapseHoldTarget.hasPointerCapture(playlistCollapseHoldPointerId)
+        state.playlistCollapseHoldTarget.hasPointerCapture &&
+        state.playlistCollapseHoldTarget.hasPointerCapture(state.playlistCollapseHoldPointerId)
       ) {
-        playlistCollapseHoldTarget.releasePointerCapture(playlistCollapseHoldPointerId);
+        state.playlistCollapseHoldTarget.releasePointerCapture(state.playlistCollapseHoldPointerId);
       }
     } catch (err) {
       // ignore pointer capture release errors
@@ -2571,34 +2283,34 @@ function clearPlaylistCollapseHold({ resetTriggered = true } = {}) {
 
   clearPlaylistCollapsePendingVisual();
   removePlaylistCollapseHoldListeners();
-  playlistCollapseHoldPointerId = null;
-  playlistCollapseHoldStartX = 0;
-  playlistCollapseHoldStartY = 0;
-  playlistCollapseHoldPlaylistIndex = null;
-  playlistCollapseHoldTarget = null;
-  playlistCollapseHoldZone = null;
+  state.playlistCollapseHoldPointerId = null;
+  state.playlistCollapseHoldStartX = 0;
+  state.playlistCollapseHoldStartY = 0;
+  state.playlistCollapseHoldPlaylistIndex = null;
+  state.playlistCollapseHoldTarget = null;
+  state.playlistCollapseHoldZone = null;
   if (resetTriggered) {
-    playlistCollapseHoldTriggered = false;
+    state.playlistCollapseHoldTriggered = false;
   }
 }
 
 function onPlaylistCollapseHoldPointerMove(event) {
-  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
-  if (playlistCollapseHoldTriggered) {
+  if (state.playlistCollapseHoldPointerId === null || event.pointerId !== state.playlistCollapseHoldPointerId) return;
+  if (state.playlistCollapseHoldTriggered) {
     event.preventDefault();
     return;
   }
 
-  const deltaX = event.clientX - playlistCollapseHoldStartX;
-  const deltaY = event.clientY - playlistCollapseHoldStartY;
+  const deltaX = event.clientX - state.playlistCollapseHoldStartX;
+  const deltaY = event.clientY - state.playlistCollapseHoldStartY;
   if (Math.hypot(deltaX, deltaY) <= PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX) return;
   clearPlaylistCollapseHold();
 }
 
 function onPlaylistCollapseHoldPointerEnd(event) {
-  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
-  const shouldCollapse = playlistCollapseHoldTriggered;
-  const collapsePlaylistIndex = playlistCollapseHoldPlaylistIndex;
+  if (state.playlistCollapseHoldPointerId === null || event.pointerId !== state.playlistCollapseHoldPointerId) return;
+  const shouldCollapse = state.playlistCollapseHoldTriggered;
+  const collapsePlaylistIndex = state.playlistCollapseHoldPlaylistIndex;
   clearPlaylistCollapseHold();
   if (!shouldCollapse) return;
   event.preventDefault();
@@ -2607,9 +2319,9 @@ function onPlaylistCollapseHoldPointerEnd(event) {
 }
 
 function onPlaylistCollapseHoldPointerCancel(event) {
-  if (playlistCollapseHoldPointerId === null || event.pointerId !== playlistCollapseHoldPointerId) return;
-  const shouldCollapse = playlistCollapseHoldTriggered;
-  const collapsePlaylistIndex = playlistCollapseHoldPlaylistIndex;
+  if (state.playlistCollapseHoldPointerId === null || event.pointerId !== state.playlistCollapseHoldPointerId) return;
+  const shouldCollapse = state.playlistCollapseHoldTriggered;
+  const collapsePlaylistIndex = state.playlistCollapseHoldPlaylistIndex;
   clearPlaylistCollapseHold();
   if (!shouldCollapse) return;
   collapsePlaylistForLocalView(collapsePlaylistIndex);
@@ -2620,18 +2332,18 @@ function startPlaylistCollapseHold(event, playlistIndex) {
   if (!isTouchPlaylistCollapseEnabled()) return;
   const pointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
   if (pointerType && pointerType !== 'touch' && pointerType !== 'pen') return;
-  if (touchCopyDragActive || draggingCard) return;
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (state.touchCopyDragActive || state.draggingCard) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
 
   const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   clearPlaylistCollapseHold();
-  playlistCollapseHoldPointerId = event.pointerId;
-  playlistCollapseHoldStartX = event.clientX;
-  playlistCollapseHoldStartY = event.clientY;
-  playlistCollapseHoldPlaylistIndex = playlistIndex;
-  playlistCollapseHoldTarget = target;
-  playlistCollapseHoldZone = target ? target.closest('.zone') : null;
-  playlistCollapseHoldTriggered = false;
+  state.playlistCollapseHoldPointerId = event.pointerId;
+  state.playlistCollapseHoldStartX = event.clientX;
+  state.playlistCollapseHoldStartY = event.clientY;
+  state.playlistCollapseHoldPlaylistIndex = playlistIndex;
+  state.playlistCollapseHoldTarget = target;
+  state.playlistCollapseHoldZone = target ? target.closest('.zone') : null;
+  state.playlistCollapseHoldTriggered = false;
 
   if (target && typeof target.setPointerCapture === 'function') {
     try {
@@ -2645,22 +2357,22 @@ function startPlaylistCollapseHold(event, playlistIndex) {
   window.addEventListener('pointerup', onPlaylistCollapseHoldPointerEnd, true);
   window.addEventListener('pointercancel', onPlaylistCollapseHoldPointerCancel, true);
 
-  playlistCollapseHoldTimer = setTimeout(() => {
-    playlistCollapseHoldTimer = null;
-    const targetPlaylistIndex = playlistCollapseHoldPlaylistIndex;
+  state.playlistCollapseHoldTimer = setTimeout(() => {
+    state.playlistCollapseHoldTimer = null;
+    const targetPlaylistIndex = state.playlistCollapseHoldPlaylistIndex;
     if (
       !Number.isInteger(targetPlaylistIndex) ||
       targetPlaylistIndex < 0 ||
-      targetPlaylistIndex >= layout.length ||
-      collapsedPlaylistIndices.has(targetPlaylistIndex)
+      targetPlaylistIndex >= state.layout.length ||
+      state.collapsedPlaylistIndices.has(targetPlaylistIndex)
     ) {
       clearPlaylistCollapseHold();
       return;
     }
 
-    playlistCollapseHoldTriggered = true;
-    if (playlistCollapseHoldZone && playlistCollapseHoldZone.isConnected) {
-      playlistCollapseHoldZone.classList.add('zone--collapse-pending');
+    state.playlistCollapseHoldTriggered = true;
+    if (state.playlistCollapseHoldZone && state.playlistCollapseHoldZone.isConnected) {
+      state.playlistCollapseHoldZone.classList.add('zone--collapse-pending');
     }
     const focused = document.activeElement;
     if (focused instanceof HTMLElement) {
@@ -2692,19 +2404,19 @@ function remapPlaylistIndexAfterMove(index, fromIndex, toIndex) {
   return index;
 }
 
-function remapCollapsedPlaylistIndicesAfterMove(fromIndex, toIndex, expectedLength = layout.length) {
-  if (!collapsedPlaylistIndices.size) return;
+function remapCollapsedPlaylistIndicesAfterMove(fromIndex, toIndex, expectedLength = state.layout.length) {
+  if (!state.collapsedPlaylistIndices.size) return;
   const length = Number.isInteger(expectedLength) && expectedLength >= 0 ? expectedLength : 0;
   const remapped = new Set();
-  for (const playlistIndex of collapsedPlaylistIndices) {
+  for (const playlistIndex of state.collapsedPlaylistIndices) {
     const normalizedIndex = normalizePlaylistTrackIndex(playlistIndex);
     if (normalizedIndex === null || normalizedIndex < 0 || normalizedIndex >= length) continue;
     const nextIndex = remapPlaylistIndexAfterMove(normalizedIndex, fromIndex, toIndex);
     if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= length) continue;
     remapped.add(nextIndex);
   }
-  collapsedPlaylistIndices.clear();
-  remapped.forEach((playlistIndex) => collapsedPlaylistIndices.add(playlistIndex));
+  state.collapsedPlaylistIndices.clear();
+  remapped.forEach((playlistIndex) => state.collapsedPlaylistIndices.add(playlistIndex));
 }
 
 async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistIndex) {
@@ -2713,41 +2425,41 @@ async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistI
     return;
   }
 
-  layout = ensurePlaylists(layout);
+  state.layout = ensurePlaylists(state.layout);
   const sourceIndex = normalizePlaylistTrackIndex(sourcePlaylistIndex);
   const normalizedTargetIndex =
     targetPlaylistIndex === null || targetPlaylistIndex === undefined
       ? null
       : normalizePlaylistTrackIndex(targetPlaylistIndex);
   if (sourceIndex === null) return;
-  if (sourceIndex < 0 || sourceIndex >= layout.length) return;
-  if (normalizedTargetIndex !== null && (normalizedTargetIndex < 0 || normalizedTargetIndex >= layout.length)) return;
+  if (sourceIndex < 0 || sourceIndex >= state.layout.length) return;
+  if (normalizedTargetIndex !== null && (normalizedTargetIndex < 0 || normalizedTargetIndex >= state.layout.length)) return;
 
   const destinationIndex =
     normalizedTargetIndex === null
-      ? layout.length - 1
+      ? state.layout.length - 1
       : sourceIndex < normalizedTargetIndex
         ? normalizedTargetIndex - 1
         : normalizedTargetIndex;
-  if (!Number.isInteger(destinationIndex) || destinationIndex < 0 || destinationIndex >= layout.length) return;
+  if (!Number.isInteger(destinationIndex) || destinationIndex < 0 || destinationIndex >= state.layout.length) return;
   if (sourceIndex === destinationIndex) return;
 
-  const previousLayout = cloneLayoutState(layout);
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
+  const previousLayout = cloneLayoutState(state.layout);
+  const previousNames = state.playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...dapConfig };
-  const previousCollapsedIndices = new Set(collapsedPlaylistIndices);
-  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
+  const previousCollapsedIndices = new Set(state.collapsedPlaylistIndices);
+  const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
-    currentTrack && typeof currentTrack === 'object'
+    state.currentTrack && typeof state.currentTrack === 'object'
       ? {
-          playlistIndex: currentTrack.playlistIndex,
-          playlistPosition: currentTrack.playlistPosition,
+          playlistIndex: state.currentTrack.playlistIndex,
+          playlistPosition: state.currentTrack.playlistPosition,
         }
       : null;
-  const previousDapInterruptedSnapshot = dapInterruptedPlaybackSnapshot
+  const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
     ? { ...dapInterruptedPlaybackSnapshot }
     : null;
 
@@ -2764,24 +2476,24 @@ async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistI
       previousDapIndex === null ? null : remapPlaylistIndexAfterMove(previousDapIndex, sourceIndex, destinationIndex),
   };
 
-  layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(nextNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
-  dapConfig = normalizeDapConfig(nextDapRaw, layout.length, nextDapRaw);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
-  remapCollapsedPlaylistIndicesAfterMove(sourceIndex, destinationIndex, layout.length);
+  state.layout = ensurePlaylists(nextLayout);
+  state.playlistNames = normalizePlaylistNames(nextNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(nextMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(nextDapRaw, state.layout.length, nextDapRaw);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
+  remapCollapsedPlaylistIndicesAfterMove(sourceIndex, destinationIndex, state.layout.length);
 
-  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
-  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
   });
   const dapSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
-  if ((currentTrackContextChanged || dapSnapshotContextChanged) && currentAudio) {
+  if ((currentTrackContextChanged || dapSnapshotContextChanged) && state.currentAudio) {
     applyLiveVolumeToCurrentAudio();
   }
 
-  updateDapSettingsUi(currentRole);
+  updateDapSettingsUi(state.currentRole);
   renderZones();
   if (currentTrackContextChanged && isHostRole()) {
     requestHostPlaybackSync(true);
@@ -2789,32 +2501,32 @@ async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistI
 
   try {
     await pushSharedLayout();
-    const movedTitle = sanitizePlaylistName(playlistNames[destinationIndex], destinationIndex);
+    const movedTitle = sanitizePlaylistName(state.playlistNames[destinationIndex], destinationIndex);
     setStatus(`Плей-лист "${movedTitle}" перемещен и синхронизирован.`);
   } catch (err) {
     console.error(err);
-    layout = previousLayout;
-    playlistNames = previousNames;
-    playlistMeta = previousMeta;
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
-    collapsedPlaylistIndices.clear();
-    previousCollapsedIndices.forEach((playlistIndex) => collapsedPlaylistIndices.add(playlistIndex));
-    if (currentTrack && previousCurrentTrackContext) {
-      currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
-      currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
+    state.layout = previousLayout;
+    state.playlistNames = previousNames;
+    state.playlistMeta = previousMeta;
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    state.collapsedPlaylistIndices.clear();
+    previousCollapsedIndices.forEach((playlistIndex) => state.collapsedPlaylistIndices.add(playlistIndex));
+    if (state.currentTrack && previousCurrentTrackContext) {
+      state.currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
+      state.currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
     }
-    dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
-    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
-    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+    state.dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
+    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
+    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
       preferredPlaylistIndex: rollbackPreferredIndex,
     });
     const rollbackSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
-    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && currentAudio) {
+    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && state.currentAudio) {
       applyLiveVolumeToCurrentAudio();
     }
-    updateDapSettingsUi(currentRole);
+    updateDapSettingsUi(state.currentRole);
     renderZones();
     setStatus(err && err.message ? err.message : 'Не удалось синхронизировать порядок плей-листов.');
   }
@@ -2827,9 +2539,9 @@ function removePlaylistReorderHoldListeners() {
 }
 
 function clearPlaylistReorderTargetVisual() {
-  if (!playlistReorderHoldTargetZone) return;
-  playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
-  playlistReorderHoldTargetZone = null;
+  if (!state.playlistReorderHoldTargetZone) return;
+  state.playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
+  state.playlistReorderHoldTargetZone = null;
 }
 
 function getPlaylistReorderVisibleOrderFromDom() {
@@ -2846,11 +2558,11 @@ function getPlaylistReorderPointerContentX(clientX) {
 }
 
 function resolvePlaylistReorderSlotFromPointer(clientX) {
-  const centers = Array.isArray(playlistReorderHoldCandidateCenters) ? playlistReorderHoldCandidateCenters : [];
+  const centers = Array.isArray(state.playlistReorderHoldCandidateCenters) ? playlistReorderHoldCandidateCenters : [];
   if (!centers.length) return 0;
   const pointerContentX = getPlaylistReorderPointerContentX(clientX);
   if (!Number.isFinite(pointerContentX)) {
-    return Number.isInteger(playlistReorderHoldCurrentSlot) ? playlistReorderHoldCurrentSlot : 0;
+    return Number.isInteger(state.playlistReorderHoldCurrentSlot) ? playlistReorderHoldCurrentSlot : 0;
   }
 
   let slot = 0;
@@ -2861,17 +2573,17 @@ function resolvePlaylistReorderSlotFromPointer(clientX) {
 }
 
 function getPlaylistReorderTargetPlaylistBySlot(slotIndex) {
-  const candidateOrder = Array.isArray(playlistReorderHoldCandidateOrder) ? playlistReorderHoldCandidateOrder : [];
+  const candidateOrder = Array.isArray(state.playlistReorderHoldCandidateOrder) ? playlistReorderHoldCandidateOrder : [];
   if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= candidateOrder.length) return null;
   return candidateOrder[slotIndex];
 }
 
-function applyPlaylistReorderPreviewOrder(slotIndex = playlistReorderHoldCurrentSlot) {
+function applyPlaylistReorderPreviewOrder(slotIndex = state.playlistReorderHoldCurrentSlot) {
   if (!zonesContainer) return;
-  const sourcePlaylistIndex = normalizePlaylistTrackIndex(playlistReorderHoldPlaylistIndex);
+  const sourcePlaylistIndex = normalizePlaylistTrackIndex(state.playlistReorderHoldPlaylistIndex);
   if (sourcePlaylistIndex === null) return;
 
-  const initialOrder = Array.isArray(playlistReorderHoldInitialVisibleOrder)
+  const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
     ? playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length || !initialOrder.includes(sourcePlaylistIndex)) return;
@@ -2883,8 +2595,8 @@ function applyPlaylistReorderPreviewOrder(slotIndex = playlistReorderHoldCurrent
   const nextOrder = orderWithoutSource.slice();
   nextOrder.splice(normalizedSlot, 0, sourcePlaylistIndex);
   const nextSignature = nextOrder.join('|');
-  if (nextSignature === playlistReorderHoldPreviewSignature) return;
-  playlistReorderHoldPreviewSignature = nextSignature;
+  if (nextSignature === state.playlistReorderHoldPreviewSignature) return;
+  state.playlistReorderHoldPreviewSignature = nextSignature;
 
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
   const zoneByIndex = new Map();
@@ -2914,12 +2626,12 @@ function applyPlaylistReorderPreviewOrder(slotIndex = playlistReorderHoldCurrent
 
 function restorePlaylistReorderPreviewOrder() {
   if (!zonesContainer) return;
-  const initialOrder = Array.isArray(playlistReorderHoldInitialVisibleOrder)
+  const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
     ? playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length) return;
   const initialSignature = initialOrder.join('|');
-  if (initialSignature === playlistReorderHoldPreviewSignature) return;
+  if (initialSignature === state.playlistReorderHoldPreviewSignature) return;
 
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
   const zoneByIndex = new Map();
@@ -2945,26 +2657,26 @@ function restorePlaylistReorderPreviewOrder() {
   });
 
   zonesContainer.appendChild(fragment);
-  playlistReorderHoldPreviewSignature = initialSignature;
+  state.playlistReorderHoldPreviewSignature = initialSignature;
 }
 
 function clearPlaylistReorderHold({ resetTriggered = true, preservePreview = false } = {}) {
-  if (playlistReorderHoldTimer !== null) {
-    clearTimeout(playlistReorderHoldTimer);
-    playlistReorderHoldTimer = null;
+  if (state.playlistReorderHoldTimer !== null) {
+    clearTimeout(state.playlistReorderHoldTimer);
+    state.playlistReorderHoldTimer = null;
   }
 
   if (
-    playlistReorderHoldTarget &&
-    playlistReorderHoldPointerId !== null &&
-    typeof playlistReorderHoldTarget.releasePointerCapture === 'function'
+    state.playlistReorderHoldTarget &&
+    state.playlistReorderHoldPointerId !== null &&
+    typeof state.playlistReorderHoldTarget.releasePointerCapture === 'function'
   ) {
     try {
       if (
-        playlistReorderHoldTarget.hasPointerCapture &&
-        playlistReorderHoldTarget.hasPointerCapture(playlistReorderHoldPointerId)
+        state.playlistReorderHoldTarget.hasPointerCapture &&
+        state.playlistReorderHoldTarget.hasPointerCapture(state.playlistReorderHoldPointerId)
       ) {
-        playlistReorderHoldTarget.releasePointerCapture(playlistReorderHoldPointerId);
+        state.playlistReorderHoldTarget.releasePointerCapture(state.playlistReorderHoldPointerId);
       }
     } catch (err) {
       // ignore pointer capture release errors
@@ -2977,25 +2689,25 @@ function clearPlaylistReorderHold({ resetTriggered = true, preservePreview = fal
   if (!preservePreview) {
     restorePlaylistReorderPreviewOrder();
   }
-  if (playlistReorderHoldSourceZone) {
-    playlistReorderHoldSourceZone.classList.remove('zone--playlist-reorder-source');
+  if (state.playlistReorderHoldSourceZone) {
+    state.playlistReorderHoldSourceZone.classList.remove('zone--playlist-reorder-source');
   }
   clearPlaylistReorderTargetVisual();
   removePlaylistReorderHoldListeners();
-  playlistReorderHoldPointerId = null;
-  playlistReorderHoldStartX = 0;
-  playlistReorderHoldStartY = 0;
-  playlistReorderHoldPlaylistIndex = null;
-  playlistReorderHoldTarget = null;
-  playlistReorderHoldSourceZone = null;
-  playlistReorderHoldTargetPlaylistIndex = null;
-  playlistReorderHoldInitialVisibleOrder = null;
-  playlistReorderHoldCandidateOrder = null;
-  playlistReorderHoldCandidateCenters = null;
-  playlistReorderHoldCurrentSlot = null;
-  playlistReorderHoldPreviewSignature = '';
+  state.playlistReorderHoldPointerId = null;
+  state.playlistReorderHoldStartX = 0;
+  state.playlistReorderHoldStartY = 0;
+  state.playlistReorderHoldPlaylistIndex = null;
+  state.playlistReorderHoldTarget = null;
+  state.playlistReorderHoldSourceZone = null;
+  state.playlistReorderHoldTargetPlaylistIndex = null;
+  state.playlistReorderHoldInitialVisibleOrder = null;
+  state.playlistReorderHoldCandidateOrder = null;
+  state.playlistReorderHoldCandidateCenters = null;
+  state.playlistReorderHoldCurrentSlot = null;
+  state.playlistReorderHoldPreviewSignature = '';
   if (resetTriggered) {
-    playlistReorderHoldTriggered = false;
+    state.playlistReorderHoldTriggered = false;
   }
 }
 
@@ -3006,13 +2718,13 @@ function updatePlaylistReorderHoldTarget(clientX) {
     zonesContainer && nextTargetPlaylistIndex !== null
       ? zonesContainer.querySelector(`.zone[data-zone-index="${nextTargetPlaylistIndex}"]`)
       : null;
-  if (playlistReorderHoldTargetZone && playlistReorderHoldTargetZone !== nextTargetZone) {
-    playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
+  if (state.playlistReorderHoldTargetZone && state.playlistReorderHoldTargetZone !== nextTargetZone) {
+    state.playlistReorderHoldTargetZone.classList.remove('zone--playlist-reorder-target');
   }
 
-  playlistReorderHoldCurrentSlot = nextSlot;
-  playlistReorderHoldTargetZone = nextTargetZone;
-  playlistReorderHoldTargetPlaylistIndex = nextTargetPlaylistIndex;
+  state.playlistReorderHoldCurrentSlot = nextSlot;
+  state.playlistReorderHoldTargetZone = nextTargetZone;
+  state.playlistReorderHoldTargetPlaylistIndex = nextTargetPlaylistIndex;
   if (nextTargetZone) {
     nextTargetZone.classList.add('zone--playlist-reorder-target');
   }
@@ -3020,17 +2732,17 @@ function updatePlaylistReorderHoldTarget(clientX) {
 }
 
 function onPlaylistReorderHoldPointerMove(event) {
-  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
-  if (!playlistReorderHoldTriggered) {
-    const deltaX = event.clientX - playlistReorderHoldStartX;
-    const deltaY = event.clientY - playlistReorderHoldStartY;
+  if (state.playlistReorderHoldPointerId === null || event.pointerId !== state.playlistReorderHoldPointerId) return;
+  if (!state.playlistReorderHoldTriggered) {
+    const deltaX = event.clientX - state.playlistReorderHoldStartX;
+    const deltaY = event.clientY - state.playlistReorderHoldStartY;
     if (Math.hypot(deltaX, deltaY) <= PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX) return;
     clearPlaylistReorderHold();
     return;
   }
 
   event.preventDefault();
-  if (zonesPanActive) {
+  if (state.zonesPanActive) {
     cleanupZonesPanInteraction();
   }
   if (zonesContainer) {
@@ -3046,10 +2758,10 @@ function onPlaylistReorderHoldPointerMove(event) {
 }
 
 function onPlaylistReorderHoldPointerEnd(event) {
-  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
-  const shouldReorder = playlistReorderHoldTriggered;
-  const sourcePlaylistIndex = playlistReorderHoldPlaylistIndex;
-  const targetPlaylistIndex = playlistReorderHoldTargetPlaylistIndex;
+  if (state.playlistReorderHoldPointerId === null || event.pointerId !== state.playlistReorderHoldPointerId) return;
+  const shouldReorder = state.playlistReorderHoldTriggered;
+  const sourcePlaylistIndex = state.playlistReorderHoldPlaylistIndex;
+  const targetPlaylistIndex = state.playlistReorderHoldTargetPlaylistIndex;
   clearPlaylistReorderHold({ preservePreview: true });
   if (!shouldReorder) return;
   event.preventDefault();
@@ -3063,7 +2775,7 @@ function onPlaylistReorderHoldPointerEnd(event) {
 }
 
 function onPlaylistReorderHoldPointerCancel(event) {
-  if (playlistReorderHoldPointerId === null || event.pointerId !== playlistReorderHoldPointerId) return;
+  if (state.playlistReorderHoldPointerId === null || event.pointerId !== state.playlistReorderHoldPointerId) return;
   clearPlaylistReorderHold();
 }
 
@@ -3071,8 +2783,8 @@ function startPlaylistReorderHold(event, playlistIndex) {
   if (!isHostRole()) return;
   if (event.isPrimary === false) return;
   if (event.button !== undefined && event.button !== 0) return;
-  if (touchCopyDragActive || draggingCard) return;
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (state.touchCopyDragActive || state.draggingCard) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
 
   const targetElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   if (!targetElement) return;
@@ -3081,19 +2793,19 @@ function startPlaylistReorderHold(event, playlistIndex) {
   if (eventTarget && eventTarget.closest('.playlist-header-control, .playlist-delete-btn')) return;
 
   clearPlaylistReorderHold();
-  playlistReorderHoldPointerId = event.pointerId;
-  playlistReorderHoldStartX = event.clientX;
-  playlistReorderHoldStartY = event.clientY;
-  playlistReorderHoldPlaylistIndex = playlistIndex;
-  playlistReorderHoldTarget = targetElement;
-  playlistReorderHoldSourceZone = targetElement.closest('.zone');
-  playlistReorderHoldTargetPlaylistIndex = null;
-  playlistReorderHoldInitialVisibleOrder = null;
-  playlistReorderHoldCandidateOrder = null;
-  playlistReorderHoldCandidateCenters = null;
-  playlistReorderHoldCurrentSlot = null;
-  playlistReorderHoldPreviewSignature = '';
-  playlistReorderHoldTriggered = false;
+  state.playlistReorderHoldPointerId = event.pointerId;
+  state.playlistReorderHoldStartX = event.clientX;
+  state.playlistReorderHoldStartY = event.clientY;
+  state.playlistReorderHoldPlaylistIndex = playlistIndex;
+  state.playlistReorderHoldTarget = targetElement;
+  state.playlistReorderHoldSourceZone = targetElement.closest('.zone');
+  state.playlistReorderHoldTargetPlaylistIndex = null;
+  state.playlistReorderHoldInitialVisibleOrder = null;
+  state.playlistReorderHoldCandidateOrder = null;
+  state.playlistReorderHoldCandidateCenters = null;
+  state.playlistReorderHoldCurrentSlot = null;
+  state.playlistReorderHoldPreviewSignature = '';
+  state.playlistReorderHoldTriggered = false;
 
   if (typeof targetElement.setPointerCapture === 'function') {
     try {
@@ -3107,10 +2819,10 @@ function startPlaylistReorderHold(event, playlistIndex) {
   window.addEventListener('pointerup', onPlaylistReorderHoldPointerEnd, true);
   window.addEventListener('pointercancel', onPlaylistReorderHoldPointerCancel, true);
 
-  playlistReorderHoldTimer = setTimeout(() => {
-    playlistReorderHoldTimer = null;
-    const sourceIndex = playlistReorderHoldPlaylistIndex;
-    if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= layout.length) {
+  state.playlistReorderHoldTimer = setTimeout(() => {
+    state.playlistReorderHoldTimer = null;
+    const sourceIndex = state.playlistReorderHoldPlaylistIndex;
+    if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= state.layout.length) {
       clearPlaylistReorderHold();
       return;
     }
@@ -3119,9 +2831,9 @@ function startPlaylistReorderHold(event, playlistIndex) {
       clearPlaylistReorderHold();
       return;
     }
-    playlistReorderHoldInitialVisibleOrder = initialOrder;
+    state.playlistReorderHoldInitialVisibleOrder = initialOrder;
     const candidateOrder = initialOrder.filter((playlistIdx) => playlistIdx !== sourceIndex);
-    const pointerContentX = getPlaylistReorderPointerContentX(playlistReorderHoldStartX);
+    const pointerContentX = getPlaylistReorderPointerContentX(state.playlistReorderHoldStartX);
     if (!Number.isFinite(pointerContentX) && !candidateOrder.length) {
       clearPlaylistReorderHold();
       return;
@@ -3138,24 +2850,24 @@ function startPlaylistReorderHold(event, playlistIndex) {
       clearPlaylistReorderHold();
       return;
     }
-    playlistReorderHoldCandidateOrder = candidateOrder;
-    playlistReorderHoldCandidateCenters = candidateCenters;
+    state.playlistReorderHoldCandidateOrder = candidateOrder;
+    state.playlistReorderHoldCandidateCenters = candidateCenters;
     const sourceSlot = initialOrder.indexOf(sourceIndex);
-    playlistReorderHoldCurrentSlot = sourceSlot >= 0 ? Math.min(sourceSlot, candidateOrder.length) : 0;
-    playlistReorderHoldTargetPlaylistIndex = getPlaylistReorderTargetPlaylistBySlot(playlistReorderHoldCurrentSlot);
+    state.playlistReorderHoldCurrentSlot = sourceSlot >= 0 ? Math.min(sourceSlot, candidateOrder.length) : 0;
+    state.playlistReorderHoldTargetPlaylistIndex = getPlaylistReorderTargetPlaylistBySlot(state.playlistReorderHoldCurrentSlot);
 
-    playlistReorderHoldTriggered = true;
-    if (zonesPanActive) {
+    state.playlistReorderHoldTriggered = true;
+    if (state.zonesPanActive) {
       cleanupZonesPanInteraction();
     }
     stopZonesPanMomentum();
     if (zonesContainer) {
       zonesContainer.classList.add('is-playlist-reordering');
     }
-    if (playlistReorderHoldSourceZone && playlistReorderHoldSourceZone.isConnected) {
-      playlistReorderHoldSourceZone.classList.add('zone--playlist-reorder-source');
+    if (state.playlistReorderHoldSourceZone && state.playlistReorderHoldSourceZone.isConnected) {
+      state.playlistReorderHoldSourceZone.classList.add('zone--playlist-reorder-source');
     }
-    updatePlaylistReorderHoldTarget(playlistReorderHoldStartX);
+    updatePlaylistReorderHoldTarget(state.playlistReorderHoldStartX);
     const focused = document.activeElement;
     if (focused instanceof HTMLElement) {
       focused.blur();
@@ -3192,7 +2904,7 @@ function parseTrackTitleModesByTrack(rawValue) {
   }
 }
 
-function serializeTrackTitleModesByTrack(trackModesState = trackTitleModesByTrack) {
+function serializeTrackTitleModesByTrack(trackModesState = state.trackTitleModesByTrack) {
   const normalized = trackModesState instanceof Map ? trackModesState : new Map();
   const serialized = {};
   const keys = Array.from(normalized.keys()).sort((left, right) => left.localeCompare(right, 'ru'));
@@ -3210,7 +2922,7 @@ function saveTrackTitleModesByTrackSetting() {
 }
 
 function loadTrackTitleModesByTrackSetting() {
-  trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
+  state.trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
 }
 
 function trackTitleModesByTrackEqual(leftState, rightState) {
@@ -3243,7 +2955,7 @@ function normalizeTrackTitleModesByTrackForFiles(trackModesState, files, basePat
 
 function getTrackTitleModeByKey(fileKey) {
   if (typeof fileKey !== 'string' || !fileKey) return TRACK_TITLE_MODE_FILE;
-  return normalizeTrackTitleMode(trackTitleModesByTrack.get(fileKey));
+  return normalizeTrackTitleMode(state.trackTitleModesByTrack.get(fileKey));
 }
 
 function getTrackTitleModeForTrack(file, basePath = '/audio') {
@@ -3251,9 +2963,9 @@ function getTrackTitleModeForTrack(file, basePath = '/audio') {
 }
 
 function keepTrackTitleModesForFiles(files, basePath = '/audio') {
-  const normalized = normalizeTrackTitleModesByTrackForFiles(trackTitleModesByTrack, files, basePath);
-  if (!trackTitleModesByTrackEqual(trackTitleModesByTrack, normalized)) {
-    trackTitleModesByTrack = normalized;
+  const normalized = normalizeTrackTitleModesByTrackForFiles(state.trackTitleModesByTrack, files, basePath);
+  if (!trackTitleModesByTrackEqual(state.trackTitleModesByTrack, normalized)) {
+    state.trackTitleModesByTrack = normalized;
     saveTrackTitleModesByTrackSetting();
   }
 }
@@ -3288,7 +3000,7 @@ function normalizeTrackAttributesPayload(payload, file) {
 
 function refreshTrackNameLabelsByKey(fileKey) {
   if (!fileKey) return;
-  const labels = trackNameLabelsByFile.get(fileKey);
+  const labels = state.trackNameLabelsByFile.get(fileKey);
   if (!labels || !labels.size) return;
 
   for (const label of labels) {
@@ -3318,25 +3030,25 @@ function keepKnownTrackAttributesForFiles(files, basePath = '/audio') {
       : [],
   );
 
-  for (const key of trackAttributesByFile.keys()) {
+  for (const key of state.trackAttributesByFile.keys()) {
     if (!allowedKeys.has(key)) {
-      trackAttributesByFile.delete(key);
+      state.trackAttributesByFile.delete(key);
     }
   }
 
-  for (const key of trackAttributeLoadPromisesByFile.keys()) {
+  for (const key of state.trackAttributeLoadPromisesByFile.keys()) {
     if (!allowedKeys.has(key)) {
-      trackAttributeLoadPromisesByFile.delete(key);
+      state.trackAttributeLoadPromisesByFile.delete(key);
     }
   }
 }
 
 async function loadTrackAttributes(file, basePath = '/audio') {
   const key = trackKey(file, basePath);
-  const cached = trackAttributesByFile.get(key);
+  const cached = state.trackAttributesByFile.get(key);
   if (cached) return cached;
 
-  const pending = trackAttributeLoadPromisesByFile.get(key);
+  const pending = state.trackAttributeLoadPromisesByFile.get(key);
   if (pending) return pending;
 
   const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
@@ -3344,38 +3056,38 @@ async function loadTrackAttributes(file, basePath = '/audio') {
 
   const request = (async () => {
     if (normalizedBase !== '/audio') {
-      trackAttributesByFile.set(key, fallback);
+      state.trackAttributesByFile.set(key, fallback);
       return fallback;
     }
 
     try {
-      const response = await fetch(`/api/audio/attributes?file=${encodeURIComponent(file)}`);
-      if (!response.ok) {
-        trackAttributesByFile.set(key, fallback);
+      const { ok: attrOk, data: attrPayload } = await api.fetchAudioAttributes(file);
+      if (!attrOk) {
+        state.trackAttributesByFile.set(key, fallback);
         return fallback;
       }
-      const payload = await response.json().catch(() => null);
+      const payload = attrPayload;
       const normalizedAttributes = normalizeTrackAttributesPayload(payload, file);
-      trackAttributesByFile.set(key, normalizedAttributes);
+      state.trackAttributesByFile.set(key, normalizedAttributes);
       return normalizedAttributes;
     } catch (err) {
       console.error('Не удалось загрузить атрибуты трека', err);
-      trackAttributesByFile.set(key, fallback);
+      state.trackAttributesByFile.set(key, fallback);
       return fallback;
     }
   })();
 
-  trackAttributeLoadPromisesByFile.set(key, request);
+  state.trackAttributeLoadPromisesByFile.set(key, request);
 
   try {
     const attributes = await request;
     if (getTrackTitleModeByKey(key) === TRACK_TITLE_MODE_ATTRIBUTES) {
       refreshTrackNameLabelsByKey(key);
-      if (currentTrack && currentTrack.key === key) {
+      if (state.currentTrack && state.currentTrack.key === key) {
         syncNowPlayingPanel();
       }
-      if (isRemoteLiveMirrorRole() && hostPlaybackState && hostPlaybackState.trackFile) {
-        const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+      if (isRemoteLiveMirrorRole() && state.hostPlaybackState && state.hostPlaybackState.trackFile) {
+        const hostTrackKey = trackKey(state.hostPlaybackState.trackFile, '/audio');
         if (hostTrackKey === key) {
           if (isCoHostRole()) {
             syncNowPlayingPanel();
@@ -3387,7 +3099,7 @@ async function loadTrackAttributes(file, basePath = '/audio') {
     }
     return attributes;
   } finally {
-    trackAttributeLoadPromisesByFile.delete(key);
+    state.trackAttributeLoadPromisesByFile.delete(key);
   }
 }
 
@@ -3398,7 +3110,7 @@ function getTrackDisplayNameForMode(file, basePath = '/audio', { triggerLoad = t
     return fallback;
   }
 
-  const attributes = trackAttributesByFile.get(key);
+  const attributes = state.trackAttributesByFile.get(key);
   if (attributes && attributes.displayName) {
     return attributes.displayName;
   }
@@ -3417,9 +3129,9 @@ function setTrackTitleModeForTrack(file, basePath = '/audio', mode, { persist = 
   const changed = previousMode !== normalizedMode;
 
   if (normalizedMode === TRACK_TITLE_MODE_ATTRIBUTES) {
-    trackTitleModesByTrack.set(fileKey, TRACK_TITLE_MODE_ATTRIBUTES);
+    state.trackTitleModesByTrack.set(fileKey, TRACK_TITLE_MODE_ATTRIBUTES);
   } else {
-    trackTitleModesByTrack.delete(fileKey);
+    state.trackTitleModesByTrack.delete(fileKey);
   }
 
   if (persist) {
@@ -3428,11 +3140,11 @@ function setTrackTitleModeForTrack(file, basePath = '/audio', mode, { persist = 
 
   if (changed) {
     refreshTrackNameLabelsByKey(fileKey);
-    if (currentTrack && currentTrack.key === fileKey) {
+    if (state.currentTrack && state.currentTrack.key === fileKey) {
       syncNowPlayingPanel();
     }
-    if (isRemoteLiveMirrorRole() && hostPlaybackState && hostPlaybackState.trackFile) {
-      const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+    if (isRemoteLiveMirrorRole() && state.hostPlaybackState && state.hostPlaybackState.trackFile) {
+      const hostTrackKey = trackKey(state.hostPlaybackState.trackFile, '/audio');
       if (hostTrackKey === fileKey) {
         if (isCoHostRole()) {
           syncNowPlayingPanel();
@@ -3563,40 +3275,40 @@ function isTouchPlaylistCollapseEnabled() {
   return isTouchFullscreenPreferredDevice();
 }
 
-function pruneCollapsedPlaylistIndices(expectedLength = layout.length) {
+function pruneCollapsedPlaylistIndices(expectedLength = state.layout.length) {
   const length = Number.isInteger(expectedLength) && expectedLength >= 0 ? expectedLength : 0;
-  for (const playlistIndex of Array.from(collapsedPlaylistIndices)) {
+  for (const playlistIndex of Array.from(state.collapsedPlaylistIndices)) {
     if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= length) {
-      collapsedPlaylistIndices.delete(playlistIndex);
+      state.collapsedPlaylistIndices.delete(playlistIndex);
     }
   }
 }
 
 function getCollapsedPlaylistIndicesInRenderOrder() {
-  pruneCollapsedPlaylistIndices(layout.length);
-  if (!collapsedPlaylistIndices.size) return [];
-  const renderOrder = buildPlaylistRenderOrder(layout.length, dapConfig);
-  const indices = renderOrder.filter((playlistIndex) => collapsedPlaylistIndices.has(playlistIndex));
-  if (indices.length === collapsedPlaylistIndices.size) return indices;
+  pruneCollapsedPlaylistIndices(state.layout.length);
+  if (!state.collapsedPlaylistIndices.size) return [];
+  const renderOrder = buildPlaylistRenderOrder(state.layout.length, state.dapConfig);
+  const indices = renderOrder.filter((playlistIndex) => state.collapsedPlaylistIndices.has(playlistIndex));
+  if (indices.length === state.collapsedPlaylistIndices.size) return indices;
 
-  const unknown = Array.from(collapsedPlaylistIndices).filter((playlistIndex) => !indices.includes(playlistIndex));
+  const unknown = Array.from(state.collapsedPlaylistIndices).filter((playlistIndex) => !indices.includes(playlistIndex));
   unknown.sort((left, right) => left - right);
   return indices.concat(unknown);
 }
 
 function isPlaylistCollapsedForLocalView(playlistIndex) {
   if (!isTouchPlaylistCollapseEnabled()) return false;
-  return collapsedPlaylistIndices.has(playlistIndex);
+  return state.collapsedPlaylistIndices.has(playlistIndex);
 }
 
 function removeCollapsedPlaylistsHint() {
-  if (collapsedPlaylistsHintTimer !== null) {
-    clearTimeout(collapsedPlaylistsHintTimer);
-    collapsedPlaylistsHintTimer = null;
+  if (state.collapsedPlaylistsHintTimer !== null) {
+    clearTimeout(state.collapsedPlaylistsHintTimer);
+    state.collapsedPlaylistsHintTimer = null;
   }
-  if (collapsedPlaylistsHintEl) {
-    collapsedPlaylistsHintEl.remove();
-    collapsedPlaylistsHintEl = null;
+  if (state.collapsedPlaylistsHintEl) {
+    state.collapsedPlaylistsHintEl.remove();
+    state.collapsedPlaylistsHintEl = null;
   }
 }
 
@@ -3608,31 +3320,31 @@ function showCollapsedPlaylistsHint(message) {
   hintEl.className = 'collapsed-playlists-hint';
   hintEl.textContent = message.trim();
   document.body.appendChild(hintEl);
-  collapsedPlaylistsHintEl = hintEl;
+  state.collapsedPlaylistsHintEl = hintEl;
 
   requestAnimationFrame(() => {
-    if (!collapsedPlaylistsHintEl) return;
-    collapsedPlaylistsHintEl.classList.add('is-visible');
+    if (!state.collapsedPlaylistsHintEl) return;
+    state.collapsedPlaylistsHintEl.classList.add('is-visible');
   });
 
-  collapsedPlaylistsHintTimer = setTimeout(() => {
-    if (!collapsedPlaylistsHintEl) return;
-    collapsedPlaylistsHintEl.classList.remove('is-visible');
-    collapsedPlaylistsHintTimer = setTimeout(() => {
+  state.collapsedPlaylistsHintTimer = setTimeout(() => {
+    if (!state.collapsedPlaylistsHintEl) return;
+    state.collapsedPlaylistsHintEl.classList.remove('is-visible');
+    state.collapsedPlaylistsHintTimer = setTimeout(() => {
       removeCollapsedPlaylistsHint();
     }, 180);
   }, COLLAPSED_PLAYLIST_HINT_DURATION_MS);
 }
 
 function hideCollapsedPlaylistsOverlay() {
-  if (!collapsedPlaylistsOverlayEl) return;
-  collapsedPlaylistsOverlayEl.remove();
-  collapsedPlaylistsOverlayEl = null;
+  if (!state.collapsedPlaylistsOverlayEl) return;
+  state.collapsedPlaylistsOverlayEl.remove();
+  state.collapsedPlaylistsOverlayEl = null;
 }
 
 function restoreCollapsedPlaylistForLocalView(playlistIndex) {
-  if (!collapsedPlaylistIndices.has(playlistIndex)) return false;
-  collapsedPlaylistIndices.delete(playlistIndex);
+  if (!state.collapsedPlaylistIndices.has(playlistIndex)) return false;
+  state.collapsedPlaylistIndices.delete(playlistIndex);
   hideCollapsedPlaylistsOverlay();
   renderZones();
   return true;
@@ -3640,12 +3352,12 @@ function restoreCollapsedPlaylistForLocalView(playlistIndex) {
 
 function collapsePlaylistForLocalView(playlistIndex) {
   if (!isTouchPlaylistCollapseEnabled()) return false;
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return false;
-  if (collapsedPlaylistIndices.has(playlistIndex)) return false;
-  collapsedPlaylistIndices.add(playlistIndex);
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return false;
+  if (state.collapsedPlaylistIndices.has(playlistIndex)) return false;
+  state.collapsedPlaylistIndices.add(playlistIndex);
   hideCollapsedPlaylistsOverlay();
   renderZones();
-  const title = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+  const title = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
   showCollapsedPlaylistsHint(`Свернут: ${title}`);
   return true;
 }
@@ -3681,7 +3393,7 @@ function showCollapsedPlaylistsOverlay() {
     const restoreButton = document.createElement('button');
     restoreButton.type = 'button';
     restoreButton.className = 'collapsed-playlists-panel__item';
-    restoreButton.textContent = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+    restoreButton.textContent = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
     restoreButton.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3692,7 +3404,7 @@ function showCollapsedPlaylistsOverlay() {
 
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
-  collapsedPlaylistsOverlayEl = overlay;
+  state.collapsedPlaylistsOverlayEl = overlay;
 }
 
 function isTouchFullscreenPreferredDevice() {
@@ -3791,11 +3503,10 @@ function setAuthError(message) {
 }
 
 async function fetchSessionInfo() {
-  const response = await fetch('/api/auth/session');
-  if (!response.ok) {
+  const { ok, data } = await api.fetchAuthSession();
+  if (!ok) {
     throw new Error('Не удалось проверить сессию');
   }
-  const data = await response.json();
   return {
     authenticated: Boolean(data && data.authenticated),
     isServer: Boolean(data && data.isServer),
@@ -3805,14 +3516,8 @@ async function fetchSessionInfo() {
 }
 
 async function login(username, password) {
-  const response = await fetch('/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ username, password }),
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  const { ok, data } = await api.postAuthLogin(username, password);
+  if (!ok) {
     const error = data && typeof data.error === 'string' ? data.error : 'Ошибка авторизации';
     throw new Error(error);
   }
@@ -3835,8 +3540,8 @@ function normalizeRole(info) {
 
 function applyRoleUi(role) {
   const resolvedRole = normalizeRole({ role });
-  const previousRole = currentRole;
-  currentRole = resolvedRole;
+  const previousRole = state.currentRole;
+  state.currentRole = resolvedRole;
   document.body.dataset.role = resolvedRole;
   applyRuntimeConfigFromSources();
 
@@ -3900,14 +3605,14 @@ function applyRoleUi(role) {
   updateDspSetupUi(resolvedRole);
   renderZones();
 
-  if (isHost && (!isHostRole(previousRole) || dspStatusState.checkedAt <= 0)) {
+  if (isHost && (!isHostRole(previousRole) || state.dspStatusState.checkedAt <= 0)) {
     refreshDspStatus({ announceError: false, userInitiated: false });
   }
 }
 
 function updateCurrentUser(info) {
   const username = info && typeof info.username === 'string' ? info.username : null;
-  currentUser = username;
+  state.currentUser = username;
   applyRoleUi(normalizeRole(info));
 
   if (isHostRole()) {
@@ -3979,15 +3684,15 @@ async function ensureAuthorizedUser() {
 }
 
 function recoverFromRemoteSessionTermination(message = 'Сессия завершена. Войдите снова.') {
-  if (authRecoveryInProgress) return;
-  authRecoveryInProgress = true;
+  if (state.authRecoveryInProgress) return;
+  state.authRecoveryInProgress = true;
 
-  clearLayoutStreamConnection();
+  closeLayoutStream();
   stopHostProgressLoop();
   stopCoHostProgressLoop();
   stopAndClearLocalPlayback();
-  currentUser = null;
-  authUsersState = [];
+  state.currentUser = null;
+  state.authUsersState = [];
   applyRoleUi(ROLE_SLAVE);
   setStatus(message);
 
@@ -4000,7 +3705,7 @@ function recoverFromRemoteSessionTermination(message = 'Сессия завер�
       console.error(err);
     })
     .finally(() => {
-      authRecoveryInProgress = false;
+      state.authRecoveryInProgress = false;
     });
 }
 
@@ -4020,19 +3725,19 @@ function normalizeAuthUsersPayload(payload) {
 }
 
 function applyIncomingAuthUsers(payload, { syncOwnRole = true } = {}) {
-  authUsersState = normalizeAuthUsersPayload(payload);
+  state.authUsersState = normalizeAuthUsersPayload(payload);
   renderCohostUsers();
 
-  if (!syncOwnRole || !currentUser || isHostRole()) return;
+  if (!syncOwnRole || !state.currentUser || isHostRole()) return;
 
-  const selfEntry = authUsersState.find((entry) => entry.username === currentUser);
+  const selfEntry = state.authUsersState.find((entry) => entry.username === state.currentUser);
   if (!selfEntry) {
     recoverFromRemoteSessionTermination('Хост завершил вашу сессию. Войдите снова.');
     return;
   }
 
   const nextRole = selfEntry && selfEntry.role === ROLE_COHOST ? ROLE_COHOST : ROLE_SLAVE;
-  if (nextRole === currentRole) return;
+  if (nextRole === state.currentRole) return;
 
   applyRoleUi(nextRole);
   setStatus(nextRole === ROLE_COHOST ? 'Вам назначена роль co-host.' : 'Роль co-host снята. Вы снова slave.');
@@ -4047,7 +3752,7 @@ function renderCohostUsers() {
   }
 
   cohostUsersEl.innerHTML = '';
-  if (!authUsersState.length) {
+  if (!state.authUsersState.length) {
     const empty = document.createElement('p');
     empty.className = 'cohost-users__empty';
     empty.textContent = 'Нет активных пользователей.';
@@ -4056,9 +3761,9 @@ function renderCohostUsers() {
   }
 
   const fragment = document.createDocumentFragment();
-  authUsersState.forEach((entry) => {
-    const isRoleUpdatePending = cohostRoleUpdatesInFlight.has(entry.username);
-    const isDisconnectPending = cohostDisconnectUpdatesInFlight.has(entry.username);
+  state.authUsersState.forEach((entry) => {
+    const isRoleUpdatePending = state.cohostRoleUpdatesInFlight.has(entry.username);
+    const isDisconnectPending = state.cohostDisconnectUpdatesInFlight.has(entry.username);
 
     const row = document.createElement('div');
     row.className = 'cohost-user';
@@ -4117,9 +3822,8 @@ function renderCohostUsers() {
 async function fetchAuthUsersForHost() {
   if (!isHostRole()) return;
 
-  const response = await fetch('/api/auth/clients');
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  const { ok, data } = await api.fetchAuthClients();
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось загрузить список активных пользователей');
   }
@@ -4133,20 +3837,12 @@ async function updateCoHostRole(username, role, toggleInput = null) {
   const normalizedUsername = typeof username === 'string' ? username.trim() : '';
   if (!normalizedUsername) return;
 
-  cohostRoleUpdatesInFlight.add(normalizedUsername);
+  state.cohostRoleUpdatesInFlight.add(normalizedUsername);
   renderCohostUsers();
 
   try {
-    const response = await fetch('/api/auth/clients/role', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({
-        username: normalizedUsername,
-        role: normalizedRole,
-      }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    const { ok, data } = await api.postAuthClientRole(normalizedUsername, normalizedRole);
+    if (!ok) {
       const message = data && (data.error || data.message);
       throw new Error(message || 'Не удалось изменить роль пользователя');
     }
@@ -4163,7 +3859,7 @@ async function updateCoHostRole(username, role, toggleInput = null) {
     }
     setStatus(err && err.message ? err.message : 'Не удалось обновить роль co-host.');
   } finally {
-    cohostRoleUpdatesInFlight.delete(normalizedUsername);
+    state.cohostRoleUpdatesInFlight.delete(normalizedUsername);
     renderCohostUsers();
   }
 }
@@ -4180,19 +3876,12 @@ async function disconnectClientSessions(username) {
     return;
   }
 
-  cohostDisconnectUpdatesInFlight.add(normalizedUsername);
+  state.cohostDisconnectUpdatesInFlight.add(normalizedUsername);
   renderCohostUsers();
 
   try {
-    const response = await fetch('/api/auth/clients/disconnect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({
-        username: normalizedUsername,
-      }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    const { ok, data } = await api.postAuthClientDisconnect(normalizedUsername);
+    if (!ok) {
       const message = data && (data.error || data.message);
       throw new Error(message || 'Не удалось отключить пользователя');
     }
@@ -4213,7 +3902,7 @@ async function disconnectClientSessions(username) {
   } catch (err) {
     setStatus(err && err.message ? err.message : 'Не удалось отключить пользователя.');
   } finally {
-    cohostDisconnectUpdatesInFlight.delete(normalizedUsername);
+    state.cohostDisconnectUpdatesInFlight.delete(normalizedUsername);
     renderCohostUsers();
   }
 }
@@ -4452,19 +4141,19 @@ function serializeHostPlaybackState(state) {
 }
 
 function getKnownDurationSeconds(fileKey) {
-  const value = knownTrackDurations.get(fileKey);
+  const value = state.knownTrackDurations.get(fileKey);
   if (!Number.isFinite(value) || value <= 0) return null;
   return value;
 }
 
 function getCurrentTrackRemainingSeconds() {
-  if (!currentTrack || !currentAudio) return null;
-  const duration = getDuration(currentAudio);
+  if (!state.currentTrack || !state.currentAudio) return null;
+  const duration = getDuration(state.currentAudio);
   if (!duration) {
-    return getKnownDurationSeconds(currentTrack.key);
+    return getKnownDurationSeconds(state.currentTrack.key);
   }
 
-  const currentTime = Number.isFinite(currentAudio.currentTime) ? currentAudio.currentTime : 0;
+  const currentTime = Number.isFinite(state.currentAudio.currentTime) ? state.currentAudio.currentTime : 0;
   return Math.max(0, duration - Math.max(0, currentTime));
 }
 
@@ -4488,7 +4177,7 @@ function resolveDurationLabelPlaybackContext(label) {
   return context;
 }
 
-function getDapInterruptedPlaybackDisplayState(config = dapConfig) {
+function getDapInterruptedPlaybackDisplayState(config = state.dapConfig) {
   const interruptedTrack = resolveDapInterruptedPlaybackTrack(config);
   if (!interruptedTrack) return null;
 
@@ -4497,18 +4186,18 @@ function getDapInterruptedPlaybackDisplayState(config = dapConfig) {
 
   const fileKey = trackKey(interruptedTrack.file, interruptedTrack.basePath || '/audio');
   if (
-    currentTrack &&
-    currentAudio &&
-    !currentAudio.paused &&
-    currentTrack.key === fileKey &&
-    isTrackPlaybackContextEqual(currentTrack, playbackContext)
+    state.currentTrack &&
+    state.currentAudio &&
+    !state.currentAudio.paused &&
+    state.currentTrack.key === fileKey &&
+    isTrackPlaybackContextEqual(state.currentTrack, playbackContext)
   ) {
     return null;
   }
 
   const rawStartAtSeconds =
-    dapInterruptedPlaybackSnapshot && Number.isFinite(Number(dapInterruptedPlaybackSnapshot.startAtSeconds))
-      ? Number(dapInterruptedPlaybackSnapshot.startAtSeconds)
+    state.dapInterruptedPlaybackSnapshot && Number.isFinite(Number(state.dapInterruptedPlaybackSnapshot.startAtSeconds))
+      ? Number(state.dapInterruptedPlaybackSnapshot.startAtSeconds)
       : 0;
   const startAtSeconds = Math.max(0, rawStartAtSeconds);
   const knownDuration = getKnownDurationSeconds(fileKey);
@@ -4524,7 +4213,7 @@ function getDapInterruptedPlaybackDisplayState(config = dapConfig) {
 
 function getHostDapInterruptedPlaybackDisplayState() {
   const dapPlaybackState = sanitizeIncomingDapPlaybackState(
-    hostPlaybackState && typeof hostPlaybackState === 'object' ? hostPlaybackState.dapPlayback : null,
+    state.hostPlaybackState && typeof state.hostPlaybackState === 'object' ? state.hostPlaybackState.dapPlayback : null,
   );
   if (!dapPlaybackState.trackFile || !dapPlaybackState.paused || !dapPlaybackState.interrupted) {
     return null;
@@ -4551,33 +4240,33 @@ function getHostDapInterruptedPlaybackDisplayState() {
   };
 }
 
-function getVisibleDapInterruptedPlaybackDisplayState(config = dapConfig) {
+function getVisibleDapInterruptedPlaybackDisplayState(config = state.dapConfig) {
   if (isHostRole()) {
     return getDapInterruptedPlaybackDisplayState(config);
   }
   return getHostDapInterruptedPlaybackDisplayState();
 }
 
-function buildDapPlaybackSnapshotForSync(config = dapConfig) {
+function buildDapPlaybackSnapshotForSync(config = state.dapConfig) {
   const snapshot = getDefaultDapPlaybackState();
 
-  if (currentTrack && currentAudio && isDapTrackContext(currentTrack, config) && typeof currentTrack.file === 'string') {
-    const trackFile = currentTrack.file.trim();
+  if (state.currentTrack && state.currentAudio && isDapTrackContext(state.currentTrack, config) && typeof state.currentTrack.file === 'string') {
+    const trackFile = state.currentTrack.file.trim();
     if (trackFile) {
-      const rawCurrentTime = Number(currentAudio.currentTime);
+      const rawCurrentTime = Number(state.currentAudio.currentTime);
       let currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
-      const resolvedDuration = getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
+      const resolvedDuration = getDuration(state.currentAudio) || getKnownDurationSeconds(state.currentTrack.key);
       const duration = Number.isFinite(resolvedDuration) && resolvedDuration > 0 ? resolvedDuration : null;
       if (duration !== null && currentTime > duration) {
         currentTime = duration;
       }
       return {
         trackFile,
-        paused: Boolean(currentAudio.paused),
+        paused: Boolean(state.currentAudio.paused),
         currentTime,
         duration,
-        playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
-        playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
+        playlistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
+        playlistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
         interrupted: false,
         updatedAt: Date.now(),
       };
@@ -4634,20 +4323,20 @@ function getDapPlaybackElapsedSeconds(playbackState) {
 }
 
 function getHostPlaybackElapsedSeconds() {
-  if (!hostPlaybackState || !hostPlaybackState.trackFile) return 0;
+  if (!state.hostPlaybackState || !state.hostPlaybackState.trackFile) return 0;
 
   const baseElapsed =
-    Number.isFinite(hostPlaybackState.currentTime) && hostPlaybackState.currentTime >= 0 ? hostPlaybackState.currentTime : 0;
+    Number.isFinite(state.hostPlaybackState.currentTime) && state.hostPlaybackState.currentTime >= 0 ? state.hostPlaybackState.currentTime : 0;
 
-  if (hostPlaybackState.paused) {
+  if (state.hostPlaybackState.paused) {
     return baseElapsed;
   }
 
-  const deltaSeconds = Math.max(0, Date.now() - hostPlaybackState.updatedAt) / 1000;
+  const deltaSeconds = Math.max(0, Date.now() - state.hostPlaybackState.updatedAt) / 1000;
   const elapsed = baseElapsed + deltaSeconds;
 
-  if (Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0) {
-    return Math.min(elapsed, hostPlaybackState.duration);
+  if (Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0) {
+    return Math.min(elapsed, state.hostPlaybackState.duration);
   }
 
   return elapsed;
@@ -4659,37 +4348,37 @@ function getProgressUiFrameIntervalMs() {
 }
 
 function stopHostProgressLoop() {
-  if (hostProgressRaf === null) return;
-  cancelAnimationFrame(hostProgressRaf);
-  hostProgressRaf = null;
+  if (state.hostProgressRaf === null) return;
+  cancelAnimationFrame(state.hostProgressRaf);
+  state.hostProgressRaf = null;
 }
 
 function startHostProgressLoop() {
-  if (hostProgressRaf !== null) return;
+  if (state.hostProgressRaf !== null) return;
   const minFrameIntervalMs = getProgressUiFrameIntervalMs();
   let lastRenderTimestamp = 0;
 
   const tick = (timestamp) => {
-    if (hostProgressRaf === null) return;
+    if (state.hostProgressRaf === null) return;
     const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
     if (
       minFrameIntervalMs > 0 &&
       lastRenderTimestamp > 0 &&
       nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
     ) {
-      hostProgressRaf = requestAnimationFrame(tick);
+      state.hostProgressRaf = requestAnimationFrame(tick);
       return;
     }
     lastRenderTimestamp = nowTimestamp;
     syncHostNowPlayingPanel();
-    if (hostProgressRaf === null) return;
-    hostProgressRaf = requestAnimationFrame(tick);
+    if (state.hostProgressRaf === null) return;
+    state.hostProgressRaf = requestAnimationFrame(tick);
   };
-  hostProgressRaf = requestAnimationFrame(tick);
+  state.hostProgressRaf = requestAnimationFrame(tick);
 }
 
 function clearHostTrackHighlight() {
-  for (const cards of cardsByFile.values()) {
+  for (const cards of state.cardsByFile.values()) {
     if (!cards || !cards.size) continue;
     for (const card of cards) {
       card.classList.remove('is-host-playing', 'is-host-paused');
@@ -4698,7 +4387,7 @@ function clearHostTrackHighlight() {
 }
 
 function clearLiveDspNextTrackHighlight() {
-  for (const cards of cardsByFile.values()) {
+  for (const cards of state.cardsByFile.values()) {
     if (!cards || !cards.size) continue;
     for (const card of cards) {
       card.classList.remove('is-dsp-next-ready');
@@ -4720,7 +4409,7 @@ function resolveTrackContextInLayoutByFile(
   const normalizedFile = typeof file === 'string' ? file.trim() : '';
   if (!normalizedFile) return null;
 
-  const normalizedLayout = ensurePlaylists(layout);
+  const normalizedLayout = ensurePlaylists(state.layout);
   if (!normalizedLayout.length) return null;
 
   const candidateIndices = [];
@@ -4793,16 +4482,16 @@ function reconcileTrackContextWithLayout(track, { preferredPlaylistIndex = null 
 }
 
 function reconcileDapInterruptedSnapshotWithLayout() {
-  if (!dapInterruptedPlaybackSnapshot || typeof dapInterruptedPlaybackSnapshot !== 'object') return false;
+  if (!state.dapInterruptedPlaybackSnapshot || typeof state.dapInterruptedPlaybackSnapshot !== 'object') return false;
 
-  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
-  const previousPlaylistIndex = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistIndex);
-  const previousPlaylistPosition = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistPosition);
+  const dapPlaylistIndex = getDapPlaylistIndex(state.dapConfig);
+  const previousPlaylistIndex = normalizePlaylistTrackIndex(state.dapInterruptedPlaybackSnapshot.playlistIndex);
+  const previousPlaylistPosition = normalizePlaylistTrackIndex(state.dapInterruptedPlaybackSnapshot.playlistPosition);
   const snapshotFile =
-    typeof dapInterruptedPlaybackSnapshot.file === 'string' ? dapInterruptedPlaybackSnapshot.file.trim() : '';
+    typeof state.dapInterruptedPlaybackSnapshot.file === 'string' ? state.dapInterruptedPlaybackSnapshot.file.trim() : '';
 
   if (dapPlaylistIndex === null || !snapshotFile) {
-    dapInterruptedPlaybackSnapshot = null;
+    state.dapInterruptedPlaybackSnapshot = null;
     return true;
   }
 
@@ -4812,7 +4501,7 @@ function reconcileDapInterruptedSnapshotWithLayout() {
   });
 
   if (!resolvedContext || resolvedContext.playlistIndex !== dapPlaylistIndex) {
-    dapInterruptedPlaybackSnapshot = null;
+    state.dapInterruptedPlaybackSnapshot = null;
     return true;
   }
 
@@ -4820,8 +4509,8 @@ function reconcileDapInterruptedSnapshotWithLayout() {
     previousPlaylistIndex !== resolvedContext.playlistIndex || previousPlaylistPosition !== resolvedContext.playlistPosition;
   if (!changed) return false;
 
-  dapInterruptedPlaybackSnapshot.playlistIndex = resolvedContext.playlistIndex;
-  dapInterruptedPlaybackSnapshot.playlistPosition = resolvedContext.playlistPosition;
+  state.dapInterruptedPlaybackSnapshot.playlistIndex = resolvedContext.playlistIndex;
+  state.dapInterruptedPlaybackSnapshot.playlistPosition = resolvedContext.playlistPosition;
   return true;
 }
 
@@ -4874,19 +4563,19 @@ function syncLiveDspNextTrackHighlight() {
 }
 
 function resetLiveDspNextTrackPreview() {
-  liveDspRenderToken += 1;
-  liveDspNextReadyDescriptor = '';
-  liveDspNextReadySliceSeconds = null;
+  state.liveDspRenderToken += 1;
+  state.liveDspNextReadyDescriptor = '';
+  state.liveDspNextReadySliceSeconds = null;
   clearLiveDspContinuationWarmups();
   syncLiveDspNextTrackHighlight();
 }
 
 function isDspTransitionPlaybackActive() {
-  return Boolean(dspTransitionPlayback && dspTransitionPlayback.audio);
+  return Boolean(state.dspTransitionPlayback && state.dspTransitionPlayback.audio);
 }
 
 function clearDspTransitionTrackHighlight() {
-  for (const cards of cardsByFile.values()) {
+  for (const cards of state.cardsByFile.values()) {
     if (!cards || !cards.size) continue;
     for (const card of cards) {
       card.classList.remove('is-dsp-transition-source', 'is-dsp-transition-target');
@@ -4898,8 +4587,8 @@ function syncDspTransitionTrackHighlight() {
   clearDspTransitionTrackHighlight();
   if (!isDspTransitionPlaybackActive()) return;
 
-  const sourceTrack = dspTransitionPlayback.fromTrack || null;
-  const targetTrack = dspTransitionPlayback.toTrack || null;
+  const sourceTrack = state.dspTransitionPlayback.fromTrack || null;
+  const targetTrack = state.dspTransitionPlayback.toTrack || null;
 
   if (sourceTrack && sourceTrack.key) {
     const sourceCard = getTrackCardByContext(sourceTrack.key, sourceTrack);
@@ -4927,10 +4616,10 @@ function setDspTransitionReelReverse(active) {
 }
 
 function stopDspTransitionPlayback({ stopAudio = true, clearTrackState = true } = {}) {
-  if (!dspTransitionPlayback) return;
+  if (!state.dspTransitionPlayback) return;
 
-  const activePlayback = dspTransitionPlayback;
-  dspTransitionPlayback = null;
+  const activePlayback = state.dspTransitionPlayback;
+  state.dspTransitionPlayback = null;
   setDspTransitionReelReverse(false);
   clearDspTransitionTrackHighlight();
 
@@ -4959,35 +4648,35 @@ function stopDspTransitionPlayback({ stopAudio = true, clearTrackState = true } 
 
 function buildHostTrackHighlightDescriptor() {
   if (!isRemoteLiveMirrorRole()) return 'none';
-  if (!hostPlaybackState || !hostPlaybackState.trackFile) return 'none';
+  if (!state.hostPlaybackState || !state.hostPlaybackState.trackFile) return 'none';
 
-  const playlistIndex = normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex);
-  const playlistPosition = normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition);
+  const playlistIndex = normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition);
   return [
-    trackKey(hostPlaybackState.trackFile, '/audio'),
+    trackKey(state.hostPlaybackState.trackFile, '/audio'),
     playlistIndex === null ? '' : String(playlistIndex),
     playlistPosition === null ? '' : String(playlistPosition),
-    hostPlaybackState.paused ? 'paused' : 'playing',
+    state.hostPlaybackState.paused ? 'paused' : 'playing',
   ].join('|');
 }
 
 function syncHostTrackHighlight(force = false) {
   const descriptor = buildHostTrackHighlightDescriptor();
-  if (!force && descriptor === hostHighlightedDescriptor) return;
-  hostHighlightedDescriptor = descriptor;
+  if (!force && descriptor === state.hostHighlightedDescriptor) return;
+  state.hostHighlightedDescriptor = descriptor;
 
   clearHostTrackHighlight();
   if (descriptor === 'none') return;
 
   const playbackContext = {
-    playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+    playlistIndex: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
   };
-  const hostTrackKey = trackKey(hostPlaybackState.trackFile, '/audio');
+  const hostTrackKey = trackKey(state.hostPlaybackState.trackFile, '/audio');
   const targetCard = getTrackCardByContext(hostTrackKey, playbackContext);
   if (!targetCard) return;
 
-  if (hostPlaybackState.paused) {
+  if (state.hostPlaybackState.paused) {
     targetCard.classList.add('is-host-paused');
     targetCard.classList.remove('is-host-playing');
     return;
@@ -5007,7 +4696,7 @@ function syncHostNowPlayingPanel() {
     return;
   }
 
-  if (!hostPlaybackState || !hostPlaybackState.trackFile) {
+  if (!state.hostPlaybackState || !state.hostPlaybackState.trackFile) {
     hostNowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
     hostNowPlayingControlLabelEl.textContent = '▶';
     setHostNowPlayingReelActive(false);
@@ -5018,21 +4707,21 @@ function syncHostNowPlayingPanel() {
     return;
   }
 
-  hostNowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostPlaybackState.trackFile)}`;
-  hostNowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
-  setHostNowPlayingReelActive(true, hostPlaybackState.paused);
+  hostNowPlayingTitleEl.textContent = `Live: ${trackDisplayName(state.hostPlaybackState.trackFile)}`;
+  hostNowPlayingControlLabelEl.textContent = state.hostPlaybackState.paused ? '▶' : '❚❚';
+  setHostNowPlayingReelActive(true, state.hostPlaybackState.paused);
 
   const elapsed = getHostPlaybackElapsedSeconds();
-  const duration = Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : null;
+  const duration = Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0 ? state.hostPlaybackState.duration : null;
   const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
   const remaining = duration ? Math.max(0, duration - elapsed) : null;
 
   setHostNowPlayingProgress(progressPercent);
   setHostNowPlayingTime(remaining, { useCeil: true });
-  refreshTrackDurationLabels(trackKey(hostPlaybackState.trackFile, '/audio'));
+  refreshTrackDurationLabels(trackKey(state.hostPlaybackState.trackFile, '/audio'));
   syncHostTrackHighlight();
 
-  if (!hostPlaybackState.paused && duration && remaining > 0) {
+  if (!state.hostPlaybackState.paused && duration && remaining > 0) {
     startHostProgressLoop();
   } else {
     stopHostProgressLoop();
@@ -5042,7 +4731,7 @@ function syncHostNowPlayingPanel() {
 function syncDapNowPlayingPanel() {
   if (!dapNowPlayingTitleEl || !dapNowPlayingControlLabelEl) return;
 
-  if (!updateDapNowPlayingVisibility(currentRole)) {
+  if (!updateDapNowPlayingVisibility(state.currentRole)) {
     setDapNowPlayingReelActive(false);
     setDapNowPlayingProgress(0);
     setDapNowPlayingTime(null);
@@ -5050,9 +4739,9 @@ function syncDapNowPlayingPanel() {
   }
 
   const sourceState = isHostRole()
-    ? buildDapPlaybackSnapshotForSync(dapConfig)
-    : hostPlaybackState && typeof hostPlaybackState === 'object'
-      ? hostPlaybackState.dapPlayback
+    ? buildDapPlaybackSnapshotForSync(state.dapConfig)
+    : state.hostPlaybackState && typeof state.hostPlaybackState === 'object'
+      ? state.hostPlaybackState.dapPlayback
       : null;
   const dapPlaybackState = sanitizeIncomingDapPlaybackState(sourceState);
 
@@ -5085,10 +4774,10 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
   const hasContext = normalizedContext.playlistIndex !== null && normalizedContext.playlistPosition !== null;
 
   const isCurrent = Boolean(
-    currentTrack &&
-      currentAudio &&
-      currentTrack.key === fileKey &&
-      (!hasContext || isTrackPlaybackContextEqual(currentTrack, normalizedContext)),
+    state.currentTrack &&
+      state.currentAudio &&
+      state.currentTrack.key === fileKey &&
+      (!hasContext || isTrackPlaybackContextEqual(state.currentTrack, normalizedContext)),
   );
 
   if (isCurrent) {
@@ -5096,7 +4785,7 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
     return formatDuration(remaining, { useCeil: true });
   }
 
-  const interruptedDap = getVisibleDapInterruptedPlaybackDisplayState(dapConfig);
+  const interruptedDap = getVisibleDapInterruptedPlaybackDisplayState(state.dapConfig);
   if (
     interruptedDap &&
     interruptedDap.fileKey === fileKey &&
@@ -5108,16 +4797,16 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
 
   const isRemoteLiveCurrent =
     isRemoteLiveMirrorRole() &&
-    hostPlaybackState &&
-    typeof hostPlaybackState.trackFile === 'string' &&
-    hostPlaybackState.trackFile.trim()
-      ? trackKey(hostPlaybackState.trackFile, '/audio') === fileKey
+    state.hostPlaybackState &&
+    typeof state.hostPlaybackState.trackFile === 'string' &&
+    state.hostPlaybackState.trackFile.trim()
+      ? trackKey(state.hostPlaybackState.trackFile, '/audio') === fileKey
       : false;
-  const remoteLiveContextMatches = !hasContext || isTrackPlaybackContextEqual(hostPlaybackState, normalizedContext);
+  const remoteLiveContextMatches = !hasContext || isTrackPlaybackContextEqual(state.hostPlaybackState, normalizedContext);
   if (isRemoteLiveCurrent && remoteLiveContextMatches) {
     const knownDuration = getKnownDurationSeconds(fileKey);
     const duration =
-      Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : knownDuration;
+      Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0 ? state.hostPlaybackState.duration : knownDuration;
     if (Number.isFinite(duration) && duration > 0) {
       const remaining = Math.max(0, duration - getHostPlaybackElapsedSeconds());
       return formatDuration(remaining, { useCeil: true });
@@ -5129,7 +4818,7 @@ function getTrackDurationTextByKey(fileKey, playbackContext = null) {
 
 function refreshTrackDurationLabels(fileKey) {
   if (!fileKey) return;
-  const labels = durationLabelsByFile.get(fileKey);
+  const labels = state.durationLabelsByFile.get(fileKey);
   if (!labels || !labels.size) return;
 
   for (const label of labels) {
@@ -5139,8 +4828,8 @@ function refreshTrackDurationLabels(fileKey) {
 }
 
 function getPlaylistTotalDurationSeconds(playlistIndex) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return 0;
-  const playlist = Array.isArray(layout[playlistIndex]) ? layout[playlistIndex] : [];
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return 0;
+  const playlist = Array.isArray(state.layout[playlistIndex]) ? state.layout[playlistIndex] : [];
   let totalSeconds = 0;
 
   for (const file of playlist) {
@@ -5159,13 +4848,13 @@ function getPlaylistDurationText(playlistIndex) {
 
 function refreshPlaylistDurationLabel(playlistIndex) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0) return;
-  const label = playlistDurationLabelsByIndex.get(playlistIndex);
+  const label = state.playlistDurationLabelsByIndex.get(playlistIndex);
   if (!label) return;
   label.textContent = getPlaylistDurationText(playlistIndex);
 }
 
 function refreshAllPlaylistDurationLabels() {
-  for (const playlistIndex of playlistDurationLabelsByIndex.keys()) {
+  for (const playlistIndex of state.playlistDurationLabelsByIndex.keys()) {
     refreshPlaylistDurationLabel(playlistIndex);
   }
 }
@@ -5173,14 +4862,14 @@ function refreshAllPlaylistDurationLabels() {
 function cacheTrackDuration(fileKey, durationSeconds) {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
 
-  const previous = knownTrackDurations.get(fileKey);
+  const previous = state.knownTrackDurations.get(fileKey);
   if (Number.isFinite(previous) && Math.abs(previous - durationSeconds) < 0.05) return;
 
-  knownTrackDurations.set(fileKey, durationSeconds);
+  state.knownTrackDurations.set(fileKey, durationSeconds);
   refreshTrackDurationLabels(fileKey);
   refreshAllPlaylistDurationLabels();
 
-  if (currentTrack && currentTrack.key === fileKey) {
+  if (state.currentTrack && state.currentTrack.key === fileKey) {
     syncNowPlayingPanel();
   }
 }
@@ -5190,7 +4879,7 @@ function loadTrackDurationMetadata(file, basePath = '/audio') {
   const cached = getKnownDurationSeconds(key);
   if (cached !== null) return Promise.resolve(cached);
 
-  const pending = durationLoadPromises.get(key);
+  const pending = state.durationLoadPromises.get(key);
   if (pending) return pending;
 
   const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
@@ -5208,7 +4897,7 @@ function loadTrackDurationMetadata(file, basePath = '/audio') {
       probe.removeEventListener('durationchange', handleLoadedMetadata);
       probe.removeEventListener('error', handleError);
       probe.removeEventListener('abort', handleError);
-      durationLoadPromises.delete(key);
+      state.durationLoadPromises.delete(key);
       resolve(durationValue);
     };
 
@@ -5235,7 +4924,7 @@ function loadTrackDurationMetadata(file, basePath = '/audio') {
     probe.load();
   });
 
-  durationLoadPromises.set(key, request);
+  state.durationLoadPromises.set(key, request);
   return request;
 }
 
@@ -5256,9 +4945,9 @@ function keepKnownDurationsForFiles(files, basePath = '/audio') {
       : [],
   );
 
-  for (const key of knownTrackDurations.keys()) {
+  for (const key of state.knownTrackDurations.keys()) {
     if (!allowedKeys.has(key)) {
-      knownTrackDurations.delete(key);
+      state.knownTrackDurations.delete(key);
     }
   }
 }
@@ -5268,24 +4957,24 @@ function stopAndClearLocalPlayback() {
     stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
   }
 
-  if (currentAudio) {
+  if (state.currentAudio) {
     try {
-      currentAudio.pause();
+      state.currentAudio.pause();
     } catch (err) {
       // ignore audio pause errors during role switch
     }
   }
 
-  if (currentTrack) {
-    setButtonPlaying(currentTrack.key, false, currentTrack);
-    setTrackPaused(currentTrack.key, false, currentTrack);
-    resetProgress(currentTrack.key);
+  if (state.currentTrack) {
+    setButtonPlaying(state.currentTrack.key, false, state.currentTrack);
+    setTrackPaused(state.currentTrack.key, false, state.currentTrack);
+    resetProgress(state.currentTrack.key);
   }
 
   resetFadeState();
   stopProgressLoop();
-  currentAudio = null;
-  currentTrack = null;
+  state.currentAudio = null;
+  state.currentTrack = null;
   stopUnexpectedLiveAudios([]);
   resetLiveDspNextTrackPreview();
   clearDapInterruptedPlaybackSnapshot();
@@ -5293,42 +4982,42 @@ function stopAndClearLocalPlayback() {
 }
 
 function stopCoHostProgressLoop() {
-  if (cohostProgressRaf === null) return;
-  cancelAnimationFrame(cohostProgressRaf);
-  cohostProgressRaf = null;
+  if (state.cohostProgressRaf === null) return;
+  cancelAnimationFrame(state.cohostProgressRaf);
+  state.cohostProgressRaf = null;
 }
 
 function startCoHostProgressLoop() {
-  if (cohostProgressRaf !== null) return;
+  if (state.cohostProgressRaf !== null) return;
   const minFrameIntervalMs = getProgressUiFrameIntervalMs();
   let lastRenderTimestamp = 0;
 
   const tick = (timestamp) => {
-    if (cohostProgressRaf === null) return;
+    if (state.cohostProgressRaf === null) return;
     const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
     if (
       minFrameIntervalMs > 0 &&
       lastRenderTimestamp > 0 &&
       nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
     ) {
-      cohostProgressRaf = requestAnimationFrame(tick);
+      state.cohostProgressRaf = requestAnimationFrame(tick);
       return;
     }
     lastRenderTimestamp = nowTimestamp;
     syncNowPlayingPanel();
-    if (cohostProgressRaf === null) return;
-    cohostProgressRaf = requestAnimationFrame(tick);
+    if (state.cohostProgressRaf === null) return;
+    state.cohostProgressRaf = requestAnimationFrame(tick);
   };
-  cohostProgressRaf = requestAnimationFrame(tick);
+  state.cohostProgressRaf = requestAnimationFrame(tick);
 }
 
 function syncNowPlayingPanelForCoHost() {
   if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
 
   const hostTrackFile =
-    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' ? hostPlaybackState.trackFile.trim() : '';
+    state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' ? state.hostPlaybackState.trackFile.trim() : '';
   if (!hostTrackFile) {
-    if (nowPlayingSeekActive) {
+    if (state.nowPlayingSeekActive) {
       cleanupNowPlayingSeekInteraction();
     }
     nowPlayingTitleEl.textContent = HOST_NOW_PLAYING_IDLE_TITLE;
@@ -5341,12 +5030,12 @@ function syncNowPlayingPanelForCoHost() {
     return;
   }
 
-  if (isDapTrackContext(hostPlaybackState, dapConfig)) {
-    if (nowPlayingSeekActive) {
+  if (isDapTrackContext(state.hostPlaybackState, state.dapConfig)) {
+    if (state.nowPlayingSeekActive) {
       cleanupNowPlayingSeekInteraction();
     }
     const dapPlaybackState = sanitizeIncomingDapPlaybackState(
-      hostPlaybackState && typeof hostPlaybackState === 'object' ? hostPlaybackState.dapPlayback : null,
+      state.hostPlaybackState && typeof state.hostPlaybackState === 'object' ? state.hostPlaybackState.dapPlayback : null,
     );
     nowPlayingTitleEl.textContent = '';
     nowPlayingControlLabelEl.textContent = '▶';
@@ -5364,18 +5053,18 @@ function syncNowPlayingPanelForCoHost() {
 
   nowPlayingTitleEl.textContent = `Live: ${trackDisplayName(hostTrackFile)}`;
   nowPlayingControlBtn.disabled = false;
-  nowPlayingControlLabelEl.textContent = hostPlaybackState.paused ? '▶' : '❚❚';
-  setNowPlayingReelActive(true, hostPlaybackState.paused);
+  nowPlayingControlLabelEl.textContent = state.hostPlaybackState.paused ? '▶' : '❚❚';
+  setNowPlayingReelActive(true, state.hostPlaybackState.paused);
 
   const elapsed = getHostPlaybackElapsedSeconds();
-  const duration = Number.isFinite(hostPlaybackState.duration) && hostPlaybackState.duration > 0 ? hostPlaybackState.duration : null;
+  const duration = Number.isFinite(state.hostPlaybackState.duration) && state.hostPlaybackState.duration > 0 ? state.hostPlaybackState.duration : null;
   const progressPercent = duration ? Math.min(100, (elapsed / duration) * 100) : 0;
   const remaining = duration ? Math.max(0, duration - elapsed) : null;
 
   setNowPlayingProgress(progressPercent);
   setNowPlayingTime(remaining, { useCeil: true });
 
-  if (!hostPlaybackState.paused && duration && remaining > 0) {
+  if (!state.hostPlaybackState.paused && duration && remaining > 0) {
     startCoHostProgressLoop();
   } else {
     stopCoHostProgressLoop();
@@ -5384,7 +5073,7 @@ function syncNowPlayingPanelForCoHost() {
 
 function syncNowPlayingPanel() {
   if (!nowPlayingTitleEl || !nowPlayingControlBtn || !nowPlayingControlLabelEl) return;
-  const isPauseLocked = isDapPauseLocked(currentTrack, currentAudio, dapConfig);
+  const isPauseLocked = isDapPauseLocked(state.currentTrack, state.currentAudio, state.dapConfig);
   nowPlayingControlBtn.classList.toggle('is-pause-locked', isPauseLocked);
   syncDapNowPlayingPanel();
   updateVolumePresetsUi();
@@ -5392,13 +5081,13 @@ function syncNowPlayingPanel() {
   if (isCoHostRole()) {
     setDspTransitionReelReverse(false);
     const hostTrackKey =
-      hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
-        ? trackKey(hostPlaybackState.trackFile, '/audio')
+      state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
+        ? trackKey(state.hostPlaybackState.trackFile, '/audio')
         : null;
-    if (activeDurationTrackKey && activeDurationTrackKey !== hostTrackKey) {
-      refreshTrackDurationLabels(activeDurationTrackKey);
+    if (state.activeDurationTrackKey && state.activeDurationTrackKey !== hostTrackKey) {
+      refreshTrackDurationLabels(state.activeDurationTrackKey);
     }
-    activeDurationTrackKey = hostTrackKey;
+    state.activeDurationTrackKey = hostTrackKey;
     syncNowPlayingPanelForCoHost();
     if (hostTrackKey) {
       refreshTrackDurationLabels(hostTrackKey);
@@ -5407,7 +5096,7 @@ function syncNowPlayingPanel() {
   }
 
   if (isDspTransitionPlaybackActive()) {
-    const playback = dspTransitionPlayback;
+    const playback = state.dspTransitionPlayback;
     const transitionAudio = playback && playback.audio ? playback.audio : null;
     const sourceTrack = playback && playback.fromTrack ? playback.fromTrack : null;
     const targetTrack = playback && playback.toTrack ? playback.toTrack : null;
@@ -5436,14 +5125,14 @@ function syncNowPlayingPanel() {
 
   setDspTransitionReelReverse(false);
 
-  const nextActiveKey = currentTrack && currentAudio ? currentTrack.key : null;
-  if (activeDurationTrackKey && activeDurationTrackKey !== nextActiveKey) {
-    refreshTrackDurationLabels(activeDurationTrackKey);
+  const nextActiveKey = state.currentTrack && state.currentAudio ? state.currentTrack.key : null;
+  if (state.activeDurationTrackKey && state.activeDurationTrackKey !== nextActiveKey) {
+    refreshTrackDurationLabels(state.activeDurationTrackKey);
   }
-  activeDurationTrackKey = nextActiveKey;
+  state.activeDurationTrackKey = nextActiveKey;
 
-  if (!currentTrack || !currentAudio) {
-    if (nowPlayingSeekActive) {
+  if (!state.currentTrack || !state.currentAudio) {
+    if (state.nowPlayingSeekActive) {
       cleanupNowPlayingSeekInteraction();
     }
     nowPlayingTitleEl.textContent = NOW_PLAYING_IDLE_TITLE;
@@ -5456,8 +5145,8 @@ function syncNowPlayingPanel() {
     return;
   }
 
-  if (isHostRole() && isDapTrackContext(currentTrack, dapConfig)) {
-    if (nowPlayingSeekActive) {
+  if (isHostRole() && isDapTrackContext(state.currentTrack, state.dapConfig)) {
+    if (state.nowPlayingSeekActive) {
       cleanupNowPlayingSeekInteraction();
     }
     nowPlayingTitleEl.textContent = '';
@@ -5470,29 +5159,29 @@ function syncNowPlayingPanel() {
     return;
   }
 
-  nowPlayingTitleEl.textContent = trackDisplayName(currentTrack.file);
+  nowPlayingTitleEl.textContent = trackDisplayName(state.currentTrack.file);
   nowPlayingControlBtn.disabled = false;
-  nowPlayingControlLabelEl.textContent = currentAudio.paused ? '▶' : '❚❚';
-  setNowPlayingReelActive(true, currentAudio.paused);
+  nowPlayingControlLabelEl.textContent = state.currentAudio.paused ? '▶' : '❚❚';
+  setNowPlayingReelActive(true, state.currentAudio.paused);
   setNowPlayingTime(getCurrentTrackRemainingSeconds(), { useCeil: true });
-  refreshTrackDurationLabels(currentTrack.key);
+  refreshTrackDurationLabels(state.currentTrack.key);
   requestHostPlaybackSync(false);
 }
 
 function getCurrentTrackDurationSeconds() {
-  if (!currentTrack || !currentAudio) return null;
-  return getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
+  if (!state.currentTrack || !state.currentAudio) return null;
+  return getDuration(state.currentAudio) || getKnownDurationSeconds(state.currentTrack.key);
 }
 
 function getHostPlaybackDurationSeconds() {
-  const duration = Number(hostPlaybackState && hostPlaybackState.duration);
+  const duration = Number(state.hostPlaybackState && state.hostPlaybackState.duration);
   if (!Number.isFinite(duration) || duration <= 0) return null;
   return duration;
 }
 
 function getDspTransitionDurationSeconds() {
   if (!isDspTransitionPlaybackActive()) return null;
-  const playback = dspTransitionPlayback;
+  const playback = state.dspTransitionPlayback;
   const transitionAudio = playback && playback.audio ? playback.audio : null;
   if (!transitionAudio) return null;
 
@@ -5508,7 +5197,7 @@ function getDspTransitionDurationSeconds() {
 function seekDspTransitionPlaybackByRatio(positionRatio) {
   if (!isDspTransitionPlaybackActive()) return false;
 
-  const playback = dspTransitionPlayback;
+  const playback = state.dspTransitionPlayback;
   const transitionAudio = playback && playback.audio ? playback.audio : null;
   if (!transitionAudio) return false;
 
@@ -5539,28 +5228,28 @@ function seekDspTransitionPlaybackByRatio(positionRatio) {
 
 function canSeekNowPlaying() {
   if (isSlaveRole()) {
-    if (!currentTrack || !currentAudio) return false;
+    if (!state.currentTrack || !state.currentAudio) return false;
     const duration = getCurrentTrackDurationSeconds();
     return Boolean(Number.isFinite(duration) && duration > 0);
   }
 
   if (isHostRole()) {
-    if (!liveSeekEnabled) return false;
+    if (!state.liveSeekEnabled) return false;
     if (isDspTransitionPlaybackActive()) {
       const transitionDuration = getDspTransitionDurationSeconds();
       return Boolean(Number.isFinite(transitionDuration) && transitionDuration > 0);
     }
-    if (!currentTrack || !currentAudio) return false;
+    if (!state.currentTrack || !state.currentAudio) return false;
     const duration = getCurrentTrackDurationSeconds();
     return Boolean(Number.isFinite(duration) && duration > 0);
   }
 
   if (isCoHostRole()) {
-    if (!liveSeekEnabled) return false;
+    if (!state.liveSeekEnabled) return false;
     const hasHostTrack = Boolean(
-      hostPlaybackState &&
-        typeof hostPlaybackState.trackFile === 'string' &&
-        hostPlaybackState.trackFile.trim(),
+      state.hostPlaybackState &&
+        typeof state.hostPlaybackState.trackFile === 'string' &&
+        state.hostPlaybackState.trackFile.trim(),
     );
     if (!hasHostTrack) return false;
     const duration = getHostPlaybackDurationSeconds();
@@ -5603,22 +5292,22 @@ function resetNowPlayingReelScrubSpeed() {
 
 function updateNowPlayingReelScrubSpeed(clientX, timestampMs) {
   if (!Number.isFinite(clientX) || !Number.isFinite(timestampMs)) return;
-  if (!Number.isFinite(nowPlayingSeekLastAt) || nowPlayingSeekLastAt <= 0) {
-    nowPlayingSeekLastX = clientX;
-    nowPlayingSeekLastAt = timestampMs;
+  if (!Number.isFinite(state.nowPlayingSeekLastAt) || state.nowPlayingSeekLastAt <= 0) {
+    state.nowPlayingSeekLastX = clientX;
+    state.nowPlayingSeekLastAt = timestampMs;
     return;
   }
 
-  const deltaMs = timestampMs - nowPlayingSeekLastAt;
-  const deltaPx = Math.abs(clientX - nowPlayingSeekLastX);
-  nowPlayingSeekLastX = clientX;
-  nowPlayingSeekLastAt = timestampMs;
+  const deltaMs = timestampMs - state.nowPlayingSeekLastAt;
+  const deltaPx = Math.abs(clientX - state.nowPlayingSeekLastX);
+  state.nowPlayingSeekLastX = clientX;
+  state.nowPlayingSeekLastAt = timestampMs;
 
   if (!Number.isFinite(deltaMs) || deltaMs <= 0) return;
   const instantSpeed = (deltaPx * 1000) / deltaMs;
-  nowPlayingSeekSmoothedSpeed =
-    nowPlayingSeekSmoothedSpeed > 0 ? nowPlayingSeekSmoothedSpeed * 0.65 + instantSpeed * 0.35 : instantSpeed;
-  setNowPlayingReelScrubSpeed(nowPlayingSeekSmoothedSpeed);
+  state.nowPlayingSeekSmoothedSpeed =
+    state.nowPlayingSeekSmoothedSpeed > 0 ? state.nowPlayingSeekSmoothedSpeed * 0.65 + instantSpeed * 0.35 : instantSpeed;
+  setNowPlayingReelScrubSpeed(state.nowPlayingSeekSmoothedSpeed);
 }
 
 function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
@@ -5631,7 +5320,7 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
     if (!Number.isFinite(duration) || duration <= 0) return false;
     const nextTime = Math.max(0, Math.min(duration, ratio * duration));
 
-    hostPlaybackState = {
+    state.hostPlaybackState = {
       ...hostPlaybackState,
       currentTime: nextTime,
       updatedAt: Date.now(),
@@ -5645,27 +5334,27 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
     return seekDspTransitionPlaybackByRatio(ratio);
   }
 
-  if (!currentTrack || !currentAudio) return false;
+  if (!state.currentTrack || !state.currentAudio) return false;
 
   const duration = getCurrentTrackDurationSeconds();
   if (!Number.isFinite(duration) || duration <= 0) return false;
   const nextTime = Math.max(0, Math.min(duration, ratio * duration));
 
   try {
-    if (typeof currentAudio.fastSeek === 'function') {
-      currentAudio.fastSeek(nextTime);
+    if (typeof state.currentAudio.fastSeek === 'function') {
+      state.currentAudio.fastSeek(nextTime);
     } else {
-      currentAudio.currentTime = nextTime;
+      state.currentAudio.currentTime = nextTime;
     }
   } catch (err) {
     try {
-      currentAudio.currentTime = nextTime;
+      state.currentAudio.currentTime = nextTime;
     } catch (fallbackErr) {
       return false;
     }
   }
 
-  updateProgress(currentTrack.key, nextTime, duration);
+  updateProgress(state.currentTrack.key, nextTime, duration);
   syncNowPlayingPanel();
   if (isHostRole()) {
     requestHostLiveSeekSync({ finalize: Boolean(finalize) });
@@ -5676,10 +5365,10 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
 function cleanupNowPlayingSeekInteraction() {
   if (nowPlayingControlBtn) {
     nowPlayingControlBtn.classList.remove('is-seeking');
-    if (nowPlayingSeekPointerId !== null && typeof nowPlayingControlBtn.releasePointerCapture === 'function') {
+    if (state.nowPlayingSeekPointerId !== null && typeof nowPlayingControlBtn.releasePointerCapture === 'function') {
       try {
-        if (nowPlayingControlBtn.hasPointerCapture && nowPlayingControlBtn.hasPointerCapture(nowPlayingSeekPointerId)) {
-          nowPlayingControlBtn.releasePointerCapture(nowPlayingSeekPointerId);
+        if (nowPlayingControlBtn.hasPointerCapture && nowPlayingControlBtn.hasPointerCapture(state.nowPlayingSeekPointerId)) {
+          nowPlayingControlBtn.releasePointerCapture(state.nowPlayingSeekPointerId);
         }
       } catch (err) {
         // ignore pointer capture release errors
@@ -5688,24 +5377,24 @@ function cleanupNowPlayingSeekInteraction() {
   }
   resetNowPlayingReelScrubSpeed();
 
-  nowPlayingSeekActive = false;
-  nowPlayingSeekMoved = false;
-  nowPlayingSeekPointerId = null;
-  nowPlayingSeekStartX = 0;
-  nowPlayingSeekLastX = 0;
-  nowPlayingSeekLastAt = 0;
-  nowPlayingSeekSmoothedSpeed = 0;
+  state.nowPlayingSeekActive = false;
+  state.nowPlayingSeekMoved = false;
+  state.nowPlayingSeekPointerId = null;
+  state.nowPlayingSeekStartX = 0;
+  state.nowPlayingSeekLastX = 0;
+  state.nowPlayingSeekLastAt = 0;
+  state.nowPlayingSeekSmoothedSpeed = 0;
   window.removeEventListener('pointermove', onNowPlayingSeekPointerMove, true);
   window.removeEventListener('pointerup', onNowPlayingSeekPointerUp, true);
   window.removeEventListener('pointercancel', onNowPlayingSeekPointerCancel, true);
 }
 
 function onNowPlayingSeekPointerMove(event) {
-  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
   const threshold = event.pointerType === 'touch' ? 2 : NOW_PLAYING_SEEK_DRAG_THRESHOLD_PX;
-  const distance = Math.abs(event.clientX - nowPlayingSeekStartX);
-  if (!nowPlayingSeekMoved && distance < threshold) return;
-  nowPlayingSeekMoved = true;
+  const distance = Math.abs(event.clientX - state.nowPlayingSeekStartX);
+  if (!state.nowPlayingSeekMoved && distance < threshold) return;
+  state.nowPlayingSeekMoved = true;
   if (nowPlayingControlBtn) {
     nowPlayingControlBtn.classList.add('is-seeking');
   }
@@ -5718,26 +5407,26 @@ function onNowPlayingSeekPointerMove(event) {
 }
 
 function onNowPlayingSeekPointerUp(event) {
-  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
 
-  if (nowPlayingSeekMoved) {
+  if (state.nowPlayingSeekMoved) {
     event.preventDefault();
     applyNowPlayingSeekFromClientX(event.clientX, { finalize: true });
-    nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
+    state.nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
   } else if (
     event.pointerType === 'touch' &&
     !isNowPlayingToggleZone(event.clientX, event.clientY) &&
     applyNowPlayingSeekFromClientX(event.clientX, { finalize: true })
   ) {
     // Touch tap outside the center toggle zone seeks immediately.
-    nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
+    state.nowPlayingSeekSuppressClickUntil = Date.now() + NOW_PLAYING_SEEK_CLICK_SUPPRESS_MS;
   }
 
   cleanupNowPlayingSeekInteraction();
 }
 
 function onNowPlayingSeekPointerCancel(event) {
-  if (!nowPlayingSeekActive || event.pointerId !== nowPlayingSeekPointerId) return;
+  if (!state.nowPlayingSeekActive || event.pointerId !== state.nowPlayingSeekPointerId) return;
   cleanupNowPlayingSeekInteraction();
 }
 
@@ -5746,17 +5435,17 @@ function onNowPlayingControlPointerDown(event) {
   if (!canSeekNowPlaying()) return;
   if (!event.isPrimary) return;
   if (event.button !== undefined && event.button !== 0) return;
-  if (nowPlayingSeekActive) {
+  if (state.nowPlayingSeekActive) {
     cleanupNowPlayingSeekInteraction();
   }
 
-  nowPlayingSeekActive = true;
-  nowPlayingSeekMoved = false;
-  nowPlayingSeekPointerId = event.pointerId;
-  nowPlayingSeekStartX = event.clientX;
-  nowPlayingSeekLastX = event.clientX;
-  nowPlayingSeekLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  nowPlayingSeekSmoothedSpeed = 0;
+  state.nowPlayingSeekActive = true;
+  state.nowPlayingSeekMoved = false;
+  state.nowPlayingSeekPointerId = event.pointerId;
+  state.nowPlayingSeekStartX = event.clientX;
+  state.nowPlayingSeekLastX = event.clientX;
+  state.nowPlayingSeekLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  state.nowPlayingSeekSmoothedSpeed = 0;
   setNowPlayingReelScrubSpeed(0);
 
   if (typeof nowPlayingControlBtn.setPointerCapture === 'function') {
@@ -5773,7 +5462,7 @@ function onNowPlayingControlPointerDown(event) {
 }
 
 function onNowPlayingControlClick(event) {
-  if (Date.now() < nowPlayingSeekSuppressClickUntil) {
+  if (Date.now() < state.nowPlayingSeekSuppressClickUntil) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -5787,32 +5476,32 @@ function canPanZonesContainer() {
 }
 
 function stopZonesPanMomentum() {
-  if (zonesPanMomentumRaf === null) return;
-  cancelAnimationFrame(zonesPanMomentumRaf);
-  zonesPanMomentumRaf = null;
+  if (state.zonesPanMomentumRaf === null) return;
+  cancelAnimationFrame(state.zonesPanMomentumRaf);
+  state.zonesPanMomentumRaf = null;
 }
 
 function stopZonesWheelSmoothScroll() {
-  if (zonesWheelSmoothRaf !== null) {
-    cancelAnimationFrame(zonesWheelSmoothRaf);
-    zonesWheelSmoothRaf = null;
+  if (state.zonesWheelSmoothRaf !== null) {
+    cancelAnimationFrame(state.zonesWheelSmoothRaf);
+    state.zonesWheelSmoothRaf = null;
   }
-  zonesWheelTargets.clear();
+  state.zonesWheelTargets.clear();
 }
 
 function runZonesWheelSmoothStep() {
-  zonesWheelSmoothRaf = null;
-  if (!zonesContainer || !zonesWheelTargets.size) {
-    zonesWheelTargets.clear();
+  state.zonesWheelSmoothRaf = null;
+  if (!zonesContainer || !state.zonesWheelTargets.size) {
+    state.zonesWheelTargets.clear();
     return;
   }
 
   let hasPending = false;
   const activeBodies = new Set(getZoneBodies());
 
-  for (const [body, targetValue] of zonesWheelTargets.entries()) {
+  for (const [body, targetValue] of state.zonesWheelTargets.entries()) {
     if (!(body instanceof HTMLElement) || !activeBodies.has(body)) {
-      zonesWheelTargets.delete(body);
+      state.zonesWheelTargets.delete(body);
       continue;
     }
 
@@ -5823,23 +5512,23 @@ function runZonesWheelSmoothStep() {
 
     if (Math.abs(delta) <= ZONES_WHEEL_SMOOTH_MIN_DELTA_PX) {
       body.scrollTop = target;
-      zonesWheelTargets.delete(body);
+      state.zonesWheelTargets.delete(body);
       continue;
     }
 
     body.scrollTop = current + delta * ZONES_WHEEL_SMOOTH_EASE;
-    zonesWheelTargets.set(body, target);
+    state.zonesWheelTargets.set(body, target);
     hasPending = true;
   }
 
-  if (hasPending && zonesWheelTargets.size) {
-    zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
+  if (hasPending && state.zonesWheelTargets.size) {
+    state.zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
   }
 }
 
 function scheduleZonesWheelSmoothScroll() {
-  if (zonesWheelSmoothRaf !== null) return;
-  zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
+  if (state.zonesWheelSmoothRaf !== null) return;
+  state.zonesWheelSmoothRaf = requestAnimationFrame(runZonesWheelSmoothStep);
 }
 
 function startZonesPanMomentum(initialVelocityPxPerMs) {
@@ -5853,7 +5542,7 @@ function startZonesPanMomentum(initialVelocityPxPerMs) {
 
   const step = (timestamp) => {
     if (!zonesContainer) {
-      zonesPanMomentumRaf = null;
+      state.zonesPanMomentumRaf = null;
       return;
     }
 
@@ -5862,7 +5551,7 @@ function startZonesPanMomentum(initialVelocityPxPerMs) {
 
     const maxScrollLeft = Math.max(0, zonesContainer.scrollWidth - zonesContainer.clientWidth);
     if (maxScrollLeft <= 0) {
-      zonesPanMomentumRaf = null;
+      state.zonesPanMomentumRaf = null;
       return;
     }
 
@@ -5872,7 +5561,7 @@ function startZonesPanMomentum(initialVelocityPxPerMs) {
 
     const hitBoundary = Math.abs(nextScrollLeft - previousScrollLeft) < 0.01;
     if (hitBoundary) {
-      zonesPanMomentumRaf = null;
+      state.zonesPanMomentumRaf = null;
       return;
     }
 
@@ -5880,19 +5569,19 @@ function startZonesPanMomentum(initialVelocityPxPerMs) {
     velocity *= decay;
 
     if (Math.abs(velocity) < ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS) {
-      zonesPanMomentumRaf = null;
+      state.zonesPanMomentumRaf = null;
       return;
     }
 
-    zonesPanMomentumRaf = requestAnimationFrame(step);
+    state.zonesPanMomentumRaf = requestAnimationFrame(step);
   };
 
-  zonesPanMomentumRaf = requestAnimationFrame(step);
+  state.zonesPanMomentumRaf = requestAnimationFrame(step);
 }
 
 function getZoneBodies() {
   if (!zonesContainer) return [];
-  return zoneBodiesCache;
+  return state.zoneBodiesCache;
 }
 
 function normalizeWheelDeltaPixels(event) {
@@ -5921,10 +5610,10 @@ function applySharedZonesVerticalScroll(deltaY, { smooth = false } = {}) {
     if (maxScrollTop <= 0) continue;
 
     if (smooth) {
-      const previousTarget = zonesWheelTargets.has(body) ? zonesWheelTargets.get(body) : body.scrollTop;
+      const previousTarget = state.zonesWheelTargets.has(body) ? state.zonesWheelTargets.get(body) : body.scrollTop;
       const nextTarget = Math.max(0, Math.min(maxScrollTop, previousTarget + deltaY));
       if (Math.abs(nextTarget - previousTarget) < 0.01 && Math.abs(nextTarget - body.scrollTop) < 0.01) continue;
-      zonesWheelTargets.set(body, nextTarget);
+      state.zonesWheelTargets.set(body, nextTarget);
       changed = true;
       continue;
     }
@@ -5947,7 +5636,7 @@ function onZonesWheel(event) {
   if (!zonesContainer) return;
   if (!event) return;
   if (event.ctrlKey) return;
-  if (draggingCard || touchCopyDragActive) return;
+  if (state.draggingCard || state.touchCopyDragActive) return;
 
   const target = event.target instanceof Element ? event.target : null;
   if (!target || !zonesContainer.contains(target)) return;
@@ -5985,12 +5674,12 @@ function getTouchByIdentifier(touches, identifier) {
 }
 
 function resetZonesFreeAreaTapTracking({ resetTapCount = false } = {}) {
-  zonesFreeAreaTapCandidate = null;
+  state.zonesFreeAreaTapCandidate = null;
   if (!resetTapCount) return;
-  zonesFreeAreaTapCount = 0;
-  zonesFreeAreaLastTapAt = 0;
-  zonesFreeAreaLastTapX = 0;
-  zonesFreeAreaLastTapY = 0;
+  state.zonesFreeAreaTapCount = 0;
+  state.zonesFreeAreaLastTapAt = 0;
+  state.zonesFreeAreaLastTapX = 0;
+  state.zonesFreeAreaLastTapY = 0;
 }
 
 function onZonesFreeAreaTapStart(event) {
@@ -6013,7 +5702,7 @@ function onZonesFreeAreaTapStart(event) {
     return;
   }
 
-  zonesFreeAreaTapCandidate = {
+  state.zonesFreeAreaTapCandidate = {
     identifier: touch.identifier,
     startX: touch.clientX,
     startY: touch.clientY,
@@ -6022,20 +5711,20 @@ function onZonesFreeAreaTapStart(event) {
 }
 
 function onZonesFreeAreaTapMove(event) {
-  if (!zonesFreeAreaTapCandidate || !event || !event.touches) return;
+  if (!state.zonesFreeAreaTapCandidate || !event || !event.touches) return;
   if (event.touches.length !== 1) {
     resetZonesFreeAreaTapTracking({ resetTapCount: event.touches.length > 1 });
     return;
   }
 
-  const candidateTouch = getTouchByIdentifier(event.touches, zonesFreeAreaTapCandidate.identifier);
+  const candidateTouch = getTouchByIdentifier(event.touches, state.zonesFreeAreaTapCandidate.identifier);
   if (!candidateTouch) {
     resetZonesFreeAreaTapTracking();
     return;
   }
 
-  const deltaX = candidateTouch.clientX - zonesFreeAreaTapCandidate.startX;
-  const deltaY = candidateTouch.clientY - zonesFreeAreaTapCandidate.startY;
+  const deltaX = candidateTouch.clientX - state.zonesFreeAreaTapCandidate.startX;
+  const deltaY = candidateTouch.clientY - state.zonesFreeAreaTapCandidate.startY;
   if (Math.hypot(deltaX, deltaY) > COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX) {
     resetZonesFreeAreaTapTracking();
   }
@@ -6043,19 +5732,19 @@ function onZonesFreeAreaTapMove(event) {
 
 function registerZonesFreeAreaTap(clientX, clientY, eventTime, event) {
   const timestamp = Number.isFinite(eventTime) ? eventTime : performance.now();
-  const withinWindow = timestamp - zonesFreeAreaLastTapAt <= COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS;
+  const withinWindow = timestamp - state.zonesFreeAreaLastTapAt <= COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS;
   const nearPreviousTap =
-    Math.hypot(clientX - zonesFreeAreaLastTapX, clientY - zonesFreeAreaLastTapY) <=
+    Math.hypot(clientX - state.zonesFreeAreaLastTapX, clientY - state.zonesFreeAreaLastTapY) <=
     COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX;
-  zonesFreeAreaTapCount = withinWindow && nearPreviousTap ? zonesFreeAreaTapCount + 1 : 1;
-  zonesFreeAreaLastTapAt = timestamp;
-  zonesFreeAreaLastTapX = clientX;
-  zonesFreeAreaLastTapY = clientY;
+  state.zonesFreeAreaTapCount = withinWindow && nearPreviousTap ? state.zonesFreeAreaTapCount + 1 : 1;
+  state.zonesFreeAreaLastTapAt = timestamp;
+  state.zonesFreeAreaLastTapX = clientX;
+  state.zonesFreeAreaLastTapY = clientY;
 
-  if (zonesFreeAreaTapCount < 3) return;
+  if (state.zonesFreeAreaTapCount < 3) return;
 
   resetZonesFreeAreaTapTracking({ resetTapCount: true });
-  if (collapsedPlaylistsOverlayEl) {
+  if (state.collapsedPlaylistsOverlayEl) {
     hideCollapsedPlaylistsOverlay();
   } else {
     showCollapsedPlaylistsOverlay();
@@ -6067,15 +5756,15 @@ function registerZonesFreeAreaTap(clientX, clientY, eventTime, event) {
 
 function onZonesFreeAreaTapEnd(event) {
   if (!isTouchPlaylistCollapseEnabled()) return;
-  if (!zonesFreeAreaTapCandidate || !event || !event.changedTouches) return;
-  if (zonesTouchPanActive || zonesPanActive || draggingCard || touchCopyDragActive) {
+  if (!state.zonesFreeAreaTapCandidate || !event || !event.changedTouches) return;
+  if (state.zonesTouchPanActive || state.zonesPanActive || state.draggingCard || state.touchCopyDragActive) {
     resetZonesFreeAreaTapTracking();
     return;
   }
 
-  const completedTouch = getTouchByIdentifier(event.changedTouches, zonesFreeAreaTapCandidate.identifier);
-  const candidate = zonesFreeAreaTapCandidate;
-  zonesFreeAreaTapCandidate = null;
+  const completedTouch = getTouchByIdentifier(event.changedTouches, state.zonesFreeAreaTapCandidate.identifier);
+  const candidate = state.zonesFreeAreaTapCandidate;
+  state.zonesFreeAreaTapCandidate = null;
   if (!completedTouch) return;
 
   const finishedAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
@@ -6096,20 +5785,20 @@ function cleanupZonesTouchPanInteraction() {
     zonesContainer.classList.remove('is-pan-scrolling');
   }
 
-  zonesTouchPanActive = false;
-  zonesTouchPanMoved = false;
-  zonesTouchPanStartMidX = 0;
-  zonesTouchPanStartMidY = 0;
-  zonesTouchPanStartScrollLeft = 0;
-  zonesTouchPanLastMidX = 0;
-  zonesTouchPanLastAt = 0;
-  zonesTouchPanVelocityX = 0;
+  state.zonesTouchPanActive = false;
+  state.zonesTouchPanMoved = false;
+  state.zonesTouchPanStartMidX = 0;
+  state.zonesTouchPanStartMidY = 0;
+  state.zonesTouchPanStartScrollLeft = 0;
+  state.zonesTouchPanLastMidX = 0;
+  state.zonesTouchPanLastAt = 0;
+  state.zonesTouchPanVelocityX = 0;
 }
 
 function onZonesTouchStart(event) {
   if (!zonesContainer) return;
   if (!event || !event.touches) return;
-  if (draggingCard || touchCopyDragActive) {
+  if (state.draggingCard || state.touchCopyDragActive) {
     resetZonesFreeAreaTapTracking();
     return;
   }
@@ -6128,14 +5817,14 @@ function onZonesTouchStart(event) {
   stopZonesWheelSmoothScroll();
   cleanupZonesTouchPanInteraction();
 
-  zonesTouchPanActive = true;
-  zonesTouchPanMoved = false;
-  zonesTouchPanStartMidX = midpoint.x;
-  zonesTouchPanStartMidY = midpoint.y;
-  zonesTouchPanStartScrollLeft = zonesContainer.scrollLeft;
-  zonesTouchPanLastMidX = midpoint.x;
-  zonesTouchPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  zonesTouchPanVelocityX = 0;
+  state.zonesTouchPanActive = true;
+  state.zonesTouchPanMoved = false;
+  state.zonesTouchPanStartMidX = midpoint.x;
+  state.zonesTouchPanStartMidY = midpoint.y;
+  state.zonesTouchPanStartScrollLeft = zonesContainer.scrollLeft;
+  state.zonesTouchPanLastMidX = midpoint.x;
+  state.zonesTouchPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  state.zonesTouchPanVelocityX = 0;
   event.preventDefault();
 }
 
@@ -6152,11 +5841,11 @@ function areZonesTouchPanTouchesEligible(touches) {
 function onZonesTouchMove(event) {
   if (!event || !event.touches) return;
   onZonesFreeAreaTapMove(event);
-  if (!zonesTouchPanActive) return;
+  if (!state.zonesTouchPanActive) return;
   if (!zonesContainer) return;
 
   if (event.touches.length < 2) {
-    const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
+    const momentumVelocity = state.zonesTouchPanMoved ? -state.zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
     cleanupZonesTouchPanInteraction();
     if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
       startZonesPanMomentum(momentumVelocity);
@@ -6168,18 +5857,18 @@ function onZonesTouchMove(event) {
   if (!midpoint) return;
 
   const nowTimestamp = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  const sampleDeltaMs = nowTimestamp - zonesTouchPanLastAt;
+  const sampleDeltaMs = nowTimestamp - state.zonesTouchPanLastAt;
   if (Number.isFinite(sampleDeltaMs) && sampleDeltaMs > 0) {
-    const sampleVelocityX = (midpoint.x - zonesTouchPanLastMidX) / sampleDeltaMs;
-    zonesTouchPanVelocityX = zonesTouchPanVelocityX * 0.7 + sampleVelocityX * 0.3;
+    const sampleVelocityX = (midpoint.x - state.zonesTouchPanLastMidX) / sampleDeltaMs;
+    state.zonesTouchPanVelocityX = state.zonesTouchPanVelocityX * 0.7 + sampleVelocityX * 0.3;
   }
-  zonesTouchPanLastMidX = midpoint.x;
-  zonesTouchPanLastAt = nowTimestamp;
+  state.zonesTouchPanLastMidX = midpoint.x;
+  state.zonesTouchPanLastAt = nowTimestamp;
 
-  const deltaX = midpoint.x - zonesTouchPanStartMidX;
-  const deltaY = midpoint.y - zonesTouchPanStartMidY;
+  const deltaX = midpoint.x - state.zonesTouchPanStartMidX;
+  const deltaY = midpoint.y - state.zonesTouchPanStartMidY;
 
-  if (!zonesTouchPanMoved) {
+  if (!state.zonesTouchPanMoved) {
     const dragThreshold = 2;
     if (Math.abs(deltaX) < dragThreshold && Math.abs(deltaY) < dragThreshold) return;
     const verticalDominanceRatio = 2.6;
@@ -6189,19 +5878,19 @@ function onZonesTouchMove(event) {
     }
   }
 
-  zonesTouchPanMoved = true;
+  state.zonesTouchPanMoved = true;
   zonesContainer.classList.add('is-pan-scrolling');
   event.preventDefault();
-  zonesContainer.scrollLeft = zonesTouchPanStartScrollLeft - deltaX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN;
+  zonesContainer.scrollLeft = state.zonesTouchPanStartScrollLeft - deltaX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN;
 }
 
 function onZonesTouchEnd(event) {
   onZonesFreeAreaTapEnd(event);
-  if (!zonesTouchPanActive) return;
+  if (!state.zonesTouchPanActive) return;
   const hasEnoughTouches = Boolean(event && event.touches && event.touches.length >= 2);
   if (hasEnoughTouches) return;
 
-  const momentumVelocity = zonesTouchPanMoved ? -zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
+  const momentumVelocity = state.zonesTouchPanMoved ? -state.zonesTouchPanVelocityX * ZONES_TWO_FINGER_PAN_TOUCH_GAIN : 0;
   cleanupZonesTouchPanInteraction();
   if (Math.abs(momentumVelocity) >= ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS) {
     startZonesPanMomentum(momentumVelocity);
@@ -6210,7 +5899,7 @@ function onZonesTouchEnd(event) {
 
 function onZonesTouchCancel() {
   onZonesFreeAreaTapCancel();
-  if (!zonesTouchPanActive) return;
+  if (!state.zonesTouchPanActive) return;
   cleanupZonesTouchPanInteraction();
 }
 
@@ -6225,10 +5914,10 @@ function isZonesPanFreeAreaTarget(target) {
 function cleanupZonesPanInteraction() {
   if (zonesContainer) {
     zonesContainer.classList.remove('is-pan-scrolling');
-    if (zonesPanPointerId !== null && typeof zonesContainer.releasePointerCapture === 'function') {
+    if (state.zonesPanPointerId !== null && typeof zonesContainer.releasePointerCapture === 'function') {
       try {
-        if (zonesContainer.hasPointerCapture && zonesContainer.hasPointerCapture(zonesPanPointerId)) {
-          zonesContainer.releasePointerCapture(zonesPanPointerId);
+        if (zonesContainer.hasPointerCapture && zonesContainer.hasPointerCapture(state.zonesPanPointerId)) {
+          zonesContainer.releasePointerCapture(state.zonesPanPointerId);
         }
       } catch (err) {
         // ignore pointer capture release errors
@@ -6236,45 +5925,45 @@ function cleanupZonesPanInteraction() {
     }
   }
 
-  zonesPanActive = false;
-  zonesPanMoved = false;
-  zonesPanPointerId = null;
-  zonesPanStartX = 0;
-  zonesPanStartY = 0;
-  zonesPanStartScrollLeft = 0;
-  zonesPanPreferHorizontal = false;
-  zonesPanPointerType = '';
-  zonesPanMoveGain = 1;
-  zonesPanLastX = 0;
-  zonesPanLastAt = 0;
-  zonesPanVelocityX = 0;
+  state.zonesPanActive = false;
+  state.zonesPanMoved = false;
+  state.zonesPanPointerId = null;
+  state.zonesPanStartX = 0;
+  state.zonesPanStartY = 0;
+  state.zonesPanStartScrollLeft = 0;
+  state.zonesPanPreferHorizontal = false;
+  state.zonesPanPointerType = '';
+  state.zonesPanMoveGain = 1;
+  state.zonesPanLastX = 0;
+  state.zonesPanLastAt = 0;
+  state.zonesPanVelocityX = 0;
   window.removeEventListener('pointermove', onZonesPanPointerMove, true);
   window.removeEventListener('pointerup', onZonesPanPointerUp, true);
   window.removeEventListener('pointercancel', onZonesPanPointerCancel, true);
 }
 
 function onZonesPanPointerMove(event) {
-  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  if (!state.zonesPanActive || event.pointerId !== state.zonesPanPointerId) return;
   if (!zonesContainer) return;
   if (isDesktopDragHoldReadyForPointer(event.pointerId)) return;
 
-  const deltaX = event.clientX - zonesPanStartX;
-  const deltaY = event.clientY - zonesPanStartY;
+  const deltaX = event.clientX - state.zonesPanStartX;
+  const deltaY = event.clientY - state.zonesPanStartY;
   const nowTimestamp = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  const sampleDeltaMs = nowTimestamp - zonesPanLastAt;
+  const sampleDeltaMs = nowTimestamp - state.zonesPanLastAt;
   if (Number.isFinite(sampleDeltaMs) && sampleDeltaMs > 0) {
-    const sampleVelocityX = (event.clientX - zonesPanLastX) / sampleDeltaMs;
-    zonesPanVelocityX = zonesPanVelocityX * 0.7 + sampleVelocityX * 0.3;
+    const sampleVelocityX = (event.clientX - state.zonesPanLastX) / sampleDeltaMs;
+    state.zonesPanVelocityX = state.zonesPanVelocityX * 0.7 + sampleVelocityX * 0.3;
   }
-  zonesPanLastX = event.clientX;
-  zonesPanLastAt = nowTimestamp;
+  state.zonesPanLastX = event.clientX;
+  state.zonesPanLastAt = nowTimestamp;
 
-  if (!zonesPanMoved) {
-    const dragThreshold = zonesPanPreferHorizontal ? Math.max(2, Math.floor(ZONES_PAN_DRAG_THRESHOLD_PX / 2)) : ZONES_PAN_DRAG_THRESHOLD_PX;
+  if (!state.zonesPanMoved) {
+    const dragThreshold = state.zonesPanPreferHorizontal ? Math.max(2, Math.floor(ZONES_PAN_DRAG_THRESHOLD_PX / 2)) : ZONES_PAN_DRAG_THRESHOLD_PX;
     if (Math.abs(deltaX) < dragThreshold && Math.abs(deltaY) < dragThreshold) {
       return;
     }
-    const verticalDominanceRatio = zonesPanPreferHorizontal ? 2.6 : 1;
+    const verticalDominanceRatio = state.zonesPanPreferHorizontal ? 2.6 : 1;
     if (Math.abs(deltaY) > Math.abs(deltaX) * verticalDominanceRatio) {
       // Vertical gesture: keep native vertical scroll behavior.
       cleanupZonesPanInteraction();
@@ -6282,16 +5971,16 @@ function onZonesPanPointerMove(event) {
     }
   }
 
-  zonesPanMoved = true;
+  state.zonesPanMoved = true;
   zonesContainer.classList.add('is-pan-scrolling');
   event.preventDefault();
-  zonesContainer.scrollLeft = zonesPanStartScrollLeft - deltaX * zonesPanMoveGain;
+  zonesContainer.scrollLeft = state.zonesPanStartScrollLeft - deltaX * state.zonesPanMoveGain;
 }
 
 function onZonesPanPointerUp(event) {
-  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
-  const shouldUseMomentum = zonesPanMoved && zonesPanPointerType === 'touch';
-  const momentumVelocity = shouldUseMomentum ? -zonesPanVelocityX * zonesPanMoveGain : 0;
+  if (!state.zonesPanActive || event.pointerId !== state.zonesPanPointerId) return;
+  const shouldUseMomentum = state.zonesPanMoved && state.zonesPanPointerType === 'touch';
+  const momentumVelocity = shouldUseMomentum ? -state.zonesPanVelocityX * zonesPanMoveGain : 0;
   cleanupZonesPanInteraction();
   if (shouldUseMomentum) {
     startZonesPanMomentum(momentumVelocity);
@@ -6299,7 +5988,7 @@ function onZonesPanPointerUp(event) {
 }
 
 function onZonesPanPointerCancel(event) {
-  if (!zonesPanActive || event.pointerId !== zonesPanPointerId) return;
+  if (!state.zonesPanActive || event.pointerId !== state.zonesPanPointerId) return;
   cleanupZonesPanInteraction();
 }
 
@@ -6309,36 +5998,36 @@ function onZonesPanPointerDown(event) {
   if (event.pointerType === 'touch') return;
   if (event.button !== undefined && event.button !== 0) return;
   if (!canPanZonesContainer()) return;
-  if (draggingCard || touchCopyDragActive) return;
+  if (state.draggingCard || state.touchCopyDragActive) return;
   if (!isZonesPointerPanTarget(event.target instanceof Element ? event.target : null)) return;
 
   stopZonesPanMomentum();
   stopZonesWheelSmoothScroll();
 
-  if (zonesPanActive) {
+  if (state.zonesPanActive) {
     cleanupZonesPanInteraction();
   }
 
-  zonesPanActive = true;
-  zonesPanMoved = false;
-  zonesPanPointerId = event.pointerId;
-  zonesPanStartX = event.clientX;
-  zonesPanStartY = event.clientY;
-  zonesPanStartScrollLeft = zonesContainer.scrollLeft;
+  state.zonesPanActive = true;
+  state.zonesPanMoved = false;
+  state.zonesPanPointerId = event.pointerId;
+  state.zonesPanStartX = event.clientX;
+  state.zonesPanStartY = event.clientY;
+  state.zonesPanStartScrollLeft = zonesContainer.scrollLeft;
   const targetElement = event.target instanceof Element ? event.target : null;
-  zonesPanPreferHorizontal = Boolean(
+  state.zonesPanPreferHorizontal = Boolean(
     targetElement &&
       targetElement.closest('.zone-body') &&
       !targetElement.closest('.playlist-header, button, input, textarea, select, a, label'),
   );
-  zonesPanPointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
-  zonesPanMoveGain =
-    zonesPanPointerType === 'touch' && zonesPanPreferHorizontal
+  state.zonesPanPointerType = typeof event.pointerType === 'string' ? event.pointerType : '';
+  state.zonesPanMoveGain =
+    state.zonesPanPointerType === 'touch' && state.zonesPanPreferHorizontal
       ? ZONES_PAN_TOUCH_GAIN
       : 1;
-  zonesPanLastX = event.clientX;
-  zonesPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-  zonesPanVelocityX = 0;
+  state.zonesPanLastX = event.clientX;
+  state.zonesPanLastAt = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+  state.zonesPanVelocityX = 0;
 
   const shouldCapturePointer =
     !(targetElement && targetElement.closest('.track-card')) && typeof zonesContainer.setPointerCapture === 'function';
@@ -6375,17 +6064,17 @@ async function toggleNowPlayingPlayback() {
     return;
   }
 
-  if (!currentTrack || !currentAudio) return;
+  if (!state.currentTrack || !state.currentAudio) return;
 
   try {
-    if (currentAudio.paused) {
-      setTrackPaused(currentTrack.key, false, currentTrack);
-      await currentAudio.play();
-      setButtonPlaying(currentTrack.key, true, currentTrack);
-      startProgressLoop(currentAudio, currentTrack.key);
-      setStatus(`Играет: ${currentTrack.file}`);
+    if (state.currentAudio.paused) {
+      setTrackPaused(state.currentTrack.key, false, state.currentTrack);
+      await state.currentAudio.play();
+      setButtonPlaying(state.currentTrack.key, true, state.currentTrack);
+      startProgressLoop(state.currentAudio, state.currentTrack.key);
+      setStatus(`Играет: ${state.currentTrack.file}`);
     } else {
-      const paused = await pauseCurrentPlayback(currentTrack, currentAudio);
+      const paused = await pauseCurrentPlayback(state.currentTrack, state.currentAudio);
       if (paused) {
         await ensureDapNoSilencePlayback({ reason: 'toggle-current-pause' });
       }
@@ -6427,7 +6116,7 @@ function cardMatchesTrackContext(card, playbackContext = null) {
 }
 
 function getTrackCardByContext(fileKey, playbackContext = null) {
-  const cards = cardsByFile.get(fileKey);
+  const cards = state.cardsByFile.get(fileKey);
   if (!cards || !cards.size) return null;
 
   for (const card of cards) {
@@ -6458,12 +6147,12 @@ function normalizeTrackRelocationHighlightContext(trackContext) {
 }
 
 function createTrackRelocationUndoSnapshot({
-  layoutState = layout,
-  namesState = playlistNames,
-  metaState = playlistMeta,
-  autoplayState = playlistAutoplay,
-  dspState = playlistDsp,
-  dapState = dapConfig,
+  layoutState = state.layout,
+  namesState = state.playlistNames,
+  metaState = state.playlistMeta,
+  autoplayState = state.playlistAutoplay,
+  dspState = state.playlistDsp,
+  dapState = state.dapConfig,
 } = {}) {
   return {
     layout: cloneLayoutState(layoutState),
@@ -6476,18 +6165,18 @@ function createTrackRelocationUndoSnapshot({
 }
 
 function clearTrackRelocationHighlightTimer() {
-  if (trackRelocationHighlightTimer === null) return;
-  clearTimeout(trackRelocationHighlightTimer);
-  trackRelocationHighlightTimer = null;
+  if (state.trackRelocationHighlightTimer === null) return;
+  clearTimeout(state.trackRelocationHighlightTimer);
+  state.trackRelocationHighlightTimer = null;
 }
 
 function scheduleTrackRelocationHighlightTimer() {
   clearTrackRelocationHighlightTimer();
-  if (!trackRelocationHighlights.size) return;
+  if (!state.trackRelocationHighlights.size) return;
 
   const now = Date.now();
   let nextExpiresAt = Number.POSITIVE_INFINITY;
-  for (const entry of trackRelocationHighlights.values()) {
+  for (const entry of state.trackRelocationHighlights.values()) {
     if (Number.isFinite(entry.expiresAt) && entry.expiresAt < nextExpiresAt) {
       nextExpiresAt = entry.expiresAt;
     }
@@ -6496,8 +6185,8 @@ function scheduleTrackRelocationHighlightTimer() {
   if (!Number.isFinite(nextExpiresAt)) return;
 
   const delay = Math.max(0, nextExpiresAt - now) + 20;
-  trackRelocationHighlightTimer = setTimeout(() => {
-    trackRelocationHighlightTimer = null;
+  state.trackRelocationHighlightTimer = setTimeout(() => {
+    state.trackRelocationHighlightTimer = null;
     syncTrackRelocationHighlights();
     scheduleTrackRelocationHighlightTimer();
   }, delay);
@@ -6506,12 +6195,12 @@ function scheduleTrackRelocationHighlightTimer() {
 function applyTrackRelocationUndoSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return;
 
-  layout = ensurePlaylists(cloneLayoutState(snapshot.layout));
-  playlistNames = normalizePlaylistNames(snapshot.playlistNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(snapshot.playlistMeta, layout.length);
-  dapConfig = normalizeDapConfig(snapshot.dapConfig, layout.length, snapshot.dapConfig);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshot.playlistAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(snapshot.playlistDsp, playlistAutoplay, layout.length);
+  state.layout = ensurePlaylists(cloneLayoutState(snapshot.layout));
+  state.playlistNames = normalizePlaylistNames(snapshot.playlistNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(snapshot.playlistMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(snapshot.dapConfig, state.layout.length, snapshot.dapConfig);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshot.playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(snapshot.playlistDsp, state.playlistAutoplay, state.layout.length);
 }
 
 function renderTrackRelocationUndoButton(card, action) {
@@ -6542,24 +6231,24 @@ function renderTrackRelocationUndoButton(card, action) {
 
 function syncTrackRelocationHighlights() {
   const now = Date.now();
-  for (const [key, entry] of trackRelocationHighlights.entries()) {
+  for (const [key, entry] of state.trackRelocationHighlights.entries()) {
     if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
       if (entry && typeof entry.undoId === 'string' && entry.undoId) {
-        trackRelocationUndoActions.delete(entry.undoId);
+        state.trackRelocationUndoActions.delete(entry.undoId);
       }
-      trackRelocationHighlights.delete(key);
+      state.trackRelocationHighlights.delete(key);
     }
   }
 
   const activeUndoIds = new Set();
-  for (const entry of trackRelocationHighlights.values()) {
+  for (const entry of state.trackRelocationHighlights.values()) {
     if (entry && typeof entry.undoId === 'string' && entry.undoId) {
       activeUndoIds.add(entry.undoId);
     }
   }
-  for (const actionId of trackRelocationUndoActions.keys()) {
+  for (const actionId of state.trackRelocationUndoActions.keys()) {
     if (!activeUndoIds.has(actionId)) {
-      trackRelocationUndoActions.delete(actionId);
+      state.trackRelocationUndoActions.delete(actionId);
     }
   }
 
@@ -6575,17 +6264,17 @@ function syncTrackRelocationHighlights() {
     card.classList.remove('is-relocated');
   });
 
-  if (!trackRelocationHighlights.size) {
+  if (!state.trackRelocationHighlights.size) {
     clearTrackRelocationHighlightTimer();
     return;
   }
 
-  for (const entry of trackRelocationHighlights.values()) {
+  for (const entry of state.trackRelocationHighlights.values()) {
     const card = getTrackCardByContext(entry.fileKey, entry.playbackContext);
     if (card) {
       card.classList.add('is-relocated');
       if (typeof entry.undoId === 'string' && entry.undoId) {
-        const action = trackRelocationUndoActions.get(entry.undoId);
+        const action = state.trackRelocationUndoActions.get(entry.undoId);
         if (action) {
           renderTrackRelocationUndoButton(card, action);
         }
@@ -6599,7 +6288,7 @@ function scheduleTrackRelocationHighlight(trackContext, durationMs = TRACK_RELOC
   if (!normalized) return;
 
   const duration = Number.isFinite(durationMs) ? Math.max(120, durationMs) : TRACK_RELOCATE_HIGHLIGHT_MS;
-  trackRelocationHighlights.set(normalized.key, {
+  state.trackRelocationHighlights.set(normalized.key, {
     ...normalized,
     expiresAt: Date.now() + duration,
     undoId: typeof undoId === 'string' && undoId ? undoId : null,
@@ -6612,10 +6301,10 @@ function clearTrackRelocationHighlight(trackContext) {
   const normalized = normalizeTrackRelocationHighlightContext(trackContext);
   if (!normalized) return;
 
-  const removed = trackRelocationHighlights.get(normalized.key);
-  if (trackRelocationHighlights.delete(normalized.key)) {
+  const removed = state.trackRelocationHighlights.get(normalized.key);
+  if (state.trackRelocationHighlights.delete(normalized.key)) {
     if (removed && typeof removed.undoId === 'string' && removed.undoId) {
-      trackRelocationUndoActions.delete(removed.undoId);
+      state.trackRelocationUndoActions.delete(removed.undoId);
     }
     syncTrackRelocationHighlights();
     scheduleTrackRelocationHighlightTimer();
@@ -6624,13 +6313,13 @@ function clearTrackRelocationHighlight(trackContext) {
 
 function clearTrackRelocationUndoAction(actionId, { clearHighlights = true } = {}) {
   if (typeof actionId !== 'string' || !actionId) return;
-  trackRelocationUndoActions.delete(actionId);
+  state.trackRelocationUndoActions.delete(actionId);
   if (!clearHighlights) return;
 
   let changed = false;
-  for (const [key, entry] of trackRelocationHighlights.entries()) {
+  for (const [key, entry] of state.trackRelocationHighlights.entries()) {
     if (entry && entry.undoId === actionId) {
-      trackRelocationHighlights.delete(key);
+      state.trackRelocationHighlights.delete(key);
       changed = true;
     }
   }
@@ -6655,8 +6344,8 @@ function registerTrackRelocationUndoAction(trackContext, undoSnapshot, durationM
   });
 
   const duration = Number.isFinite(durationMs) ? Math.max(120, durationMs) : TRACK_RELOCATE_HIGHLIGHT_MS;
-  const id = `relocate:${Date.now().toString(36)}:${(trackRelocationUndoSeq += 1)}`;
-  trackRelocationUndoActions.set(id, {
+  const id = `relocate:${Date.now().toString(36)}:${(state.trackRelocationUndoSeq += 1)}`;
+  state.trackRelocationUndoActions.set(id, {
     id,
     expiresAt: Date.now() + duration,
     restoring: false,
@@ -6673,7 +6362,7 @@ function registerTrackRelocationUndoAction(trackContext, undoSnapshot, durationM
 
 async function undoTrackRelocationAction(actionId) {
   if (typeof actionId !== 'string' || !actionId) return false;
-  const action = trackRelocationUndoActions.get(actionId);
+  const action = state.trackRelocationUndoActions.get(actionId);
   if (!action) return false;
   if (action.restoring) return false;
   if (!action.snapshot) {
@@ -6685,12 +6374,12 @@ async function undoTrackRelocationAction(actionId) {
   syncTrackRelocationHighlights();
 
   const rollbackSnapshot = createTrackRelocationUndoSnapshot({
-    layoutState: layout,
-    namesState: playlistNames,
-    metaState: playlistMeta,
-    autoplayState: playlistAutoplay,
-    dspState: playlistDsp,
-    dapState: dapConfig,
+    layoutState: state.layout,
+    namesState: state.playlistNames,
+    metaState: state.playlistMeta,
+    autoplayState: state.playlistAutoplay,
+    dspState: state.playlistDsp,
+    dapState: state.dapConfig,
   });
 
   applyTrackRelocationUndoSnapshot(action.snapshot);
@@ -6705,8 +6394,8 @@ async function undoTrackRelocationAction(actionId) {
     console.error(err);
     applyTrackRelocationUndoSnapshot(rollbackSnapshot);
     action.restoring = false;
-    if (!trackRelocationUndoActions.has(actionId)) {
-      trackRelocationUndoActions.set(actionId, action);
+    if (!state.trackRelocationUndoActions.has(actionId)) {
+      state.trackRelocationUndoActions.set(actionId, action);
     }
     renderZones();
     setStatus('Не удалось отменить действие.');
@@ -6715,7 +6404,7 @@ async function undoTrackRelocationAction(actionId) {
 }
 
 function getTrackButtonByContext(fileKey, playbackContext = null) {
-  const buttons = buttonsByFile.get(fileKey);
+  const buttons = state.buttonsByFile.get(fileKey);
   if (!buttons || !buttons.size) return null;
 
   for (const button of buttons) {
@@ -6751,18 +6440,18 @@ function isTrackCardDragBlocked(card) {
   const cardFile = typeof card.dataset.file === 'string' ? card.dataset.file : '';
   if (!cardFile) return false;
 
-  if (currentTrack && typeof currentTrack.file === 'string') {
-    if (isTrackCardContextActive(card, currentTrack.file, currentTrack)) {
+  if (state.currentTrack && typeof state.currentTrack.file === 'string') {
+    if (isTrackCardContextActive(card, state.currentTrack.file, state.currentTrack)) {
       return true;
     }
   }
 
-  if (hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()) {
+  if (state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()) {
     const hostContext = {
-      playlistIndex: normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex),
-      playlistPosition: normalizePlaylistTrackIndex(hostPlaybackState.playlistPosition),
+      playlistIndex: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
+      playlistPosition: normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
     };
-    if (isTrackCardContextActive(card, hostPlaybackState.trackFile, hostContext)) {
+    if (isTrackCardContextActive(card, state.hostPlaybackState.trackFile, hostContext)) {
       return true;
     }
   }
@@ -6779,8 +6468,8 @@ function applyPlayButtonState(button, isPauseState, { pauseLocked = false } = {}
 }
 
 function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
-  const buttons = buttonsByFile.get(fileKey);
-  const cards = cardsByFile.get(fileKey);
+  const buttons = state.buttonsByFile.get(fileKey);
+  const cards = state.cardsByFile.get(fileKey);
 
   if (buttons) {
     for (const button of buttons) {
@@ -6791,7 +6480,7 @@ function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
       const targetButton = getTrackButtonByContext(fileKey, playbackContext);
       const isPauseLocked =
         isDapNoSilenceActive() &&
-        isDapTrackContext(playbackContext, dapConfig);
+        isDapTrackContext(playbackContext, state.dapConfig);
       applyPlayButtonState(targetButton, true, { pauseLocked: isPauseLocked });
     }
   }
@@ -6814,7 +6503,7 @@ function setButtonPlaying(fileKey, isPlaying, playbackContext = null) {
 }
 
 function setTrackPaused(fileKey, isPaused, playbackContext = null) {
-  const cards = cardsByFile.get(fileKey);
+  const cards = state.cardsByFile.get(fileKey);
   if (!cards) return;
 
   for (const card of cards) {
@@ -6901,9 +6590,9 @@ function getDuration(audio) {
 
 function trackLiveAudioInstance(audio) {
   if (!(audio instanceof HTMLAudioElement)) return audio;
-  liveAudioInstances.add(audio);
+  state.liveAudioInstances.add(audio);
   const cleanup = () => {
-    liveAudioInstances.delete(audio);
+    state.liveAudioInstances.delete(audio);
   };
   audio.addEventListener('ended', cleanup, { once: true });
   audio.addEventListener('error', cleanup, { once: true });
@@ -6913,9 +6602,9 @@ function trackLiveAudioInstance(audio) {
 function stopUnexpectedLiveAudios(allowedAudios = []) {
   const allowed = new Set(allowedAudios.filter((audio) => audio instanceof HTMLAudioElement));
 
-  for (const audio of Array.from(liveAudioInstances)) {
+  for (const audio of Array.from(state.liveAudioInstances)) {
     if (!(audio instanceof HTMLAudioElement)) {
-      liveAudioInstances.delete(audio);
+      state.liveAudioInstances.delete(audio);
       continue;
     }
     if (allowed.has(audio)) continue;
@@ -6930,15 +6619,15 @@ function stopUnexpectedLiveAudios(allowedAudios = []) {
     } catch (err) {
       // ignore seek failures for detached/finished nodes
     }
-    liveAudioInstances.delete(audio);
+    state.liveAudioInstances.delete(audio);
   }
 }
 
 function updateProgress(fileKey, currentTime, duration) {
-  if (!currentTrack || currentTrack.key !== fileKey) return;
+  if (!state.currentTrack || state.currentTrack.key !== fileKey) return;
 
   const safeTime = Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
-  const isDapTrackOnHostMain = isHostRole() && isDapTrackContext(currentTrack, dapConfig);
+  const isDapTrackOnHostMain = isHostRole() && isDapTrackContext(state.currentTrack, state.dapConfig);
   if (isDapTrackOnHostMain) {
     setNowPlayingProgress(0);
     setNowPlayingTime(null);
@@ -6953,7 +6642,7 @@ function updateProgress(fileKey, currentTime, duration) {
 }
 
 function resetProgress(fileKey) {
-  if (currentTrack && fileKey && currentTrack.key !== fileKey) return;
+  if (state.currentTrack && fileKey && state.currentTrack.key !== fileKey) return;
   setNowPlayingProgress(0);
 }
 
@@ -6978,39 +6667,39 @@ function bindProgress(audio, fileKey) {
 }
 
 function stopProgressLoop() {
-  if (progressRaf !== null) {
-    cancelAnimationFrame(progressRaf);
-    progressRaf = null;
+  if (state.progressRaf !== null) {
+    cancelAnimationFrame(state.progressRaf);
+    state.progressRaf = null;
   }
-  progressAudio = null;
+  state.progressAudio = null;
   syncNowPlayingPanel();
 }
 
 function startProgressLoop(audio, fileKey) {
   stopProgressLoop();
   if (!audio) return;
-  progressAudio = audio;
+  state.progressAudio = audio;
   syncNowPlayingPanel();
   const minFrameIntervalMs = getProgressUiFrameIntervalMs();
   let lastRenderTimestamp = 0;
-  updateProgress(fileKey, progressAudio.currentTime, getDuration(progressAudio));
+  updateProgress(fileKey, state.progressAudio.currentTime, getDuration(state.progressAudio));
 
   const tick = (timestamp) => {
-    if (!progressAudio || progressAudio.paused) return;
+    if (!state.progressAudio || state.progressAudio.paused) return;
     const nowTimestamp = Number.isFinite(timestamp) ? timestamp : performance.now();
     if (
       minFrameIntervalMs > 0 &&
       lastRenderTimestamp > 0 &&
       nowTimestamp - lastRenderTimestamp < minFrameIntervalMs
     ) {
-      progressRaf = requestAnimationFrame(tick);
+      state.progressRaf = requestAnimationFrame(tick);
       return;
     }
     lastRenderTimestamp = nowTimestamp;
-    updateProgress(fileKey, progressAudio.currentTime, getDuration(progressAudio));
-    progressRaf = requestAnimationFrame(tick);
+    updateProgress(fileKey, state.progressAudio.currentTime, getDuration(state.progressAudio));
+    state.progressRaf = requestAnimationFrame(tick);
   };
-  progressRaf = requestAnimationFrame(tick);
+  state.progressRaf = requestAnimationFrame(tick);
 }
 
 function buildTrackCard(
@@ -7034,7 +6723,7 @@ function buildTrackCard(
   if (!canDelete) {
     card.classList.add('is-locked');
   }
-  addToMultiMap(cardsByFile, key, card);
+  addToMultiMap(state.cardsByFile, key, card);
 
   const order = document.createElement('span');
   order.className = 'track-order';
@@ -7065,12 +6754,12 @@ function buildTrackCard(
   name.dataset.file = file;
   name.dataset.basePath = basePath;
   name.textContent = trackDisplayName(file, basePath);
-  addToMultiMap(trackNameLabelsByFile, key, name);
+  addToMultiMap(state.trackNameLabelsByFile, key, name);
 
   const durationLabel = document.createElement('span');
   durationLabel.className = 'track-duration';
   durationLabel.textContent = getTrackDurationTextByKey(key, { playlistIndex, playlistPosition });
-  addToMultiMap(durationLabelsByFile, key, durationLabel);
+  addToMultiMap(state.durationLabelsByFile, key, durationLabel);
 
   const playButton = document.createElement('button');
   playButton.className = 'play';
@@ -7083,7 +6772,7 @@ function buildTrackCard(
       playlistPosition,
     }),
   );
-  addToMultiMap(buttonsByFile, key, playButton);
+  addToMultiMap(state.buttonsByFile, key, playButton);
 
   card.append(order, name, durationLabel, playButton);
   if (draggable) {
@@ -7123,7 +6812,7 @@ function attachDragHandlers(card) {
       return;
     }
     clearDesktopDragHold();
-    if (zonesPanActive) {
+    if (state.zonesPanActive) {
       cleanupZonesPanInteraction();
     }
     stopZonesPanMomentum();
@@ -7145,12 +6834,12 @@ function attachDragHandlers(card) {
         : -1;
     const sourcePlaylistType = isFolderPlaylistIndex(sourceZoneIndex) ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL;
 
-    dragContext = {
+    state.dragContext = {
       file: card.dataset.file || '',
       sourceZoneIndex: Number.isInteger(sourceZoneIndex) ? sourceZoneIndex : -1,
       sourceIndex,
       sourcePlaylistType,
-      snapshotLayout: cloneLayoutState(layout),
+      snapshotLayout: cloneLayoutState(state.layout),
     };
 
     e.dataTransfer.effectAllowed = 'copyMove';
@@ -7161,8 +6850,8 @@ function attachDragHandlers(card) {
     showTrashDropzone();
     applyDragModeBadge(isActiveCopyDrag(e) ? 'copy' : 'move');
     card.classList.add('dragging');
-    draggingCard = card;
-    dragDropHandled = false;
+    state.draggingCard = card;
+    state.dragDropHandled = false;
   });
 
   card.addEventListener('dragend', () => {
@@ -7172,12 +6861,12 @@ function attachDragHandlers(card) {
     clearDragModeBadge();
     clearDragPreviewCard();
     card.classList.remove('dragging');
-    if (!dragDropHandled) {
+    if (!state.dragDropHandled) {
       renderZones();
     }
-    draggingCard = null;
-    dragContext = null;
-    dragDropHandled = false;
+    state.draggingCard = null;
+    state.dragContext = null;
+    state.dragDropHandled = false;
     document.querySelectorAll('.zone.drag-over').forEach((zone) => zone.classList.remove('drag-over'));
   });
 }
@@ -7202,7 +6891,7 @@ function getDragInsertBefore(container, event, { includeDraggingCard = false } =
 }
 
 function applyDragPreview(zoneBody, event) {
-  if (!draggingCard || !zoneBody) return;
+  if (!state.draggingCard || !zoneBody) return;
   event.preventDefault();
   const zone = zoneBody.closest('.zone');
   const targetZoneIndex = zone ? Number.parseInt(zone.dataset.zoneIndex || '', 10) : NaN;
@@ -7228,9 +6917,9 @@ function applyDragPreview(zoneBody, event) {
   clearDragPreviewCard();
   const beforeElement = getDragInsertBefore(zoneBody, event, { includeDraggingCard: false });
   if (beforeElement) {
-    zoneBody.insertBefore(draggingCard, beforeElement);
+    zoneBody.insertBefore(state.draggingCard, beforeElement);
   } else {
-    zoneBody.appendChild(draggingCard);
+    zoneBody.appendChild(state.draggingCard);
   }
 }
 
@@ -7342,21 +7031,21 @@ function normalizePlaylistAutoplayWithDap(flags, dapState, expectedLength) {
   return normalized;
 }
 
-function isDapEnabled(config = dapConfig) {
+function isDapEnabled(config = state.dapConfig) {
   return Boolean(config && config.enabled && Number.isInteger(config.playlistIndex) && config.playlistIndex >= 0);
 }
 
-function getDapPlaylistIndex(config = dapConfig) {
+function getDapPlaylistIndex(config = state.dapConfig) {
   if (!isDapEnabled(config)) return null;
   return normalizePlaylistTrackIndex(config.playlistIndex);
 }
 
-function isDapPlaylistIndex(playlistIndex, config = dapConfig) {
+function isDapPlaylistIndex(playlistIndex, config = state.dapConfig) {
   const dapPlaylistIndex = getDapPlaylistIndex(config);
   return dapPlaylistIndex !== null && dapPlaylistIndex === normalizePlaylistTrackIndex(playlistIndex);
 }
 
-function buildPlaylistRenderOrder(length, config = dapConfig) {
+function buildPlaylistRenderOrder(length, config = state.dapConfig) {
   const expectedLength = Number.isInteger(length) && length > 0 ? length : 0;
   const order = Array.from({ length: expectedLength }, (_, index) => index);
   const dapPlaylistIndex = getDapPlaylistIndex(config);
@@ -7365,7 +7054,7 @@ function buildPlaylistRenderOrder(length, config = dapConfig) {
   return [dapPlaylistIndex, ...order.filter((index) => index !== dapPlaylistIndex)];
 }
 
-function isDapTrackContext(trackOrContext = null, config = dapConfig) {
+function isDapTrackContext(trackOrContext = null, config = state.dapConfig) {
   if (!trackOrContext || typeof trackOrContext !== 'object') return false;
   const playlistIndex = normalizePlaylistTrackIndex(trackOrContext.playlistIndex);
   if (playlistIndex === null) return false;
@@ -7374,32 +7063,32 @@ function isDapTrackContext(trackOrContext = null, config = dapConfig) {
 
 function getEffectiveLiveVolumeForTrack(trackOrContext = null) {
   if (!isHostRole()) {
-    return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+    return normalizeLiveVolumePreset(state.livePlaybackVolume, DEFAULT_LIVE_VOLUME);
   }
   if (!isDapTrackContext(trackOrContext)) {
-    return normalizeLiveVolumePreset(livePlaybackVolume, DEFAULT_LIVE_VOLUME);
+    return normalizeLiveVolumePreset(state.livePlaybackVolume, DEFAULT_LIVE_VOLUME);
   }
-  return clampVolume(normalizeDapVolumePercent(dapConfig.volumePercent, DAP_DEFAULT_VOLUME_PERCENT) / 100);
+  return clampVolume(normalizeDapVolumePercent(state.dapConfig.volumePercent, DAP_DEFAULT_VOLUME_PERCENT) / 100);
 }
 
-function getDapPlaylistFiles(config = dapConfig) {
+function getDapPlaylistFiles(config = state.dapConfig) {
   const dapPlaylistIndex = getDapPlaylistIndex(config);
   if (dapPlaylistIndex === null) return [];
-  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return [];
-  const playlist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= state.layout.length) return [];
+  const playlist = Array.isArray(state.layout[dapPlaylistIndex]) ? state.layout[dapPlaylistIndex] : [];
   return playlist.filter((file) => typeof file === 'string' && file.trim());
 }
 
 function disarmDapNoSilence() {
-  dapNoSilenceArmedPlaylistIndex = null;
+  state.dapNoSilenceArmedPlaylistIndex = null;
 }
 
 function clearDapInterruptedPlaybackSnapshot() {
   const previousSnapshot =
-    dapInterruptedPlaybackSnapshot && typeof dapInterruptedPlaybackSnapshot === 'object'
+    state.dapInterruptedPlaybackSnapshot && typeof state.dapInterruptedPlaybackSnapshot === 'object'
       ? { ...dapInterruptedPlaybackSnapshot }
       : null;
-  dapInterruptedPlaybackSnapshot = null;
+  state.dapInterruptedPlaybackSnapshot = null;
 
   if (!previousSnapshot) return;
   const previousFile = typeof previousSnapshot.file === 'string' ? previousSnapshot.file.trim() : '';
@@ -7412,14 +7101,14 @@ function clearDapInterruptedPlaybackSnapshot() {
   refreshTrackDurationLabels(trackKey(previousFile, '/audio'));
 }
 
-function captureDapInterruptedPlaybackSnapshot(track = currentTrack, audio = currentAudio, config = dapConfig) {
+function captureDapInterruptedPlaybackSnapshot(track = state.currentTrack, audio = state.currentAudio, config = state.dapConfig) {
   if (!track || !audio) return false;
   if (!isDapTrackContext(track, config)) return false;
 
   const dapPlaylistIndex = getDapPlaylistIndex(config);
-  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return false;
+  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= state.layout.length) return false;
 
-  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  const dapPlaylist = Array.isArray(state.layout[dapPlaylistIndex]) ? state.layout[dapPlaylistIndex] : [];
   if (!dapPlaylist.length) return false;
 
   const trackFile = typeof track.file === 'string' ? track.file.trim() : '';
@@ -7439,7 +7128,7 @@ function captureDapInterruptedPlaybackSnapshot(track = currentTrack, audio = cur
   const rawCurrentTime = Number(audio.currentTime);
   const startAtSeconds = Number.isFinite(rawCurrentTime) && rawCurrentTime > 0 ? rawCurrentTime : 0;
 
-  dapInterruptedPlaybackSnapshot = {
+  state.dapInterruptedPlaybackSnapshot = {
     file: trackFile,
     playlistIndex: dapPlaylistIndex,
     playlistPosition: trackPosition,
@@ -7448,23 +7137,23 @@ function captureDapInterruptedPlaybackSnapshot(track = currentTrack, audio = cur
   return true;
 }
 
-function resolveDapInterruptedPlaybackTrack(config = dapConfig) {
-  if (!dapInterruptedPlaybackSnapshot || typeof dapInterruptedPlaybackSnapshot !== 'object') return null;
+function resolveDapInterruptedPlaybackTrack(config = state.dapConfig) {
+  if (!state.dapInterruptedPlaybackSnapshot || typeof state.dapInterruptedPlaybackSnapshot !== 'object') return null;
 
   const dapPlaylistIndex = getDapPlaylistIndex(config);
-  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) {
+  if (dapPlaylistIndex === null || dapPlaylistIndex < 0 || dapPlaylistIndex >= state.layout.length) {
     clearDapInterruptedPlaybackSnapshot();
     return null;
   }
 
-  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  const dapPlaylist = Array.isArray(state.layout[dapPlaylistIndex]) ? state.layout[dapPlaylistIndex] : [];
   if (!dapPlaylist.length) {
     clearDapInterruptedPlaybackSnapshot();
     return null;
   }
 
-  const storedFile = typeof dapInterruptedPlaybackSnapshot.file === 'string' ? dapInterruptedPlaybackSnapshot.file.trim() : '';
-  let resolvedPosition = normalizePlaylistTrackIndex(dapInterruptedPlaybackSnapshot.playlistPosition);
+  const storedFile = typeof state.dapInterruptedPlaybackSnapshot.file === 'string' ? state.dapInterruptedPlaybackSnapshot.file.trim() : '';
+  let resolvedPosition = normalizePlaylistTrackIndex(state.dapInterruptedPlaybackSnapshot.playlistPosition);
   let resolvedFile = storedFile;
 
   if (
@@ -7497,48 +7186,48 @@ function resolveDapInterruptedPlaybackTrack(config = dapConfig) {
     basePath: '/audio',
     playlistIndex: dapPlaylistIndex,
     playlistPosition: resolvedPosition,
-    startAtSeconds: normalizeAudioStartOffsetSeconds(dapInterruptedPlaybackSnapshot.startAtSeconds),
+    startAtSeconds: normalizeAudioStartOffsetSeconds(state.dapInterruptedPlaybackSnapshot.startAtSeconds),
     fromInterruptedDap: true,
   };
 }
 
-function armDapNoSilenceByPlaylistIndex(playlistIndex, config = dapConfig) {
+function armDapNoSilenceByPlaylistIndex(playlistIndex, config = state.dapConfig) {
   if (!isDapEnabled(config)) return false;
   const dapPlaylistIndex = getDapPlaylistIndex(config);
   const normalizedPlaylistIndex = normalizePlaylistTrackIndex(playlistIndex);
   if (dapPlaylistIndex === null || normalizedPlaylistIndex === null) return false;
   if (dapPlaylistIndex !== normalizedPlaylistIndex) return false;
-  dapNoSilenceArmedPlaylistIndex = dapPlaylistIndex;
+  state.dapNoSilenceArmedPlaylistIndex = dapPlaylistIndex;
   return true;
 }
 
-function isDapNoSilenceArmed(config = dapConfig) {
+function isDapNoSilenceArmed(config = state.dapConfig) {
   if (!isDapEnabled(config)) return false;
   const dapPlaylistIndex = getDapPlaylistIndex(config);
   if (dapPlaylistIndex === null) return false;
-  return dapNoSilenceArmedPlaylistIndex === dapPlaylistIndex;
+  return state.dapNoSilenceArmedPlaylistIndex === dapPlaylistIndex;
 }
 
-function isDapNoSilenceActive(config = dapConfig) {
+function isDapNoSilenceActive(config = state.dapConfig) {
   if (!isHostRole()) return false;
   if (!isDapEnabled(config)) return false;
   if (!isDapNoSilenceArmed(config)) return false;
   return getDapPlaylistFiles(config).length > 0;
 }
 
-function isDapPauseLocked(track = currentTrack, audio = currentAudio, config = dapConfig) {
+function isDapPauseLocked(track = state.currentTrack, audio = state.currentAudio, config = state.dapConfig) {
   if (!isDapNoSilenceActive(config)) return false;
   if (!track || !audio) return false;
   if (audio.paused) return false;
   return isDapTrackContext(track, config);
 }
 
-function resolveDapNoSilenceTrack(config = dapConfig) {
+function resolveDapNoSilenceTrack(config = state.dapConfig) {
   const dapPlaylistIndex = getDapPlaylistIndex(config);
   if (dapPlaylistIndex === null) return null;
-  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return null;
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= state.layout.length) return null;
 
-  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  const dapPlaylist = Array.isArray(state.layout[dapPlaylistIndex]) ? state.layout[dapPlaylistIndex] : [];
   if (!dapPlaylist.length) return null;
 
   const interruptedTrack = resolveDapInterruptedPlaybackTrack(config);
@@ -7547,25 +7236,25 @@ function resolveDapNoSilenceTrack(config = dapConfig) {
   }
 
   if (
-    currentTrack &&
-    currentAudio &&
-    currentAudio.paused &&
-    isDapTrackContext(currentTrack, config) &&
-    typeof currentTrack.file === 'string' &&
-    currentTrack.file.trim()
+    state.currentTrack &&
+    state.currentAudio &&
+    state.currentAudio.paused &&
+    isDapTrackContext(state.currentTrack, config) &&
+    typeof state.currentTrack.file === 'string' &&
+    state.currentTrack.file.trim()
   ) {
-    let pausedPosition = normalizePlaylistTrackIndex(currentTrack.playlistPosition);
+    let pausedPosition = normalizePlaylistTrackIndex(state.currentTrack.playlistPosition);
     if (
       pausedPosition === null ||
       pausedPosition < 0 ||
       pausedPosition >= dapPlaylist.length ||
-      dapPlaylist[pausedPosition] !== currentTrack.file
+      dapPlaylist[pausedPosition] !== state.currentTrack.file
     ) {
-      pausedPosition = dapPlaylist.indexOf(currentTrack.file);
+      pausedPosition = dapPlaylist.indexOf(state.currentTrack.file);
     }
     if (pausedPosition !== -1) {
       return {
-        file: currentTrack.file,
+        file: state.currentTrack.file,
         basePath: '/audio',
         playlistIndex: dapPlaylistIndex,
         playlistPosition: pausedPosition,
@@ -7589,13 +7278,13 @@ function resolveDapNoSilenceTrack(config = dapConfig) {
 
 async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
   if (!isDapNoSilenceActive()) return false;
-  if (dapAutoStartInFlight) return false;
-  if (autoplayStartInFlight) return false;
-  if (overlayHandoffInFlight) return false;
+  if (state.dapAutoStartInFlight) return false;
+  if (state.autoplayStartInFlight) return false;
+  if (state.overlayHandoffInFlight) return false;
   if (isDspTransitionPlaybackActive()) return false;
-  if (currentTrack && currentAudio && !currentAudio.paused) return false;
+  if (state.currentTrack && state.currentAudio && !state.currentAudio.paused) return false;
 
-  const targetTrack = resolveDapNoSilenceTrack(dapConfig);
+  const targetTrack = resolveDapNoSilenceTrack(state.dapConfig);
   if (!targetTrack) return false;
 
   const targetButton = getTrackButton(
@@ -7606,7 +7295,7 @@ async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
   );
   if (!targetButton) return false;
 
-  dapAutoStartInFlight = true;
+  state.dapAutoStartInFlight = true;
   try {
     await handlePlay(targetTrack.file, targetButton, targetTrack.basePath || '/audio', {
       playlistIndex: targetTrack.playlistIndex,
@@ -7617,7 +7306,7 @@ async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
       fromDapInterruptedResume: Boolean(targetTrack.fromInterruptedDap),
     });
     const targetKey = trackKey(targetTrack.file, targetTrack.basePath || '/audio');
-    const started = Boolean(currentTrack && currentAudio && !currentAudio.paused && currentTrack.key === targetKey);
+    const started = Boolean(state.currentTrack && state.currentAudio && !state.currentAudio.paused && state.currentTrack.key === targetKey);
     if (started && targetTrack.fromInterruptedDap) {
       clearDapInterruptedPlaybackSnapshot();
     }
@@ -7626,21 +7315,21 @@ async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
     console.error(`DAP fallback (${reason}) failed`, err);
     return false;
   } finally {
-    dapAutoStartInFlight = false;
+    state.dapAutoStartInFlight = false;
   }
 }
 
 function startDapNoSilenceGuard() {
-  if (dapNoSilenceGuardTimer !== null) return;
-  dapNoSilenceGuardTimer = setInterval(() => {
+  if (state.dapNoSilenceGuardTimer !== null) return;
+  state.dapNoSilenceGuardTimer = setInterval(() => {
     ensureDapNoSilencePlayback({ reason: 'interval' }).catch(() => {});
   }, DAP_NO_SILENCE_GUARD_INTERVAL_MS);
 }
 
 function stopDapNoSilenceGuard() {
-  if (dapNoSilenceGuardTimer === null) return;
-  clearInterval(dapNoSilenceGuardTimer);
-  dapNoSilenceGuardTimer = null;
+  if (state.dapNoSilenceGuardTimer === null) return;
+  clearInterval(state.dapNoSilenceGuardTimer);
+  state.dapNoSilenceGuardTimer = null;
 }
 
 function serializeLayout(playlists) {
@@ -7652,7 +7341,7 @@ function layoutsEqual(left, right) {
 }
 
 function serializePlaylistNames(names, lengthHint = null) {
-  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(state.layout).length;
   return JSON.stringify(normalizePlaylistNames(names, expectedLength));
 }
 
@@ -7661,7 +7350,7 @@ function playlistNamesEqual(left, right, expectedLength) {
 }
 
 function serializePlaylistAutoplay(flags, lengthHint = null) {
-  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(state.layout).length;
   return JSON.stringify(normalizePlaylistAutoplayFlags(flags, expectedLength));
 }
 
@@ -7670,7 +7359,7 @@ function playlistAutoplayEqual(left, right, expectedLength) {
 }
 
 function serializePlaylistDsp(flags, autoplayFlags, lengthHint = null) {
-  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(state.layout).length;
   return JSON.stringify(normalizePlaylistDspFlags(flags, autoplayFlags, expectedLength));
 }
 
@@ -7679,7 +7368,7 @@ function playlistDspEqual(left, right, autoplayFlags, expectedLength) {
 }
 
 function serializeDapConfig(config, lengthHint = null) {
-  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(layout).length;
+  const expectedLength = Number.isInteger(lengthHint) && lengthHint >= 0 ? lengthHint : ensurePlaylists(state.layout).length;
   return JSON.stringify(normalizeDapConfig(config, expectedLength, DEFAULT_DAP_CONFIG));
 }
 
@@ -7688,10 +7377,10 @@ function dapConfigEqual(left, right, expectedLength) {
 }
 
 function applyDapConstraintsForCurrentLayout() {
-  layout = ensurePlaylists(layout);
-  dapConfig = normalizeDapConfig(dapConfig, layout.length, dapConfig);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layout.length);
+  state.layout = ensurePlaylists(state.layout);
+  state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(state.playlistDsp, state.playlistAutoplay, state.layout.length);
 }
 
 function normalizeLayoutForFiles(rawLayout, files) {
@@ -7730,7 +7419,7 @@ function readLegacyLocalLayout(files) {
 
 function syncLayoutFromDom() {
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
-  const nextLayout = ensurePlaylists(layout).map(() => []);
+  const nextLayout = ensurePlaylists(state.layout).map(() => []);
 
   zones.forEach((zone) => {
     const zoneIndex = Number.parseInt(zone.dataset.zoneIndex || '', 10);
@@ -7742,9 +7431,9 @@ function syncLayoutFromDom() {
       .filter(Boolean);
   });
 
-  layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(playlistNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
+  state.layout = ensurePlaylists(nextLayout);
+  state.playlistNames = normalizePlaylistNames(state.playlistNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
   applyDapConstraintsForCurrentLayout();
 }
 
@@ -7764,7 +7453,7 @@ function getAdjacentTrackCardForDrop(referenceCard, direction) {
     cursor = cursor[searchDirection];
     if (!(cursor instanceof HTMLElement)) return null;
     if (!cursor.classList.contains('track-card')) continue;
-    if (cursor === draggingCard || cursor === dragPreviewCard) continue;
+    if (cursor === state.draggingCard || cursor === state.dragPreviewCard) continue;
     return cursor;
   }
 
@@ -7782,9 +7471,9 @@ function resolveDropInsertIndex(targetBody, targetZoneIndex, layoutState) {
   if (!(targetBody instanceof HTMLElement)) return fallbackIndex;
 
   const marker =
-    dragPreviewCard && dragPreviewCard.parentElement === targetBody
+    state.dragPreviewCard && state.dragPreviewCard.parentElement === targetBody
       ? dragPreviewCard
-      : draggingCard && draggingCard.parentElement === targetBody
+      : state.draggingCard && state.draggingCard.parentElement === targetBody
         ? draggingCard
         : null;
 
@@ -7872,16 +7561,16 @@ function resolveTrackIndexByContext(layoutState, context) {
 }
 
 async function handleDragDeleteFromContext() {
-  if (!dragContext) return false;
+  if (!state.dragContext) return false;
 
-  const snapshotLayout = cloneLayoutState(dragContext.snapshotLayout);
-  const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
-  const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
-  const snapshotDap = normalizeDapConfig(dapConfig, snapshotLayout.length, dapConfig);
-  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, snapshotDap, snapshotLayout.length);
-  const snapshotDsp = normalizePlaylistDspFlags(playlistDsp, snapshotAutoplay, snapshotLayout.length);
+  const snapshotLayout = cloneLayoutState(state.dragContext.snapshotLayout);
+  const snapshotNames = normalizePlaylistNames(state.playlistNames, snapshotLayout.length);
+  const snapshotMeta = normalizePlaylistMeta(state.playlistMeta, snapshotLayout.length);
+  const snapshotDap = normalizeDapConfig(state.dapConfig, snapshotLayout.length, state.dapConfig);
+  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, snapshotDap, snapshotLayout.length);
+  const snapshotDsp = normalizePlaylistDspFlags(state.playlistDsp, snapshotAutoplay, snapshotLayout.length);
 
-  const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
+  const resolution = resolveTrackIndexByContext(snapshotLayout, state.dragContext);
   const eligibility = getTrackDeleteEligibility(snapshotLayout, resolution.playlistIndex, resolution.trackIndex);
   if (!eligibility.canDelete) {
     setStatus(`Удаление недоступно: ${eligibility.reason}`);
@@ -7890,20 +7579,20 @@ async function handleDragDeleteFromContext() {
 
   snapshotLayout[resolution.playlistIndex].splice(resolution.trackIndex, 1);
 
-  const previousLayout = cloneLayoutState(layout);
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
+  const previousLayout = cloneLayoutState(state.layout);
+  const previousNames = state.playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...dapConfig };
 
-  layout = ensurePlaylists(snapshotLayout);
-  playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
-  dapConfig = normalizeDapConfig(snapshotDap, layout.length, snapshotDap);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(snapshotDsp, playlistAutoplay, layout.length);
-  dragDropHandled = true;
+  state.layout = ensurePlaylists(snapshotLayout);
+  state.playlistNames = normalizePlaylistNames(snapshotNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(snapshotMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(snapshotDap, state.layout.length, snapshotDap);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(snapshotDsp, state.playlistAutoplay, state.layout.length);
+  state.dragDropHandled = true;
   clearDragModeBadge();
   clearDragPreviewCard();
   hideTrashDropzone();
@@ -7915,12 +7604,12 @@ async function handleDragDeleteFromContext() {
     return true;
   } catch (err) {
     console.error(err);
-    layout = previousLayout;
-    playlistNames = previousNames;
-    playlistMeta = previousMeta;
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    state.layout = previousLayout;
+    state.playlistNames = previousNames;
+    state.playlistMeta = previousMeta;
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
     renderZones();
     setStatus('Не удалось синхронизировать удаление трека.');
     return false;
@@ -7928,14 +7617,14 @@ async function handleDragDeleteFromContext() {
 }
 
 async function handleDragQueueNextFromContext(event = null) {
-  if (!dragContext) return false;
+  if (!state.dragContext) return false;
 
-  const snapshotLayout = cloneLayoutState(dragContext.snapshotLayout);
-  const snapshotNames = normalizePlaylistNames(playlistNames, snapshotLayout.length);
-  const snapshotMeta = normalizePlaylistMeta(playlistMeta, snapshotLayout.length);
-  const snapshotDap = normalizeDapConfig(dapConfig, snapshotLayout.length, dapConfig);
-  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, snapshotDap, snapshotLayout.length);
-  const snapshotDsp = normalizePlaylistDspFlags(playlistDsp, snapshotAutoplay, snapshotLayout.length);
+  const snapshotLayout = cloneLayoutState(state.dragContext.snapshotLayout);
+  const snapshotNames = normalizePlaylistNames(state.playlistNames, snapshotLayout.length);
+  const snapshotMeta = normalizePlaylistMeta(state.playlistMeta, snapshotLayout.length);
+  const snapshotDap = normalizeDapConfig(state.dapConfig, snapshotLayout.length, state.dapConfig);
+  const snapshotAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, snapshotDap, snapshotLayout.length);
+  const snapshotDsp = normalizePlaylistDspFlags(state.playlistDsp, snapshotAutoplay, snapshotLayout.length);
 
   const queueTarget = resolveQueueNextInsertTarget(snapshotLayout);
   if (!queueTarget) {
@@ -7954,19 +7643,19 @@ async function handleDragQueueNextFromContext(event = null) {
   let queuedTrackAnchor = null;
 
   if (isCopyDrop) {
-    if (!dragContext.file) {
+    if (!state.dragContext.file) {
       setStatus('Не удалось определить трек для копирования.');
       return false;
     }
     insertIndex = Math.max(0, Math.min(insertIndex, snapshotLayout[targetZoneIndex].length));
-    snapshotLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+    snapshotLayout[targetZoneIndex].splice(insertIndex, 0, state.dragContext.file);
     queuedTrackAnchor = {
-      file: dragContext.file,
+      file: state.dragContext.file,
       playlistIndex: targetZoneIndex,
       playlistPosition: insertIndex,
     };
   } else {
-    const resolution = resolveTrackIndexByContext(snapshotLayout, dragContext);
+    const resolution = resolveTrackIndexByContext(snapshotLayout, state.dragContext);
     if (resolution.playlistIndex < 0 || resolution.trackIndex < 0) {
       setStatus('Не удалось определить исходную позицию трека.');
       return false;
@@ -7998,11 +7687,11 @@ async function handleDragQueueNextFromContext(event = null) {
     };
   }
 
-  const previousLayout = cloneLayoutState(layout);
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
+  const previousLayout = cloneLayoutState(state.layout);
+  const previousNames = state.playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...dapConfig };
   const undoSnapshot = createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
@@ -8013,13 +7702,13 @@ async function handleDragQueueNextFromContext(event = null) {
     dapState: previousDap,
   });
 
-  layout = ensurePlaylists(snapshotLayout);
-  playlistNames = normalizePlaylistNames(snapshotNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(snapshotMeta, layout.length);
-  dapConfig = normalizeDapConfig(snapshotDap, layout.length, snapshotDap);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(snapshotDsp, playlistAutoplay, layout.length);
-  dragDropHandled = true;
+  state.layout = ensurePlaylists(snapshotLayout);
+  state.playlistNames = normalizePlaylistNames(snapshotNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(snapshotMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(snapshotDap, state.layout.length, snapshotDap);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshotAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(snapshotDsp, state.playlistAutoplay, state.layout.length);
+  state.dragDropHandled = true;
   hideTrashDropzone();
   clearDragModeBadge();
   clearDragPreviewCard();
@@ -8033,12 +7722,12 @@ async function handleDragQueueNextFromContext(event = null) {
     return true;
   } catch (err) {
     console.error(err);
-    layout = previousLayout;
-    playlistNames = previousNames;
-    playlistMeta = previousMeta;
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    state.layout = previousLayout;
+    state.playlistNames = previousNames;
+    state.playlistMeta = previousMeta;
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
     renderZones();
     if (undoActionId) {
       clearTrackRelocationUndoAction(undoActionId);
@@ -8052,7 +7741,7 @@ async function handleDragQueueNextFromContext(event = null) {
 
 function getTrackButton(file, playlistIndex = null, playlistPosition = null, basePath = '/audio') {
   const key = trackKey(file, basePath);
-  const candidates = buttonsByFile.get(key);
+  const candidates = state.buttonsByFile.get(key);
   if (!candidates || !candidates.size) return null;
 
   if (Number.isInteger(playlistIndex) && playlistIndex >= 0 && Number.isInteger(playlistPosition) && playlistPosition >= 0) {
@@ -8074,10 +7763,10 @@ function resolveSequentialNextTrack(track, { requireAutoplay = false } = {}) {
   if (!track || typeof track.file !== 'string') return null;
 
   const preferredPlaylistIndex = Number.isInteger(track.playlistIndex) ? track.playlistIndex : -1;
-  if (preferredPlaylistIndex < 0 || preferredPlaylistIndex >= layout.length) return null;
+  if (preferredPlaylistIndex < 0 || preferredPlaylistIndex >= state.layout.length) return null;
 
-  if (requireAutoplay && !playlistAutoplay[preferredPlaylistIndex]) return null;
-  const playlist = Array.isArray(layout[preferredPlaylistIndex]) ? layout[preferredPlaylistIndex] : [];
+  if (requireAutoplay && !state.playlistAutoplay[preferredPlaylistIndex]) return null;
+  const playlist = Array.isArray(state.layout[preferredPlaylistIndex]) ? state.layout[preferredPlaylistIndex] : [];
   if (!playlist.length) return null;
 
   let currentIndex = Number.isInteger(track.playlistPosition) ? track.playlistPosition : -1;
@@ -8104,14 +7793,14 @@ function resolveAutoplayNextTrack(finishedTrack) {
   const directNext = resolveSequentialNextTrack(finishedTrack, { requireAutoplay: true });
   if (directNext) return directNext;
 
-  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
+  const dapPlaylistIndex = getDapPlaylistIndex(state.dapConfig);
   if (dapPlaylistIndex === null) return null;
-  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= layout.length) return null;
+  if (dapPlaylistIndex < 0 || dapPlaylistIndex >= state.layout.length) return null;
 
   const finishedPlaylistIndex = normalizePlaylistTrackIndex(finishedTrack ? finishedTrack.playlistIndex : null);
   if (finishedPlaylistIndex !== dapPlaylistIndex) return null;
 
-  const dapPlaylist = Array.isArray(layout[dapPlaylistIndex]) ? layout[dapPlaylistIndex] : [];
+  const dapPlaylist = Array.isArray(state.layout[dapPlaylistIndex]) ? state.layout[dapPlaylistIndex] : [];
   if (!dapPlaylist.length) return null;
 
   if (finishedTrack && typeof finishedTrack.file === 'string') {
@@ -8146,19 +7835,19 @@ function resolveAutoplayNextTrack(finishedTrack) {
 function isPlaylistDspEnabled(playlistIndex) {
   const normalizedIndex = normalizePlaylistTrackIndex(playlistIndex);
   if (normalizedIndex === null) return false;
-  if (normalizedIndex < 0 || normalizedIndex >= playlistDsp.length) return false;
-  return Boolean(playlistDsp[normalizedIndex]);
+  if (normalizedIndex < 0 || normalizedIndex >= state.playlistDsp.length) return false;
+  return Boolean(state.playlistDsp[normalizedIndex]);
 }
 
 function setLiveDspNextTrackReady(nextTrack, details = null) {
   if (!nextTrack || typeof nextTrack.file !== 'string') {
-    liveDspNextReadyDescriptor = '';
-    liveDspNextReadySliceSeconds = null;
+    state.liveDspNextReadyDescriptor = '';
+    state.liveDspNextReadySliceSeconds = null;
     syncLiveDspNextTrackHighlight();
     return;
   }
 
-  liveDspNextReadyDescriptor = buildLiveDspNextTrackDescriptor(
+  state.liveDspNextReadyDescriptor = buildLiveDspNextTrackDescriptor(
     nextTrack.file,
     {
       playlistIndex: nextTrack.playlistIndex,
@@ -8167,14 +7856,14 @@ function setLiveDspNextTrackReady(nextTrack, details = null) {
     nextTrack.basePath || '/audio',
   );
   const normalizedSliceSeconds = normalizeDspTransitionSliceSeconds(details && details.sliceSeconds);
-  liveDspNextReadySliceSeconds = normalizedSliceSeconds > 0 ? normalizedSliceSeconds : null;
+  state.liveDspNextReadySliceSeconds = normalizedSliceSeconds > 0 ? normalizedSliceSeconds : null;
   syncLiveDspNextTrackHighlight();
 }
 
 function resolveReadyDspSliceWindowSeconds(nextTrack) {
   if (!nextTrack || typeof nextTrack.file !== 'string') return null;
   if (nextTrack.basePath && nextTrack.basePath !== '/audio') return null;
-  if (!liveDspNextReadyDescriptor) return null;
+  if (!state.liveDspNextReadyDescriptor) return null;
 
   const expectedDescriptor = buildLiveDspNextTrackDescriptor(
     nextTrack.file,
@@ -8184,9 +7873,9 @@ function resolveReadyDspSliceWindowSeconds(nextTrack) {
     },
     nextTrack.basePath || '/audio',
   );
-  if (!expectedDescriptor || expectedDescriptor !== liveDspNextReadyDescriptor) return null;
+  if (!expectedDescriptor || expectedDescriptor !== state.liveDspNextReadyDescriptor) return null;
 
-  const sliceSeconds = normalizeDspTransitionSliceSeconds(liveDspNextReadySliceSeconds);
+  const sliceSeconds = normalizeDspTransitionSliceSeconds(state.liveDspNextReadySliceSeconds);
   if (sliceSeconds <= 0) return null;
   return sliceSeconds;
 }
@@ -8201,7 +7890,7 @@ async function warmupDspTransitionOutput(outputUrl, { urgent = false } = {}) {
   const normalizedUrl = typeof outputUrl === 'string' ? outputUrl.trim() : '';
   if (!normalizedUrl) return false;
 
-  const existingPromise = dspTransitionWarmupPromises.get(normalizedUrl);
+  const existingPromise = state.dspTransitionWarmupPromises.get(normalizedUrl);
   if (existingPromise) {
     return existingPromise;
   }
@@ -8238,11 +7927,11 @@ async function warmupDspTransitionOutput(outputUrl, { urgent = false } = {}) {
       }
     });
 
-  dspTransitionWarmupPromises.set(normalizedUrl, warmupPromise);
-  if (dspTransitionWarmupPromises.size > LIVE_DSP_WARMUP_MAX_TRACKED) {
-    const firstKey = dspTransitionWarmupPromises.keys().next().value;
+  state.dspTransitionWarmupPromises.set(normalizedUrl, warmupPromise);
+  if (state.dspTransitionWarmupPromises.size > LIVE_DSP_WARMUP_MAX_TRACKED) {
+    const firstKey = state.dspTransitionWarmupPromises.keys().next().value;
     if (firstKey && firstKey !== normalizedUrl) {
-      dspTransitionWarmupPromises.delete(firstKey);
+      state.dspTransitionWarmupPromises.delete(firstKey);
     }
   }
 
@@ -8279,8 +7968,8 @@ function buildLiveDspContinuationWarmupKey(track, sliceSeconds = 0) {
 }
 
 function clearLiveDspContinuationWarmups() {
-  const pendingPromises = Array.from(liveDspContinuationWarmupPromises.values());
-  liveDspContinuationWarmupPromises.clear();
+  const pendingPromises = Array.from(state.liveDspContinuationWarmupPromises.values());
+  state.liveDspContinuationWarmupPromises.clear();
   pendingPromises.forEach((promise) => {
     Promise.resolve(promise)
       .then((audio) => {
@@ -8295,7 +7984,7 @@ function primeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
   const key = buildLiveDspContinuationWarmupKey(targetTrack, sliceSeconds);
   if (!key) return null;
 
-  const existing = liveDspContinuationWarmupPromises.get(key);
+  const existing = state.liveDspContinuationWarmupPromises.get(key);
   if (existing) return existing;
 
   const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
@@ -8312,29 +8001,29 @@ function primeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
   let trackedPromise = null;
   trackedPromise = basePromise
     .then((audio) => {
-      const stillTracked = liveDspContinuationWarmupPromises.get(key) === trackedPromise;
+      const stillTracked = state.liveDspContinuationWarmupPromises.get(key) === trackedPromise;
       if (!stillTracked) {
         if (audio) disposePreparedContinuationAudio(audio);
         return null;
       }
       if (!audio) {
-        liveDspContinuationWarmupPromises.delete(key);
+        state.liveDspContinuationWarmupPromises.delete(key);
         return null;
       }
       return audio;
     })
     .catch(() => {
-      if (liveDspContinuationWarmupPromises.get(key) === trackedPromise) {
-        liveDspContinuationWarmupPromises.delete(key);
+      if (state.liveDspContinuationWarmupPromises.get(key) === trackedPromise) {
+        state.liveDspContinuationWarmupPromises.delete(key);
       }
       return null;
     });
 
-  liveDspContinuationWarmupPromises.set(key, trackedPromise);
-  while (liveDspContinuationWarmupPromises.size > LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED) {
-    const oldestKey = liveDspContinuationWarmupPromises.keys().next().value;
+  state.liveDspContinuationWarmupPromises.set(key, trackedPromise);
+  while (state.liveDspContinuationWarmupPromises.size > LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED) {
+    const oldestKey = state.liveDspContinuationWarmupPromises.keys().next().value;
     if (!oldestKey || oldestKey === key) break;
-    liveDspContinuationWarmupPromises.delete(oldestKey);
+    state.liveDspContinuationWarmupPromises.delete(oldestKey);
   }
 
   return trackedPromise;
@@ -8345,9 +8034,9 @@ function consumeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
   const key = buildLiveDspContinuationWarmupKey(targetTrack, sliceSeconds);
   if (!key) return null;
 
-  const warmupPromise = liveDspContinuationWarmupPromises.get(key);
+  const warmupPromise = state.liveDspContinuationWarmupPromises.get(key);
   if (!warmupPromise) return null;
-  liveDspContinuationWarmupPromises.delete(key);
+  state.liveDspContinuationWarmupPromises.delete(key);
   return warmupPromise;
 }
 
@@ -8364,9 +8053,8 @@ function toPlaybackTrackDescriptor(track, fallbackBasePath = '/audio') {
 }
 
 async function fetchDspTransitionPairDetails(fromFile, toFile) {
-  const response = await fetch(`/api/dsp/transitions?from=${encodeURIComponent(fromFile)}&to=${encodeURIComponent(toFile)}`);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  const { ok, data } = await api.fetchDspTransitionPair(fromFile, toFile);
+  if (!ok) {
     const message = data && typeof data.error === 'string' ? data.error : 'Не удалось получить статус DSP transition.';
     throw new Error(message);
   }
@@ -8387,7 +8075,7 @@ async function fetchDspTransitionPairDetails(fromFile, toFile) {
 async function pollLiveDspTransitionUntilReady(fromTrack, nextTrack, tokenAtStart) {
   const startedAt = Date.now();
 
-  while (liveDspRenderToken === tokenAtStart && Date.now() - startedAt <= LIVE_DSP_POLL_TIMEOUT_MS) {
+  while (state.liveDspRenderToken === tokenAtStart && Date.now() - startedAt <= LIVE_DSP_POLL_TIMEOUT_MS) {
     let details = null;
     let status = 'missing';
     try {
@@ -8397,7 +8085,7 @@ async function pollLiveDspTransitionUntilReady(fromTrack, nextTrack, tokenAtStar
       // keep waiting during transient API errors
     }
 
-    if (liveDspRenderToken !== tokenAtStart) return;
+    if (state.liveDspRenderToken !== tokenAtStart) return;
     if (status === 'ready') {
       if (details && details.outputUrl) {
         warmupDspTransitionOutput(details.outputUrl).catch(() => {});
@@ -8419,19 +8107,15 @@ async function pollLiveDspTransitionUntilReady(fromTrack, nextTrack, tokenAtStar
 
 async function queueLiveDspTransitionForTrack(fromTrack, nextTrack, tokenAtStart) {
   try {
-    const response = await fetch('/api/dsp/transitions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({
-        from: fromTrack.file,
-        to: nextTrack.file,
-        force: true,
-        source: LIVE_DSP_RENDER_SOURCE,
-        priority: 'high',
-      }),
+    const { ok } = await api.postDspTransitions({
+      from: fromTrack.file,
+      to: nextTrack.file,
+      force: true,
+      source: LIVE_DSP_RENDER_SOURCE,
+      priority: 'high',
     });
 
-    if (!response.ok) {
+    if (!ok) {
       return;
     }
   } catch (err) {
@@ -8446,8 +8130,8 @@ function triggerLiveDspTransitionForTrack(track) {
   if (!track || typeof track.file !== 'string') return;
   if ((track.basePath || '/audio') !== '/audio') return;
 
-  const token = liveDspRenderToken + 1;
-  liveDspRenderToken = token;
+  const token = state.liveDspRenderToken + 1;
+  state.liveDspRenderToken = token;
   setLiveDspNextTrackReady(null);
 
   const nextTrack = resolveAutoplayNextTrack(track);
@@ -8485,18 +8169,18 @@ function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds, trans
   const hasCurrentSourceTrack =
     sourceTrack &&
     sourceTrack.key &&
-    currentTrack &&
-    currentTrack.key === sourceTrack.key &&
-    currentAudio &&
-    !currentAudio.paused;
+    state.currentTrack &&
+    state.currentTrack.key === sourceTrack.key &&
+    state.currentAudio &&
+    !state.currentAudio.paused;
 
   if (!hasCurrentSourceTrack) {
     // Source track already ended: skip source segment and continue from target side of transition.
     return sourceSegmentSeconds;
   }
 
-  const sourceDuration = getDuration(currentAudio) || getKnownDurationSeconds(sourceTrack.key);
-  const sourceCurrentTime = Number.isFinite(currentAudio.currentTime) ? Math.max(0, currentAudio.currentTime) : null;
+  const sourceDuration = getDuration(state.currentAudio) || getKnownDurationSeconds(sourceTrack.key);
+  const sourceCurrentTime = Number.isFinite(state.currentAudio.currentTime) ? Math.max(0, state.currentAudio.currentTime) : null;
   if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || sourceCurrentTime === null) {
     return 0;
   }
@@ -8551,11 +8235,11 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
   }
 
-  const previousAudio = currentAudio;
+  const previousAudio = state.currentAudio;
   resetFadeState();
   stopProgressLoop();
-  currentAudio = null;
-  currentTrack = null;
+  state.currentAudio = null;
+  state.currentTrack = null;
 
   setButtonPlaying(sourceTrack.key, true, sourceTrack);
   setTrackPaused(sourceTrack.key, false, sourceTrack);
@@ -8565,7 +8249,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
   const transitionAudio = trackLiveAudioInstance(new Audio(details.outputUrl));
   transitionAudio.preload = 'auto';
   transitionAudio.volume = getEffectiveLiveVolume(targetTrack);
-  dspTransitionPlayback = {
+  state.dspTransitionPlayback = {
     audio: transitionAudio,
     fromTrack: sourceTrack,
     toTrack: targetTrack,
@@ -8581,12 +8265,12 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
     const rawOffset = Math.max(
       0,
-      transitionStartOffsetSeconds + startupDelaySeconds + liveDspEntryCompensationSeconds,
+      transitionStartOffsetSeconds + startupDelaySeconds + state.liveDspEntryCompensationSeconds,
     );
     const knownDuration =
       getDuration(transitionAudio) ||
-      (dspTransitionPlayback && Number.isFinite(dspTransitionPlayback.duration) && dspTransitionPlayback.duration > 0
-        ? dspTransitionPlayback.duration
+      (state.dspTransitionPlayback && Number.isFinite(state.dspTransitionPlayback.duration) && state.dspTransitionPlayback.duration > 0
+        ? state.dspTransitionPlayback.duration
         : null);
     if (!knownDuration) return rawOffset;
     return Math.max(0, Math.min(rawOffset, Math.max(0, knownDuration - 0.02)));
@@ -8656,7 +8340,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
   const startNextTrackFromTransition = async ({ reason = 'ended' } = {}) => {
     if (handoffStarted) return;
-    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) {
+    if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) {
       return;
     }
     handoffStarted = true;
@@ -8688,13 +8372,13 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
       return;
     }
 
-    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) {
+    if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) {
       return;
     }
 
     stopDspTransitionPlayback({ stopAudio: true, clearTrackState: false });
-    currentAudio = preparedAudio;
-    currentTrack = targetTrack;
+    state.currentAudio = preparedAudio;
+    state.currentTrack = targetTrack;
     setButtonPlaying(sourceTrack.key, false, sourceTrack);
     setTrackPaused(sourceTrack.key, false, sourceTrack);
     setButtonPlaying(targetTrack.key, true, targetTrack);
@@ -8708,25 +8392,25 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
   };
 
   transitionAudio.addEventListener('loadedmetadata', () => {
-    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) return;
     const duration = getDuration(transitionAudio);
     if (duration) {
-      dspTransitionPlayback.duration = duration;
+      state.dspTransitionPlayback.duration = duration;
     }
     syncNowPlayingPanel();
   });
 
   transitionAudio.addEventListener('timeupdate', () => {
-    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) return;
     if (!handoffStarted) {
-      const activeDuration = getDuration(transitionAudio) || dspTransitionPlayback.duration;
+      const activeDuration = getDuration(transitionAudio) || state.dspTransitionPlayback.duration;
       const currentTime =
         Number.isFinite(transitionAudio.currentTime) && transitionAudio.currentTime >= 0
           ? transitionAudio.currentTime
           : 0;
       if (Number.isFinite(activeDuration) && activeDuration > 0) {
         const remaining = Math.max(0, activeDuration - currentTime);
-        const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + liveDspExitCompensationSeconds);
+        const handoffLeadSeconds = Math.max(0, LIVE_DSP_HANDOFF_LEAD_SECONDS + state.liveDspExitCompensationSeconds);
         if (remaining <= handoffLeadSeconds) {
           startNextTrackFromTransition({ reason: 'near-end' }).catch((err) => {
             console.error('Не удалось переключиться с DSP transition (near-end)', err);
@@ -8746,7 +8430,7 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
   });
 
   transitionAudio.addEventListener('error', () => {
-    if (!dspTransitionPlayback || dspTransitionPlayback.audio !== transitionAudio) return;
+    if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) return;
     stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
     setStatus('Ошибка воспроизведения DSP перехода. Переходим к следующему треку.');
     handlePlay(nextTrack.file, targetButton, nextTrack.basePath || '/audio', {
@@ -8765,8 +8449,8 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
     if (adjustedTransitionStartOffsetSeconds > 0) {
       await seekAudioToOffset(transitionAudio, adjustedTransitionStartOffsetSeconds);
     }
-    if (dspTransitionPlayback && dspTransitionPlayback.audio === transitionAudio) {
-      dspTransitionPlayback.startOffsetSeconds = adjustedTransitionStartOffsetSeconds;
+    if (state.dspTransitionPlayback && state.dspTransitionPlayback.audio === transitionAudio) {
+      state.dspTransitionPlayback.startOffsetSeconds = adjustedTransitionStartOffsetSeconds;
     }
     if (previousAudio) {
       try {
@@ -8786,9 +8470,9 @@ async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
 
 async function tryAutoplayNextTrack(finishedTrack) {
   if (!isHostRole()) return false;
-  if (autoplayStartInFlight) return false;
+  if (state.autoplayStartInFlight) return false;
 
-  autoplayStartInFlight = true;
+  state.autoplayStartInFlight = true;
   try {
     const nextTrack = resolveAutoplayNextTrack(finishedTrack);
     if (!nextTrack) return false;
@@ -8805,9 +8489,9 @@ async function tryAutoplayNextTrack(finishedTrack) {
       fromAutoplay: true,
     });
     const expectedKey = trackKey(nextTrack.file, nextTrack.basePath || '/audio');
-    return Boolean(currentTrack && currentAudio && !currentAudio.paused && currentTrack.key === expectedKey);
+    return Boolean(state.currentTrack && state.currentAudio && !state.currentAudio.paused && state.currentTrack.key === expectedKey);
   } finally {
-    autoplayStartInFlight = false;
+    state.autoplayStartInFlight = false;
   }
 }
 
@@ -8818,15 +8502,15 @@ function resetTrackReferences() {
   clearDragPreviewCard();
   clearTouchCopyHold();
   clearPlaylistReorderHold();
-  if (touchCopyDragActive) {
+  if (state.touchCopyDragActive) {
     cleanupTouchCopyDrag({ restoreLayout: false });
   }
-  buttonsByFile = new Map();
-  cardsByFile = new Map();
-  durationLabelsByFile = new Map();
-  playlistDurationLabelsByIndex = new Map();
-  trackNameLabelsByFile = new Map();
-  hostHighlightedDescriptor = '';
+  state.buttonsByFile = new Map();
+  state.cardsByFile = new Map();
+  state.durationLabelsByFile = new Map();
+  state.playlistDurationLabelsByIndex = new Map();
+  state.trackNameLabelsByFile = new Map();
+  state.hostHighlightedDescriptor = '';
 }
 
 function applyIncomingLayoutState(
@@ -8841,46 +8525,46 @@ function applyIncomingLayoutState(
   render = true,
 ) {
   const previousDap = { ...dapConfig };
-  const previousLayout = ensurePlaylists(layout);
-  const previousMeta = normalizePlaylistMeta(playlistMeta, previousLayout.length);
-  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
-  const normalizedLayout = normalizeLayoutForFiles(nextLayout, availableFiles);
+  const previousLayout = ensurePlaylists(state.layout);
+  const previousMeta = normalizePlaylistMeta(state.playlistMeta, previousLayout.length);
+  const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
+  const normalizedLayout = normalizeLayoutForFiles(nextLayout, state.availableFiles);
   const normalizedNames = normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
   const normalizedMeta = normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
-  const normalizedDap = normalizeDapConfig(nextDapConfig, normalizedLayout.length, dapConfig);
+  const normalizedDap = normalizeDapConfig(nextDapConfig, normalizedLayout.length, state.dapConfig);
   const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextPlaylistAutoplay, normalizedDap, normalizedLayout.length);
   const normalizedDsp = normalizePlaylistDspFlags(nextPlaylistDsp, normalizedAutoplay, normalizedLayout.length);
   const normalizedTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(
     nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
       ? nextTrackTitleModesByTrack
-      : trackTitleModesByTrack,
-    availableFiles,
+      : state.trackTitleModesByTrack,
+    state.availableFiles,
     '/audio',
   );
   const withFolderCoverage = ensureFolderPlaylistsCoverage(normalizedLayout, normalizedNames, normalizedMeta);
   const changed =
-    !layoutsEqual(layout, withFolderCoverage.layout) ||
-    !playlistNamesEqual(playlistNames, withFolderCoverage.playlistNames, withFolderCoverage.layout.length) ||
-    !playlistMetaEqual(playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
-    !playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length) ||
-    !playlistDspEqual(playlistDsp, normalizedDsp, normalizedAutoplay, withFolderCoverage.layout.length) ||
-    !dapConfigEqual(dapConfig, normalizedDap, withFolderCoverage.layout.length) ||
-    !trackTitleModesByTrackEqual(trackTitleModesByTrack, normalizedTrackTitleModes);
+    !layoutsEqual(state.layout, withFolderCoverage.layout) ||
+    !playlistNamesEqual(state.playlistNames, withFolderCoverage.playlistNames, withFolderCoverage.layout.length) ||
+    !playlistMetaEqual(state.playlistMeta, withFolderCoverage.playlistMeta, withFolderCoverage.layout.length) ||
+    !playlistAutoplayEqual(state.playlistAutoplay, normalizedAutoplay, withFolderCoverage.layout.length) ||
+    !playlistDspEqual(state.playlistDsp, normalizedDsp, normalizedAutoplay, withFolderCoverage.layout.length) ||
+    !dapConfigEqual(state.dapConfig, normalizedDap, withFolderCoverage.layout.length) ||
+    !trackTitleModesByTrackEqual(state.trackTitleModesByTrack, normalizedTrackTitleModes);
 
-  layout = withFolderCoverage.layout;
-  playlistNames = withFolderCoverage.playlistNames;
-  playlistMeta = withFolderCoverage.playlistMeta;
-  dapConfig = normalizeDapConfig(normalizedDap, layout.length, normalizedDap);
-  if (!isDapEnabled(dapConfig)) {
+  state.layout = withFolderCoverage.layout;
+  state.playlistNames = withFolderCoverage.playlistNames;
+  state.playlistMeta = withFolderCoverage.playlistMeta;
+  state.dapConfig = normalizeDapConfig(normalizedDap, state.layout.length, normalizedDap);
+  if (!isDapEnabled(state.dapConfig)) {
     disarmDapNoSilence();
     clearDapInterruptedPlaybackSnapshot();
   } else {
     const previousDapIndex = normalizePlaylistTrackIndex(previousDap.playlistIndex);
-    const nextDapIndex = normalizePlaylistTrackIndex(dapConfig.playlistIndex);
+    const nextDapIndex = normalizePlaylistTrackIndex(state.dapConfig.playlistIndex);
     const previousDapIdentity =
       previousDapIndex !== null ? buildPlaylistSelectionIdentity(previousLayout, previousMeta, previousDapIndex) : '';
     const nextDapIdentity =
-      nextDapIndex !== null ? buildPlaylistSelectionIdentity(layout, playlistMeta, nextDapIndex) : '';
+      nextDapIndex !== null ? buildPlaylistSelectionIdentity(state.layout, state.playlistMeta, nextDapIndex) : '';
     const isDapSelectionPreservedByShift =
       Boolean(previousDapIdentity) && Boolean(nextDapIdentity) && previousDapIdentity === nextDapIdentity;
     if (
@@ -8893,25 +8577,25 @@ function applyIncomingLayoutState(
       clearDapInterruptedPlaybackSnapshot();
     }
   }
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(normalizedAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(normalizedDsp, playlistAutoplay, layout.length);
-  trackTitleModesByTrack = normalizedTrackTitleModes;
-  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
-  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(normalizedAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(normalizedDsp, state.playlistAutoplay, state.layout.length);
+  state.trackTitleModesByTrack = normalizedTrackTitleModes;
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
   });
   const dapSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
-  if (currentTrackContextChanged && currentAudio) {
+  if (currentTrackContextChanged && state.currentAudio) {
     applyLiveVolumeToCurrentAudio();
   }
-  if (dspTransitionPlayback && dspTransitionPlayback.audio) {
-    dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(dspTransitionPlayback.toTrack || null);
+  if (state.dspTransitionPlayback && state.dspTransitionPlayback.audio) {
+    state.dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(state.dspTransitionPlayback.toTrack || null);
   }
   saveTrackTitleModesByTrackSetting();
 
   const numericVersion = Number(version);
   if (Number.isFinite(numericVersion)) {
-    layoutVersion = numericVersion;
+    state.layoutVersion = numericVersion;
   }
 
   if (changed && render) {
@@ -8919,7 +8603,7 @@ function applyIncomingLayoutState(
   }
 
   if (!render) {
-    updateDapSettingsUi(currentRole);
+    updateDapSettingsUi(state.currentRole);
   }
 
   if (currentTrackContextChanged && isHostRole()) {
@@ -8935,28 +8619,28 @@ function applyIncomingLayoutState(
 
 function applyIncomingHostPlaybackState(nextState, sync = true) {
   const previousHostTrackKey =
-    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
-      ? trackKey(hostPlaybackState.trackFile, '/audio')
+    state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
+      ? trackKey(state.hostPlaybackState.trackFile, '/audio')
       : null;
   const previousDapTrackKey =
-    hostPlaybackState &&
-    hostPlaybackState.dapPlayback &&
-    typeof hostPlaybackState.dapPlayback.trackFile === 'string' &&
-    hostPlaybackState.dapPlayback.trackFile.trim()
-      ? trackKey(hostPlaybackState.dapPlayback.trackFile, '/audio')
+    state.hostPlaybackState &&
+    state.hostPlaybackState.dapPlayback &&
+    typeof state.hostPlaybackState.dapPlayback.trackFile === 'string' &&
+    state.hostPlaybackState.dapPlayback.trackFile.trim()
+      ? trackKey(state.hostPlaybackState.dapPlayback.trackFile, '/audio')
       : null;
   const normalizedState = sanitizeIncomingHostPlaybackState(nextState);
-  const changed = serializeHostPlaybackState(hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
-  hostPlaybackState = normalizedState;
+  const changed = serializeHostPlaybackState(state.hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
+  state.hostPlaybackState = normalizedState;
   const nextHostTrackKey =
-    typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
-      ? trackKey(hostPlaybackState.trackFile, '/audio')
+    typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
+      ? trackKey(state.hostPlaybackState.trackFile, '/audio')
       : null;
   const nextDapTrackKey =
-    hostPlaybackState.dapPlayback &&
-    typeof hostPlaybackState.dapPlayback.trackFile === 'string' &&
-    hostPlaybackState.dapPlayback.trackFile.trim()
-      ? trackKey(hostPlaybackState.dapPlayback.trackFile, '/audio')
+    state.hostPlaybackState.dapPlayback &&
+    typeof state.hostPlaybackState.dapPlayback.trackFile === 'string' &&
+    state.hostPlaybackState.dapPlayback.trackFile.trim()
+      ? trackKey(state.hostPlaybackState.dapPlayback.trackFile, '/audio')
       : null;
   setLivePlaybackVolume(normalizedState.volume, { sync: false, announce: false });
   setShowVolumePresetsEnabled(normalizedState.showVolumePresets, { persist: isHostRole(), sync: false });
@@ -8987,46 +8671,45 @@ function applyIncomingHostPlaybackState(nextState, sync = true) {
 }
 
 function buildLocalPlaybackSnapshot() {
-  const dapPlayback = buildDapPlaybackSnapshotForSync(dapConfig);
+  const dapPlayback = buildDapPlaybackSnapshotForSync(state.dapConfig);
 
-  if (!currentTrack || !currentAudio) {
+  if (!state.currentTrack || !state.currentAudio) {
     return {
       trackFile: null,
       paused: false,
       currentTime: 0,
       duration: null,
       volume: getEffectiveLiveVolume(),
-      showVolumePresets: showVolumePresetsEnabled,
-      allowLiveSeek: liveSeekEnabled,
+      showVolumePresets: state.showVolumePresetsEnabled,
+      allowLiveSeek: state.liveSeekEnabled,
       dapPlayback,
       playlistIndex: null,
       playlistPosition: null,
     };
   }
 
-  const rawCurrentTime = Number(currentAudio.currentTime);
+  const rawCurrentTime = Number(state.currentAudio.currentTime);
   const currentTime = Number.isFinite(rawCurrentTime) && rawCurrentTime >= 0 ? rawCurrentTime : 0;
-  const resolvedDuration = getDuration(currentAudio) || getKnownDurationSeconds(currentTrack.key);
+  const resolvedDuration = getDuration(state.currentAudio) || getKnownDurationSeconds(state.currentTrack.key);
 
   return {
-    trackFile: currentTrack.file,
-    paused: Boolean(currentAudio.paused),
+    trackFile: state.currentTrack.file,
+    paused: Boolean(state.currentAudio.paused),
     currentTime,
     duration: Number.isFinite(resolvedDuration) && resolvedDuration > 0 ? resolvedDuration : null,
     volume: getEffectiveLiveVolume(),
-    showVolumePresets: showVolumePresetsEnabled,
-    allowLiveSeek: liveSeekEnabled,
+    showVolumePresets: state.showVolumePresetsEnabled,
+    allowLiveSeek: state.liveSeekEnabled,
     dapPlayback,
-    playlistIndex: normalizePlaylistTrackIndex(currentTrack.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(currentTrack.playlistPosition),
+    playlistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
   };
 }
 
 async function fetchSharedPlaybackState() {
-  const response = await fetch('/api/playback');
-  const data = await response.json().catch(() => ({}));
+  const { ok, data } = await api.fetchPlayback();
 
-  if (!response.ok) {
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось получить состояние воспроизведения хоста');
   }
@@ -9035,14 +8718,9 @@ async function fetchSharedPlaybackState() {
 }
 
 async function pushSharedPlaybackState(snapshot) {
-  const response = await fetch('/api/playback', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ ...snapshot, clientId }),
-  });
+  const { ok, data } = await api.postPlayback({ ...snapshot, clientId });
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось синхронизировать состояние воспроизведения');
   }
@@ -9124,16 +8802,11 @@ function normalizeIncomingPlaybackCommand(rawCommand) {
 }
 
 async function sendLivePlaybackCommand(command) {
-  const response = await fetch('/api/playback/command', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({
-      ...command,
-      clientId,
-    }),
+  const { ok, data } = await api.postPlaybackCommand({
+    ...command,
+    clientId,
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось отправить live-команду');
   }
@@ -9194,7 +8867,7 @@ async function executeIncomingPlaybackCommand(commandPayload) {
     }
 
     if (command.type === PLAYBACK_COMMAND_SEEK_CURRENT) {
-      if (!liveSeekEnabled) {
+      if (!state.liveSeekEnabled) {
         return;
       }
       const ratio = normalizePlaybackSeekRatio(command.positionRatio);
@@ -9205,7 +8878,7 @@ async function executeIncomingPlaybackCommand(commandPayload) {
         seekDspTransitionPlaybackByRatio(ratio);
         return;
       }
-      if (!currentTrack || !currentAudio) {
+      if (!state.currentTrack || !state.currentAudio) {
         return;
       }
       const duration = getCurrentTrackDurationSeconds();
@@ -9215,20 +8888,20 @@ async function executeIncomingPlaybackCommand(commandPayload) {
       const nextTime = Math.max(0, Math.min(duration, ratio * duration));
 
       try {
-        if (typeof currentAudio.fastSeek === 'function') {
-          currentAudio.fastSeek(nextTime);
+        if (typeof state.currentAudio.fastSeek === 'function') {
+          state.currentAudio.fastSeek(nextTime);
         } else {
-          currentAudio.currentTime = nextTime;
+          state.currentAudio.currentTime = nextTime;
         }
       } catch (err) {
         try {
-          currentAudio.currentTime = nextTime;
+          state.currentAudio.currentTime = nextTime;
         } catch (fallbackErr) {
           return;
         }
       }
 
-      updateProgress(currentTrack.key, nextTime, duration);
+      updateProgress(state.currentTrack.key, nextTime, duration);
       syncNowPlayingPanel();
       requestHostLiveSeekSync({ finalize: Boolean(command.finalize) });
       return;
@@ -9319,22 +8992,22 @@ async function requestCoHostSeekCurrentPlayback(positionRatio, { finalize = fals
 }
 
 function scheduleCoHostSeekFlush(delayMs = 0) {
-  if (cohostSeekCommandTimer !== null) return;
-  cohostSeekCommandTimer = setTimeout(() => {
-    cohostSeekCommandTimer = null;
+  if (state.cohostSeekCommandTimer !== null) return;
+  state.cohostSeekCommandTimer = setTimeout(() => {
+    state.cohostSeekCommandTimer = null;
     flushQueuedCoHostSeekCommands().catch(() => {});
   }, Math.max(0, delayMs));
 }
 
 function clearQueuedCoHostSeekCommands() {
-  if (cohostSeekCommandTimer !== null) {
-    clearTimeout(cohostSeekCommandTimer);
-    cohostSeekCommandTimer = null;
+  if (state.cohostSeekCommandTimer !== null) {
+    clearTimeout(state.cohostSeekCommandTimer);
+    state.cohostSeekCommandTimer = null;
   }
-  cohostSeekPendingRatio = null;
-  cohostSeekPendingFinalize = false;
-  cohostSeekCommandInFlight = false;
-  cohostSeekLastSentAt = 0;
+  state.cohostSeekPendingRatio = null;
+  state.cohostSeekPendingFinalize = false;
+  state.cohostSeekCommandInFlight = false;
+  state.cohostSeekLastSentAt = 0;
 }
 
 async function flushQueuedCoHostSeekCommands() {
@@ -9342,26 +9015,26 @@ async function flushQueuedCoHostSeekCommands() {
     clearQueuedCoHostSeekCommands();
     return;
   }
-  if (cohostSeekCommandInFlight) return;
-  if (cohostSeekPendingRatio === null) return;
+  if (state.cohostSeekCommandInFlight) return;
+  if (state.cohostSeekPendingRatio === null) return;
 
-  const ratioToSend = cohostSeekPendingRatio;
-  const shouldFinalize = cohostSeekPendingFinalize;
-  cohostSeekPendingRatio = null;
-  cohostSeekPendingFinalize = false;
-  cohostSeekCommandInFlight = true;
+  const ratioToSend = state.cohostSeekPendingRatio;
+  const shouldFinalize = state.cohostSeekPendingFinalize;
+  state.cohostSeekPendingRatio = null;
+  state.cohostSeekPendingFinalize = false;
+  state.cohostSeekCommandInFlight = true;
 
   try {
     await requestCoHostSeekCurrentPlayback(ratioToSend, { finalize: shouldFinalize });
-    cohostSeekLastSentAt = Date.now();
+    state.cohostSeekLastSentAt = Date.now();
   } catch (err) {
     console.error(err);
   } finally {
-    cohostSeekCommandInFlight = false;
+    state.cohostSeekCommandInFlight = false;
 
-    if (cohostSeekPendingRatio !== null && isCoHostRole()) {
-      const elapsed = Date.now() - cohostSeekLastSentAt;
-      const delay = cohostSeekPendingFinalize ? 0 : Math.max(0, COHOST_SEEK_COMMAND_INTERVAL_MS - elapsed);
+    if (state.cohostSeekPendingRatio !== null && isCoHostRole()) {
+      const elapsed = Date.now() - state.cohostSeekLastSentAt;
+      const delay = state.cohostSeekPendingFinalize ? 0 : Math.max(0, COHOST_SEEK_COMMAND_INTERVAL_MS - elapsed);
       scheduleCoHostSeekFlush(delay);
     }
   }
@@ -9372,21 +9045,21 @@ function queueCoHostSeekCurrentPlayback(positionRatio, { immediate = false, fina
   const normalizedRatio = normalizePlaybackSeekRatio(positionRatio);
   if (normalizedRatio === null) return false;
 
-  cohostSeekPendingRatio = normalizedRatio;
-  cohostSeekPendingFinalize = cohostSeekPendingFinalize || Boolean(finalize);
+  state.cohostSeekPendingRatio = normalizedRatio;
+  state.cohostSeekPendingFinalize = state.cohostSeekPendingFinalize || Boolean(finalize);
 
   if (immediate) {
-    if (cohostSeekCommandTimer !== null) {
-      clearTimeout(cohostSeekCommandTimer);
-      cohostSeekCommandTimer = null;
+    if (state.cohostSeekCommandTimer !== null) {
+      clearTimeout(state.cohostSeekCommandTimer);
+      state.cohostSeekCommandTimer = null;
     }
     flushQueuedCoHostSeekCommands().catch(() => {});
     return true;
   }
 
-  if (cohostSeekCommandInFlight) return true;
+  if (state.cohostSeekCommandInFlight) return true;
 
-  const elapsed = Date.now() - cohostSeekLastSentAt;
+  const elapsed = Date.now() - state.cohostSeekLastSentAt;
   const delay = Math.max(0, COHOST_SEEK_COMMAND_INTERVAL_MS - elapsed);
   scheduleCoHostSeekFlush(delay);
   return true;
@@ -9396,10 +9069,10 @@ function requestHostLiveSeekSync({ finalize = false } = {}) {
   if (!isHostRole()) return;
 
   const now = Date.now();
-  if (!finalize && now - lastHostLiveSeekSyncAt < HOST_LIVE_SEEK_SYNC_INTERVAL_MS) {
+  if (!finalize && now - state.lastHostLiveSeekSyncAt < HOST_LIVE_SEEK_SYNC_INTERVAL_MS) {
     return;
   }
-  lastHostLiveSeekSyncAt = now;
+  state.lastHostLiveSeekSyncAt = now;
   requestHostPlaybackSync(true);
 }
 
@@ -9407,18 +9080,18 @@ function requestHostPlaybackSync(force = false) {
   if (!isHostRole()) return;
 
   const now = Date.now();
-  if (!force && now - lastHostPlaybackSyncAt < HOST_PLAYBACK_SYNC_INTERVAL_MS) {
+  if (!force && now - state.lastHostPlaybackSyncAt < HOST_PLAYBACK_SYNC_INTERVAL_MS) {
     return;
   }
 
-  if (hostPlaybackSyncInFlight) {
-    hostPlaybackSyncQueued = true;
-    hostPlaybackSyncQueuedForce = hostPlaybackSyncQueuedForce || force;
+  if (state.hostPlaybackSyncInFlight) {
+    state.hostPlaybackSyncQueued = true;
+    state.hostPlaybackSyncQueuedForce = state.hostPlaybackSyncQueuedForce || force;
     return;
   }
 
-  hostPlaybackSyncInFlight = true;
-  lastHostPlaybackSyncAt = now;
+  state.hostPlaybackSyncInFlight = true;
+  state.lastHostPlaybackSyncAt = now;
   const snapshot = buildLocalPlaybackSnapshot();
 
   pushSharedPlaybackState(snapshot)
@@ -9426,21 +9099,20 @@ function requestHostPlaybackSync(force = false) {
       console.error('Не удалось синхронизировать playback хоста', err);
     })
     .finally(() => {
-      hostPlaybackSyncInFlight = false;
+      state.hostPlaybackSyncInFlight = false;
 
-      if (!hostPlaybackSyncQueued) return;
-      const queuedForce = hostPlaybackSyncQueuedForce;
-      hostPlaybackSyncQueued = false;
-      hostPlaybackSyncQueuedForce = false;
+      if (!state.hostPlaybackSyncQueued) return;
+      const queuedForce = state.hostPlaybackSyncQueuedForce;
+      state.hostPlaybackSyncQueued = false;
+      state.hostPlaybackSyncQueuedForce = false;
       requestHostPlaybackSync(queuedForce);
     });
 }
 
 async function fetchSharedLayoutState() {
-  const response = await fetch('/api/layout');
-  const data = await response.json().catch(() => ({}));
+  const { ok, data } = await api.fetchLayout();
 
-  if (!response.ok) {
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось получить конфигурацию плей-листов');
   }
@@ -9461,29 +9133,24 @@ async function fetchSharedLayoutState() {
 }
 
 async function pushSharedLayout({ renderOnApply = true } = {}) {
-  const payloadState = ensureFolderPlaylistsCoverage(layout, playlistNames, playlistMeta);
-  const payloadDapConfig = normalizeDapConfig(dapConfig, payloadState.layout.length, dapConfig);
-  const payloadAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, payloadDapConfig, payloadState.layout.length);
-  const payloadDsp = normalizePlaylistDspFlags(playlistDsp, payloadAutoplay, payloadState.layout.length);
+  const payloadState = ensureFolderPlaylistsCoverage(state.layout, state.playlistNames, state.playlistMeta);
+  const payloadDapConfig = normalizeDapConfig(state.dapConfig, payloadState.layout.length, state.dapConfig);
+  const payloadAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, payloadDapConfig, payloadState.layout.length);
+  const payloadDsp = normalizePlaylistDspFlags(state.playlistDsp, payloadAutoplay, payloadState.layout.length);
 
-  const response = await fetch('/api/layout', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({
-      layout: payloadState.layout,
-      playlistNames: payloadState.playlistNames,
-      playlistMeta: payloadState.playlistMeta,
-      playlistAutoplay: payloadAutoplay,
-      playlistDsp: payloadDsp,
-      dapConfig: payloadDapConfig,
-      trackTitleModesByTrack: serializeTrackTitleModesByTrack(),
-      clientId,
-      version: layoutVersion,
-    }),
+  const { ok, data } = await api.postLayout({
+    layout: payloadState.layout,
+    playlistNames: payloadState.playlistNames,
+    playlistMeta: payloadState.playlistMeta,
+    playlistAutoplay: payloadAutoplay,
+    playlistDsp: payloadDsp,
+    dapConfig: payloadDapConfig,
+    trackTitleModesByTrack: serializeTrackTitleModesByTrack(),
+    clientId,
+    version: state.layoutVersion,
   });
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  if (!ok) {
     const message = data && (data.error || data.message);
     throw new Error(message || 'Не удалось синхронизировать плей-листы');
   }
@@ -9501,91 +9168,38 @@ async function pushSharedLayout({ renderOnApply = true } = {}) {
   );
 }
 
-function clearLayoutStreamConnection() {
-  if (layoutStream) {
-    layoutStream.close();
-    layoutStream = null;
-  }
-  if (layoutStreamReconnectTimer !== null) {
-    clearTimeout(layoutStreamReconnectTimer);
-    layoutStreamReconnectTimer = null;
-  }
-}
 
-function scheduleLayoutStreamReconnect() {
-  if (layoutStreamReconnectTimer !== null) return;
-  layoutStreamReconnectTimer = setTimeout(() => {
-    layoutStreamReconnectTimer = null;
-    connectLayoutStream();
-  }, LAYOUT_STREAM_RETRY_MS);
-}
+
 
 function connectLayoutStream() {
-  if (typeof EventSource === 'undefined') return;
-  if (layoutStream) return;
-
-  const stream = new EventSource('/api/layout/stream');
-  layoutStream = stream;
-
-  stream.addEventListener('layout', (event) => {
-    let payload;
-    try {
-      payload = JSON.parse(event.data);
-    } catch (err) {
-      return;
-    }
-
-    if (!payload || !Array.isArray(payload.layout)) return;
-    applyIncomingLayoutState(
-      payload.layout,
-      payload.playlistNames,
-      payload.playlistMeta,
-      payload.playlistAutoplay,
-      payload.playlistDsp,
-      payload.dapConfig,
-      payload.trackTitleModesByTrack,
-      payload.version,
-      true,
-    );
+  createLayoutStream({
+    onLayout(payload) {
+      if (!payload || !Array.isArray(payload.layout)) return;
+      applyIncomingLayoutState(
+        payload.layout,
+        payload.playlistNames,
+        payload.playlistMeta,
+        payload.playlistAutoplay,
+        payload.playlistDsp,
+        payload.dapConfig,
+        payload.trackTitleModesByTrack,
+        payload.version,
+        true,
+      );
+    },
+    onPlayback(payload) {
+      applyIncomingHostPlaybackState(payload, true);
+    },
+    onAuthUsers(payload) {
+      applyIncomingAuthUsers(payload, { syncOwnRole: true });
+    },
+    onPlaybackCommand(payload) {
+      executeIncomingPlaybackCommand(payload).catch(() => {});
+    },
+    onError() {
+      scheduleReconnect(connectLayoutStream);
+    },
   });
-
-  stream.addEventListener('playback', (event) => {
-    let payload;
-    try {
-      payload = JSON.parse(event.data);
-    } catch (err) {
-      return;
-    }
-
-    applyIncomingHostPlaybackState(payload, true);
-  });
-
-  stream.addEventListener('auth-users', (event) => {
-    let payload;
-    try {
-      payload = JSON.parse(event.data);
-    } catch (err) {
-      return;
-    }
-    applyIncomingAuthUsers(payload, { syncOwnRole: true });
-  });
-
-  stream.addEventListener('playback-command', (event) => {
-    let payload;
-    try {
-      payload = JSON.parse(event.data);
-    } catch (err) {
-      return;
-    }
-    executeIncomingPlaybackCommand(payload).catch(() => {});
-  });
-
-  stream.onerror = () => {
-    if (layoutStream !== stream) return;
-    stream.close();
-    layoutStream = null;
-    scheduleLayoutStreamReconnect();
-  };
 }
 
 async function initializePlaybackState() {
@@ -9601,15 +9215,15 @@ async function initializeLayoutState() {
   const incomingDap = normalizeDapConfig(serverState.dapConfig, incomingLayout.length, DEFAULT_DAP_CONFIG);
   const incomingAutoplay = normalizePlaylistAutoplayWithDap(serverState.playlistAutoplay, incomingDap, incomingLayout.length);
   const incomingDsp = normalizePlaylistDspFlags(serverState.playlistDsp, incomingAutoplay, incomingLayout.length);
-  const incomingTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, availableFiles, '/audio');
+  const incomingTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, state.availableFiles, '/audio');
 
-  let nextLayout = normalizeLayoutForFiles(incomingLayout, availableFiles);
+  let nextLayout = normalizeLayoutForFiles(incomingLayout, state.availableFiles);
   let nextNames = normalizePlaylistNames(incomingNames, nextLayout.length);
   let nextMeta = normalizePlaylistMeta(incomingMeta, nextLayout.length);
   let nextDap = normalizeDapConfig(incomingDap, nextLayout.length, incomingDap);
   let nextAutoplay = normalizePlaylistAutoplayWithDap(incomingAutoplay, nextDap, nextLayout.length);
   let nextDsp = normalizePlaylistDspFlags(incomingDsp, nextAutoplay, nextLayout.length);
-  let nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(incomingTrackTitleModes, availableFiles, '/audio');
+  let nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(incomingTrackTitleModes, state.availableFiles, '/audio');
   let shouldPush =
     !layoutsEqual(incomingLayout, nextLayout) ||
     !playlistNamesEqual(incomingNames, nextNames, nextLayout.length) ||
@@ -9620,7 +9234,7 @@ async function initializeLayoutState() {
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
   if (isHostRole() && isServerLayoutEmpty(incomingLayout)) {
-    const legacyLayout = readLegacyLocalLayout(availableFiles);
+    const legacyLayout = readLegacyLocalLayout(state.availableFiles);
     if (legacyLayout && !layoutsEqual(legacyLayout, nextLayout)) {
       nextLayout = legacyLayout;
       nextNames = normalizePlaylistNames(nextNames, nextLayout.length);
@@ -9639,7 +9253,7 @@ async function initializeLayoutState() {
   nextDap = normalizeDapConfig(nextDap, nextLayout.length, nextDap);
   nextAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, nextDap, nextLayout.length);
   nextDsp = normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
-  nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(nextTrackTitleModes, availableFiles, '/audio');
+  nextTrackTitleModes = normalizeTrackTitleModesByTrackForFiles(nextTrackTitleModes, state.availableFiles, '/audio');
 
   shouldPush =
     shouldPush ||
@@ -9651,15 +9265,15 @@ async function initializeLayoutState() {
     !dapConfigEqual(incomingDap, nextDap, nextLayout.length) ||
     !trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
-  layout = nextLayout;
-  playlistNames = nextNames;
-  playlistMeta = nextMeta;
-  dapConfig = normalizeDapConfig(nextDap, layout.length, nextDap);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
-  trackTitleModesByTrack = nextTrackTitleModes;
+  state.layout = nextLayout;
+  state.playlistNames = nextNames;
+  state.playlistMeta = nextMeta;
+  state.dapConfig = normalizeDapConfig(nextDap, state.layout.length, nextDap);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
+  state.trackTitleModesByTrack = nextTrackTitleModes;
   saveTrackTitleModesByTrackSetting();
-  layoutVersion = serverState.version;
+  state.layoutVersion = serverState.version;
 
   if (shouldPush) {
     await pushSharedLayout({ renderOnApply: false });
@@ -9678,9 +9292,8 @@ async function resetPlaylists() {
   if (!confirmed) return;
 
   try {
-    const response = await fetch('/api/layout/reset', { method: 'POST' });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    const { ok, data } = await api.postLayoutReset();
+    if (!ok) {
       const message = data.error || data.message;
       throw new Error(message || 'Не удалось сбросить плей-листы');
     }
@@ -9694,18 +9307,18 @@ async function resetPlaylists() {
 }
 
 async function addPlaylist() {
-  layout = ensurePlaylists(layout);
-  layout.push([]);
-  playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(layout.length - 1)], layout.length);
-  playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], layout.length);
-  dapConfig = normalizeDapConfig(dapConfig, layout.length, dapConfig);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap([...playlistAutoplay, false], dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], playlistAutoplay, layout.length);
+  state.layout = ensurePlaylists(state.layout);
+  state.layout.push([]);
+  state.playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], state.layout.length);
+  state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...playlistAutoplay, false], state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], state.playlistAutoplay, state.layout.length);
   renderZones();
 
   try {
     await pushSharedLayout();
-    setStatus(`Добавлен плей-лист ${layout.length}.`);
+    setStatus(`Добавлен плей-лист ${state.layout.length}.`);
   } catch (err) {
     console.error(err);
     setStatus('Не удалось синхронизировать новый плей-лист.');
@@ -9713,19 +9326,19 @@ async function addPlaylist() {
 }
 
 async function renamePlaylist(playlistIndex, rawName) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
 
-  const nextNames = playlistNames.slice();
+  const nextNames = state.playlistNames.slice();
   nextNames[playlistIndex] = rawName;
-  const normalizedNames = normalizePlaylistNames(nextNames, layout.length);
+  const normalizedNames = normalizePlaylistNames(nextNames, state.layout.length);
 
-  if (playlistNamesEqual(playlistNames, normalizedNames, layout.length)) {
+  if (playlistNamesEqual(state.playlistNames, normalizedNames, state.layout.length)) {
     renderZones();
     return;
   }
 
-  const previousNames = playlistNames.slice();
-  playlistNames = normalizedNames;
+  const previousNames = state.playlistNames.slice();
+  state.playlistNames = normalizedNames;
   renderZones();
 
   try {
@@ -9733,7 +9346,7 @@ async function renamePlaylist(playlistIndex, rawName) {
     setStatus(`Переименован плей-лист ${playlistIndex + 1}.`);
   } catch (err) {
     console.error(err);
-    playlistNames = previousNames;
+    state.playlistNames = previousNames;
     renderZones();
     setStatus('Не удалось синхронизировать название плей-листа.');
   }
@@ -9745,41 +9358,41 @@ async function togglePlaylistAutoplay(playlistIndex) {
     return;
   }
 
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
   if (isDapPlaylistIndex(playlistIndex)) {
     setStatus('Для DAP-плей-листа автовоспроизведение всегда включено.');
     return;
   }
 
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
-  const nextAutoplay = playlistAutoplay.slice();
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
+  const nextAutoplay = state.playlistAutoplay.slice();
   nextAutoplay[playlistIndex] = !nextAutoplay[playlistIndex];
-  const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
-  const normalizedDsp = normalizePlaylistDspFlags(playlistDsp, normalizedAutoplay, layout.length);
+  const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
+  const normalizedDsp = normalizePlaylistDspFlags(state.playlistDsp, normalizedAutoplay, state.layout.length);
 
   if (
-    playlistAutoplayEqual(playlistAutoplay, normalizedAutoplay, layout.length) &&
-    playlistDspEqual(playlistDsp, normalizedDsp, normalizedAutoplay, layout.length)
+    playlistAutoplayEqual(state.playlistAutoplay, normalizedAutoplay, state.layout.length) &&
+    playlistDspEqual(state.playlistDsp, normalizedDsp, normalizedAutoplay, state.layout.length)
   ) {
     return;
   }
 
-  playlistAutoplay = normalizedAutoplay;
-  playlistDsp = normalizedDsp;
+  state.playlistAutoplay = normalizedAutoplay;
+  state.playlistDsp = normalizedDsp;
   renderZones();
 
   try {
     await pushSharedLayout();
     setStatus(
       `Автовоспроизведение для плей-листа ${playlistIndex + 1}: ${
-        playlistAutoplay[playlistIndex] ? 'включено' : 'выключено'
+        state.playlistAutoplay[playlistIndex] ? 'включено' : 'выключено'
       }.`,
     );
   } catch (err) {
     console.error(err);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
     renderZones();
     setStatus('Не удалось синхронизировать автопроигрывание плей-листа.');
   }
@@ -9791,28 +9404,28 @@ async function togglePlaylistDsp(playlistIndex) {
     return;
   }
 
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
-  if (!playlistAutoplay[playlistIndex]) {
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
+  if (!state.playlistAutoplay[playlistIndex]) {
     setStatus('DSP можно включить только при активном автопроигрывании.');
     return;
   }
 
-  const previousDsp = playlistDsp.slice();
-  const nextDsp = playlistDsp.slice();
+  const previousDsp = state.playlistDsp.slice();
+  const nextDsp = state.playlistDsp.slice();
   nextDsp[playlistIndex] = !nextDsp[playlistIndex];
-  const normalizedDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
+  const normalizedDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
 
-  if (playlistDspEqual(playlistDsp, normalizedDsp, playlistAutoplay, layout.length)) return;
+  if (playlistDspEqual(state.playlistDsp, normalizedDsp, state.playlistAutoplay, state.layout.length)) return;
 
-  playlistDsp = normalizedDsp;
+  state.playlistDsp = normalizedDsp;
   renderZones();
 
   try {
     await pushSharedLayout();
-    setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
+    setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${state.playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
   } catch (err) {
     console.error(err);
-    playlistDsp = previousDsp;
+    state.playlistDsp = previousDsp;
     renderZones();
     setStatus('Не удалось синхронизировать DSP плей-листа.');
   }
@@ -9824,23 +9437,23 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
     return false;
   }
 
-  const normalizedNextDap = normalizeDapConfig(nextDapConfig, layout.length, dapConfig);
-  const nextAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, normalizedNextDap, layout.length);
-  const nextDsp = normalizePlaylistDspFlags(playlistDsp, nextAutoplay, layout.length);
+  const normalizedNextDap = normalizeDapConfig(nextDapConfig, state.layout.length, state.dapConfig);
+  const nextAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, normalizedNextDap, state.layout.length);
+  const nextDsp = normalizePlaylistDspFlags(state.playlistDsp, nextAutoplay, state.layout.length);
 
   if (
-    dapConfigEqual(dapConfig, normalizedNextDap, layout.length) &&
-    playlistAutoplayEqual(playlistAutoplay, nextAutoplay, layout.length) &&
-    playlistDspEqual(playlistDsp, nextDsp, nextAutoplay, layout.length)
+    dapConfigEqual(state.dapConfig, normalizedNextDap, state.layout.length) &&
+    playlistAutoplayEqual(state.playlistAutoplay, nextAutoplay, state.layout.length) &&
+    playlistDspEqual(state.playlistDsp, nextDsp, nextAutoplay, state.layout.length)
   ) {
-    updateDapSettingsUi(currentRole);
+    updateDapSettingsUi(state.currentRole);
     return false;
   }
 
   const previousDap = { ...dapConfig };
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
-  const previousDapInterruptedPlaybackSnapshot = dapInterruptedPlaybackSnapshot
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
+  const previousDapInterruptedPlaybackSnapshot = state.dapInterruptedPlaybackSnapshot
     ? { ...dapInterruptedPlaybackSnapshot }
     : null;
   const previousDapEnabled = Boolean(previousDap.enabled);
@@ -9852,15 +9465,15 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
   const shouldStopDapPlaybackOnDisable =
     isDapEnabled(previousDap) &&
     !normalizedNextDap.enabled &&
-    ((currentTrack && currentAudio && !currentAudio.paused && isDapTrackContext(currentTrack, previousDap)) ||
+    ((state.currentTrack && state.currentAudio && !state.currentAudio.paused && isDapTrackContext(state.currentTrack, previousDap)) ||
       (isDspTransitionPlaybackActive() &&
-        dspTransitionPlayback &&
-        (isDapTrackContext(dspTransitionPlayback.fromTrack, previousDap) ||
-          isDapTrackContext(dspTransitionPlayback.toTrack, previousDap))));
+        state.dspTransitionPlayback &&
+        (isDapTrackContext(state.dspTransitionPlayback.fromTrack, previousDap) ||
+          isDapTrackContext(state.dspTransitionPlayback.toTrack, previousDap))));
 
-  dapConfig = normalizedNextDap;
-  playlistAutoplay = nextAutoplay;
-  playlistDsp = nextDsp;
+  state.dapConfig = normalizedNextDap;
+  state.playlistAutoplay = nextAutoplay;
+  state.playlistDsp = nextDsp;
   if (shouldResetNoSilenceArm) {
     disarmDapNoSilence();
     clearDapInterruptedPlaybackSnapshot();
@@ -9870,10 +9483,10 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
     requestHostPlaybackSync(true);
   }
   applyLiveVolumeToCurrentAudio();
-  if (dspTransitionPlayback && dspTransitionPlayback.audio) {
-    dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(dspTransitionPlayback.toTrack || null);
+  if (state.dspTransitionPlayback && state.dspTransitionPlayback.audio) {
+    state.dspTransitionPlayback.audio.volume = getEffectiveLiveVolume(state.dspTransitionPlayback.toTrack || null);
   }
-  updateDapSettingsUi(currentRole);
+  updateDapSettingsUi(state.currentRole);
   renderZones();
   updateVolumePresetsUi();
 
@@ -9888,11 +9501,11 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
     return true;
   } catch (err) {
     console.error(err);
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
-    dapInterruptedPlaybackSnapshot = previousDapInterruptedPlaybackSnapshot;
-    updateDapSettingsUi(currentRole);
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    state.dapInterruptedPlaybackSnapshot = previousDapInterruptedPlaybackSnapshot;
+    updateDapSettingsUi(state.currentRole);
     renderZones();
     updateVolumePresetsUi();
     setStatus('Не удалось синхронизировать DAP.');
@@ -9901,13 +9514,13 @@ async function syncDapConfig(nextDapConfig, { successMessage = 'DAP обновл
 }
 
 async function togglePlaylistDap(playlistIndex) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= layout.length) return;
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
 
-  const isCurrentlySelected = isDapPlaylistIndex(playlistIndex, dapConfig);
+  const isCurrentlySelected = isDapPlaylistIndex(playlistIndex, state.dapConfig);
   const nextDap = {
     enabled: !isCurrentlySelected,
     playlistIndex,
-    volumePercent: dapConfig.volumePercent,
+    volumePercent: state.dapConfig.volumePercent,
   };
 
   const statusMessage = isCurrentlySelected
@@ -9940,16 +9553,16 @@ function buildPlaylistCoverage(layoutState) {
 }
 
 function getLiveLockedPlaylistIndex() {
-  if (currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()) {
-    const currentPlaylistIndex = normalizePlaylistTrackIndex(currentTrack.playlistIndex);
+  if (state.currentTrack && typeof state.currentTrack.file === 'string' && state.currentTrack.file.trim()) {
+    const currentPlaylistIndex = normalizePlaylistTrackIndex(state.currentTrack.playlistIndex);
     if (currentPlaylistIndex !== null) {
       return currentPlaylistIndex;
     }
   }
 
   const hostPlaybackIndex =
-    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
-      ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
+    state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
+      ? normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
       : null;
 
   if (hostPlaybackIndex !== null) {
@@ -9962,23 +9575,23 @@ function getLiveLockedPlaylistIndex() {
 function syncPlaylistHeaderActiveState() {
   if (!zonesContainer) return;
 
-  const dapPlaylistIndex = getDapPlaylistIndex(dapConfig);
+  const dapPlaylistIndex = getDapPlaylistIndex(state.dapConfig);
   const localPlaybackIndex =
-    currentTrack && typeof currentTrack.file === 'string' && currentTrack.file.trim()
-      ? normalizePlaylistTrackIndex(currentTrack.playlistIndex)
+    state.currentTrack && typeof state.currentTrack.file === 'string' && state.currentTrack.file.trim()
+      ? normalizePlaylistTrackIndex(state.currentTrack.playlistIndex)
       : null;
-  const isLocalPlaybackPaused = Boolean(currentTrack && currentAudio && currentAudio.paused);
+  const isLocalPlaybackPaused = Boolean(state.currentTrack && state.currentAudio && state.currentAudio.paused);
   const hostPlaybackIndex =
-    hostPlaybackState && typeof hostPlaybackState.trackFile === 'string' && hostPlaybackState.trackFile.trim()
-      ? normalizePlaylistTrackIndex(hostPlaybackState.playlistIndex)
+    state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
+      ? normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
       : null;
   const livePlaybackIndex = isHostRole() ? localPlaybackIndex : hostPlaybackIndex;
-  const isLivePlaybackPaused = isHostRole() ? isLocalPlaybackPaused : Boolean(hostPlaybackState.paused);
+  const isLivePlaybackPaused = isHostRole() ? isLocalPlaybackPaused : Boolean(state.hostPlaybackState.paused);
   const dapPlaybackState = sanitizeIncomingDapPlaybackState(
     isHostRole()
-      ? buildDapPlaybackSnapshotForSync(dapConfig)
-      : hostPlaybackState && typeof hostPlaybackState === 'object'
-        ? hostPlaybackState.dapPlayback
+      ? buildDapPlaybackSnapshotForSync(state.dapConfig)
+      : state.hostPlaybackState && typeof state.hostPlaybackState === 'object'
+        ? state.hostPlaybackState.dapPlayback
         : null,
   );
   const dapPlaybackIndex = dapPlaybackState.trackFile
@@ -10022,8 +9635,8 @@ function syncPlaylistHeaderActiveState() {
 }
 
 function getPlaylistDeleteEligibility(playlistIndex) {
-  const normalizedLayout = ensurePlaylists(layout);
-  const normalizedMeta = normalizePlaylistMeta(playlistMeta, normalizedLayout.length);
+  const normalizedLayout = ensurePlaylists(state.layout);
+  const normalizedMeta = normalizePlaylistMeta(state.playlistMeta, normalizedLayout.length);
 
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= normalizedLayout.length) {
     return { canDelete: false, reason: 'Плей-лист не найден.' };
@@ -10033,7 +9646,7 @@ function getPlaylistDeleteEligibility(playlistIndex) {
   const isLinkedFolderPlaylist =
     metaEntry &&
     metaEntry.type === PLAYLIST_TYPE_FOLDER &&
-    availableFolders.some((folder) => folder.key === metaEntry.folderKey);
+    state.availableFolders.some((folder) => folder.key === metaEntry.folderKey);
   if (isLinkedFolderPlaylist) {
     return { canDelete: false, reason: 'Нельзя удалить авто-плей-лист папки, пока папка есть в /audio.' };
   }
@@ -10074,27 +9687,27 @@ async function deletePlaylist(playlistIndex) {
     return;
   }
 
-  const safeTitle = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+  const safeTitle = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
   const confirmed = window.confirm(`Удалить плей-лист "${safeTitle}"?`);
   if (!confirmed) {
     return;
   }
 
-  const previousLayout = ensurePlaylists(layout).map((playlist) => playlist.slice());
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
+  const previousLayout = ensurePlaylists(state.layout).map((playlist) => playlist.slice());
+  const previousNames = state.playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...dapConfig };
-  const previousCurrentTrackWasDap = isDapTrackContext(currentTrack, previousDap);
+  const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
-    currentTrack && typeof currentTrack === 'object'
+    state.currentTrack && typeof state.currentTrack === 'object'
       ? {
-          playlistIndex: currentTrack.playlistIndex,
-          playlistPosition: currentTrack.playlistPosition,
+          playlistIndex: state.currentTrack.playlistIndex,
+          playlistPosition: state.currentTrack.playlistPosition,
         }
       : null;
-  const previousDapInterruptedSnapshot = dapInterruptedPlaybackSnapshot
+  const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
     ? { ...dapInterruptedPlaybackSnapshot }
     : null;
 
@@ -10120,21 +9733,21 @@ async function deletePlaylist(playlistIndex) {
     }
   }
 
-  layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(nextNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(nextMeta, layout.length);
-  dapConfig = normalizeDapConfig(nextDapRaw, layout.length, nextDapRaw);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(nextDsp, playlistAutoplay, layout.length);
-  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
-  const currentTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+  state.layout = ensurePlaylists(nextLayout);
+  state.playlistNames = normalizePlaylistNames(nextNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(nextMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(nextDapRaw, state.layout.length, nextDapRaw);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
+  const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
+  const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
   });
   reconcileDapInterruptedSnapshotWithLayout();
-  if (currentTrackContextChanged && currentAudio) {
+  if (currentTrackContextChanged && state.currentAudio) {
     applyLiveVolumeToCurrentAudio();
   }
-  updateDapSettingsUi(currentRole);
+  updateDapSettingsUi(state.currentRole);
   renderZones();
   if (currentTrackContextChanged && isHostRole()) {
     requestHostPlaybackSync(true);
@@ -10145,26 +9758,26 @@ async function deletePlaylist(playlistIndex) {
     setStatus(`Плей-лист "${safeTitle}" удален.`);
   } catch (err) {
     console.error(err);
-    layout = previousLayout;
-    playlistNames = previousNames;
-    playlistMeta = previousMeta;
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
-    if (currentTrack && previousCurrentTrackContext) {
-      currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
-      currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
+    state.layout = previousLayout;
+    state.playlistNames = previousNames;
+    state.playlistMeta = previousMeta;
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    if (state.currentTrack && previousCurrentTrackContext) {
+      state.currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
+      state.currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
     }
-    dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
-    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(dapConfig) : null;
-    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(currentTrack, {
+    state.dapInterruptedPlaybackSnapshot = previousDapInterruptedSnapshot ? { ...previousDapInterruptedSnapshot } : null;
+    const rollbackPreferredIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
+    const rollbackTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
       preferredPlaylistIndex: rollbackPreferredIndex,
     });
     const rollbackSnapshotContextChanged = reconcileDapInterruptedSnapshotWithLayout();
-    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && currentAudio) {
+    if ((rollbackTrackContextChanged || rollbackSnapshotContextChanged) && state.currentAudio) {
       applyLiveVolumeToCurrentAudio();
     }
-    updateDapSettingsUi(currentRole);
+    updateDapSettingsUi(state.currentRole);
     renderZones();
     setStatus(err && err.message ? err.message : 'Не удалось синхронизировать удаление плей-листа.');
   }
@@ -10181,10 +9794,10 @@ function shouldVirtualizePlaylist(playlistFiles) {
 }
 
 function syncVirtualizedRenderedTrackState() {
-  if (currentTrack) {
-    const isPlaying = Boolean(currentAudio && !currentAudio.paused);
-    setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
-    setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
+  if (state.currentTrack) {
+    const isPlaying = Boolean(state.currentAudio && !state.currentAudio.paused);
+    setButtonPlaying(state.currentTrack.key, isPlaying, state.currentTrack);
+    setTrackPaused(state.currentTrack.key, !isPlaying && Boolean(state.currentAudio), state.currentTrack);
   }
   syncDapInterruptedTrackState();
   syncDspTransitionTrackHighlight();
@@ -10208,7 +9821,7 @@ function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
   let rafId = null;
 
   const renderWindow = () => {
-    if (!zoneBody.isConnected || draggingCard) return;
+    if (!zoneBody.isConnected || state.draggingCard) return;
 
     const viewportHeight = Math.max(1, zoneBody.clientHeight || PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX);
     const visibleRows = Math.max(1, Math.ceil(viewportHeight / PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX));
@@ -10254,36 +9867,36 @@ function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 
 function renderZones() {
   if (!zonesContainer) return;
-  zoneBodiesCache = [];
+  state.zoneBodiesCache = [];
   hideCollapsedPlaylistsOverlay();
   zonesContainer.innerHTML = '';
   resetTrackReferences();
-  layout = ensurePlaylists(layout);
-  playlistMeta = normalizePlaylistMeta(playlistMeta, layout.length);
+  state.layout = ensurePlaylists(state.layout);
+  state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
   if (isTouchPlaylistCollapseEnabled()) {
-    if (collapsedPlaylistLayoutLength !== null && collapsedPlaylistLayoutLength !== layout.length) {
-      collapsedPlaylistIndices.clear();
+    if (state.collapsedPlaylistLayoutLength !== null && state.collapsedPlaylistLayoutLength !== state.layout.length) {
+      state.collapsedPlaylistIndices.clear();
       hideCollapsedPlaylistsOverlay();
     }
-    collapsedPlaylistLayoutLength = layout.length;
-    pruneCollapsedPlaylistIndices(layout.length);
+    state.collapsedPlaylistLayoutLength = state.layout.length;
+    pruneCollapsedPlaylistIndices(state.layout.length);
   } else {
-    collapsedPlaylistLayoutLength = null;
-    if (collapsedPlaylistIndices.size) {
-      collapsedPlaylistIndices.clear();
+    state.collapsedPlaylistLayoutLength = null;
+    if (state.collapsedPlaylistIndices.size) {
+      state.collapsedPlaylistIndices.clear();
     }
     hideCollapsedPlaylistsOverlay();
     removeCollapsedPlaylistsHint();
   }
   applyDapConstraintsForCurrentLayout();
-  updateDapSettingsUi(currentRole);
-  const trackOccurrence = buildTrackOccurrenceMap(layout);
-  const renderOrder = buildPlaylistRenderOrder(layout.length, dapConfig);
+  updateDapSettingsUi(state.currentRole);
+  const trackOccurrence = buildTrackOccurrenceMap(state.layout);
+  const renderOrder = buildPlaylistRenderOrder(state.layout.length, state.dapConfig);
   const visibleRenderOrder = renderOrder.filter((playlistIndex) => !isPlaylistCollapsedForLocalView(playlistIndex));
 
   visibleRenderOrder.forEach((playlistIndex) => {
-    const playlistFiles = Array.isArray(layout[playlistIndex]) ? layout[playlistIndex] : [];
-    const metaEntry = playlistMeta[playlistIndex] || defaultPlaylistMeta();
+    const playlistFiles = Array.isArray(state.layout[playlistIndex]) ? state.layout[playlistIndex] : [];
+    const metaEntry = state.playlistMeta[playlistIndex] || defaultPlaylistMeta();
     const isDapPlaylist = isDapPlaylistIndex(playlistIndex);
     const zone = document.createElement('div');
     zone.className = 'zone';
@@ -10319,7 +9932,7 @@ function renderZones() {
     const titleInput = document.createElement('input');
     titleInput.type = 'text';
     titleInput.className = 'playlist-title-input';
-    titleInput.value = sanitizePlaylistName(playlistNames[playlistIndex], playlistIndex);
+    titleInput.value = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
     titleInput.maxLength = PLAYLIST_NAME_MAX_LENGTH;
     titleInput.addEventListener('change', () => {
       renamePlaylist(playlistIndex, titleInput.value);
@@ -10365,7 +9978,7 @@ function renderZones() {
     count.tabIndex = -1;
     count.setAttribute('aria-hidden', 'true');
     count.textContent = getPlaylistDurationText(playlistIndex);
-    playlistDurationLabelsByIndex.set(playlistIndex, count);
+    state.playlistDurationLabelsByIndex.set(playlistIndex, count);
 
     const headerMeta = document.createElement('div');
     headerMeta.className = 'playlist-header-meta';
@@ -10375,8 +9988,8 @@ function renderZones() {
     autoplayButton.className = 'playlist-header-control playlist-autoplay-toggle';
     autoplayButton.textContent = 'A';
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
-    const isAutoplayEnabled = Boolean(playlistAutoplay[playlistIndex]);
-    const isDspEnabled = Boolean(playlistDsp[playlistIndex]);
+    const isAutoplayEnabled = Boolean(state.playlistAutoplay[playlistIndex]);
+    const isDspEnabled = Boolean(state.playlistDsp[playlistIndex]);
     const hideInactiveIndicatorsOnSlave = isSlaveRole();
     const canManageAutoplay = isHostRole() && !isDapPlaylist;
     const canManageDsp = isHostRole() && isAutoplayEnabled;
@@ -10500,7 +10113,7 @@ function renderZones() {
     zone.append(header, body);
     zonesContainer.appendChild(zone);
   });
-  zoneBodiesCache = Array.from(zonesContainer.querySelectorAll('.zone-body'));
+  state.zoneBodiesCache = Array.from(zonesContainer.querySelectorAll('.zone-body'));
 
   syncPlaylistHeaderActiveState();
   syncCurrentTrackState();
@@ -10508,10 +10121,10 @@ function renderZones() {
 }
 
 function syncCurrentTrackState() {
-  if (currentTrack) {
-    const isPlaying = Boolean(currentAudio && !currentAudio.paused);
-    setButtonPlaying(currentTrack.key, isPlaying, currentTrack);
-    setTrackPaused(currentTrack.key, !isPlaying && Boolean(currentAudio), currentTrack);
+  if (state.currentTrack) {
+    const isPlaying = Boolean(state.currentAudio && !state.currentAudio.paused);
+    setButtonPlaying(state.currentTrack.key, isPlaying, state.currentTrack);
+    setTrackPaused(state.currentTrack.key, !isPlaying && Boolean(state.currentAudio), state.currentTrack);
   }
   syncDapInterruptedTrackState();
   syncDspTransitionTrackHighlight();
@@ -10522,8 +10135,8 @@ function syncCurrentTrackState() {
 }
 
 function syncDapInterruptedTrackState() {
-  const interruptedState = getVisibleDapInterruptedPlaybackDisplayState(dapConfig);
-  const previousState = syncedDapInterruptedUiState;
+  const interruptedState = getVisibleDapInterruptedPlaybackDisplayState(state.dapConfig);
+  const previousState = state.syncedDapInterruptedUiState;
 
   if (
     previousState &&
@@ -10533,14 +10146,14 @@ function syncDapInterruptedTrackState() {
   ) {
     setTrackPausedByContext(previousState.fileKey, false, previousState.playbackContext);
     refreshTrackDurationLabels(previousState.fileKey);
-    syncedDapInterruptedUiState = null;
+    state.syncedDapInterruptedUiState = null;
   }
 
   if (!interruptedState) return;
 
   setTrackPausedByContext(interruptedState.fileKey, true, interruptedState.playbackContext);
   refreshTrackDurationLabels(interruptedState.fileKey);
-  syncedDapInterruptedUiState = {
+  state.syncedDapInterruptedUiState = {
     fileKey: interruptedState.fileKey,
     playbackContext: normalizeTrackPlaybackContext(interruptedState.playbackContext),
   };
@@ -10548,7 +10161,7 @@ function syncDapInterruptedTrackState() {
 
 async function handleDrop(event, targetZoneIndex) {
   event.preventDefault();
-  if (!draggingCard || !dragContext) {
+  if (!state.draggingCard || !state.dragContext) {
     hideTrashDropzone();
     clearDragModeBadge();
     clearDragPreviewCard();
@@ -10569,13 +10182,13 @@ async function handleDrop(event, targetZoneIndex) {
     return;
   }
   targetZone.classList.remove('drag-over');
-  dragDropHandled = true;
+  state.dragDropHandled = true;
 
-  const previousLayout = cloneLayoutState(layout);
-  const previousNames = playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(playlistMeta);
-  const previousAutoplay = playlistAutoplay.slice();
-  const previousDsp = playlistDsp.slice();
+  const previousLayout = cloneLayoutState(state.layout);
+  const previousNames = state.playlistNames.slice();
+  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
+  const previousAutoplay = state.playlistAutoplay.slice();
+  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...dapConfig };
   const undoSnapshot = createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
@@ -10585,13 +10198,13 @@ async function handleDrop(event, targetZoneIndex) {
     dspState: previousDsp,
     dapState: previousDap,
   });
-  const sourceZoneIndex = Number.isInteger(dragContext.sourceZoneIndex) ? dragContext.sourceZoneIndex : null;
+  const sourceZoneIndex = Number.isInteger(state.dragContext.sourceZoneIndex) ? state.dragContext.sourceZoneIndex : null;
   const preservedScrollTops = capturePlaylistBodyScrollTops([sourceZoneIndex, targetZoneIndex]);
   const isCopyDrop = isActiveCopyDrag(event, targetZoneIndex);
   const targetBody = targetZone.querySelector('.zone-body');
   let relocatedTrackContext = null;
 
-  let nextLayout = cloneLayoutState(dragContext.snapshotLayout);
+  let nextLayout = cloneLayoutState(state.dragContext.snapshotLayout);
   if (!Array.isArray(nextLayout[targetZoneIndex])) {
     hideTrashDropzone();
     clearDragModeBadge();
@@ -10600,7 +10213,7 @@ async function handleDrop(event, targetZoneIndex) {
   }
 
   if (isCopyDrop) {
-    if (!dragContext.file) {
+    if (!state.dragContext.file) {
       hideTrashDropzone();
       clearDragModeBadge();
       clearDragPreviewCard();
@@ -10608,15 +10221,15 @@ async function handleDrop(event, targetZoneIndex) {
     }
     let insertIndex = resolveDropInsertIndex(targetBody, targetZoneIndex, nextLayout);
     insertIndex = Math.max(0, Math.min(insertIndex, nextLayout[targetZoneIndex].length));
-    nextLayout[targetZoneIndex].splice(insertIndex, 0, dragContext.file);
+    nextLayout[targetZoneIndex].splice(insertIndex, 0, state.dragContext.file);
     relocatedTrackContext = {
-      file: dragContext.file,
+      file: state.dragContext.file,
       playlistIndex: targetZoneIndex,
       playlistPosition: insertIndex,
     };
   } else {
     clearDragPreviewCard();
-    const resolution = resolveTrackIndexByContext(nextLayout, dragContext);
+    const resolution = resolveTrackIndexByContext(nextLayout, state.dragContext);
     if (resolution.playlistIndex < 0 || resolution.trackIndex < 0) {
       hideTrashDropzone();
       clearDragModeBadge();
@@ -10658,12 +10271,12 @@ async function handleDrop(event, targetZoneIndex) {
   hideTrashDropzone();
   clearDragModeBadge();
   clearDragPreviewCard();
-  layout = ensurePlaylists(nextLayout);
-  playlistNames = normalizePlaylistNames(previousNames, layout.length);
-  playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
-  dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-  playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-  playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+  state.layout = ensurePlaylists(nextLayout);
+  state.playlistNames = normalizePlaylistNames(previousNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(previousMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
   renderZones();
   restorePlaylistBodyScrollTops(preservedScrollTops);
   const undoActionId = relocatedTrackContext
@@ -10674,12 +10287,12 @@ async function handleDrop(event, targetZoneIndex) {
     setStatus(isCopyDrop ? 'Трек продублирован и синхронизирован.' : 'Плей-листы обновлены и синхронизированы.');
   } catch (err) {
     console.error(err);
-    layout = previousLayout;
-    playlistNames = normalizePlaylistNames(previousNames, layout.length);
-    playlistMeta = normalizePlaylistMeta(previousMeta, layout.length);
-    dapConfig = normalizeDapConfig(previousDap, layout.length, previousDap);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags(previousDsp, playlistAutoplay, layout.length);
+    state.layout = previousLayout;
+    state.playlistNames = normalizePlaylistNames(previousNames, state.layout.length);
+    state.playlistMeta = normalizePlaylistMeta(previousMeta, state.layout.length);
+    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
     renderZones();
     restorePlaylistBodyScrollTops(preservedScrollTops);
     if (undoActionId) {
@@ -10693,9 +10306,8 @@ async function handleDrop(event, targetZoneIndex) {
 
 async function fetchFileList(url, { logErrors = true } = {}) {
   try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('Не удалось получить список файлов');
-    const data = await res.json();
+    const { ok, data } = await api.fetchFileList(url);
+    if (!ok) throw new Error('Не удалось получить список файлов');
     return {
       files: Array.isArray(data.files) ? data.files : [],
       folders: Array.isArray(data.folders) ? data.folders : [],
@@ -10756,7 +10368,7 @@ function getTrackReloadStatusMessage(reason, fileCount) {
 }
 
 async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
-  clearLayoutStreamConnection();
+  closeLayoutStream();
   const catalogResult = audioResult || (await fetchFileList('/api/audio'));
   resetTrackReferences();
 
@@ -10767,16 +10379,16 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
     return;
   }
 
-  audioCatalogSignature = buildAudioCatalogSignature(catalogResult.files, catalogResult.folders);
-  availableFiles = catalogResult.files;
-  availableFolders = normalizeAudioFolderTemplates(catalogResult.folders, availableFiles);
-  keepKnownDurationsForFiles(availableFiles);
-  keepKnownTrackAttributesForFiles(availableFiles, '/audio');
-  keepTrackTitleModesForFiles(availableFiles, '/audio');
-  preloadTrackDurations(availableFiles);
-  preloadTrackAttributesForConfiguredTracks(availableFiles, '/audio');
+  state.audioCatalogSignature = buildAudioCatalogSignature(catalogResult.files, catalogResult.folders);
+  state.availableFiles = catalogResult.files;
+  state.availableFolders = normalizeAudioFolderTemplates(catalogResult.folders, state.availableFiles);
+  keepKnownDurationsForFiles(state.availableFiles);
+  keepKnownTrackAttributesForFiles(state.availableFiles, '/audio');
+  keepTrackTitleModesForFiles(state.availableFiles, '/audio');
+  preloadTrackDurations(state.availableFiles);
+  preloadTrackAttributesForConfiguredTracks(state.availableFiles, '/audio');
 
-  if (!availableFiles.length) {
+  if (!state.availableFiles.length) {
     renderEmpty();
     syncCurrentTrackState();
     setStatus('Файлы не найдены. Добавьте аудио в папку /audio и обновите страницу.');
@@ -10787,13 +10399,13 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
     await initializeLayoutState();
   } catch (err) {
     console.error(err);
-    const fallback = ensureFolderPlaylistsCoverage([availableFiles.filter((file) => !file.includes('/'))], [], []);
-    layout = normalizeLayoutForFiles(fallback.layout, availableFiles);
-    playlistNames = normalizePlaylistNames(fallback.playlistNames, layout.length);
-    playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, layout.length);
-    dapConfig = normalizeDapConfig(DEFAULT_DAP_CONFIG, layout.length, DEFAULT_DAP_CONFIG);
-    playlistAutoplay = normalizePlaylistAutoplayWithDap([], dapConfig, layout.length);
-    playlistDsp = normalizePlaylistDspFlags([], playlistAutoplay, layout.length);
+    const fallback = ensureFolderPlaylistsCoverage([state.availableFiles.filter((file) => !file.includes('/'))], [], []);
+    state.layout = normalizeLayoutForFiles(fallback.layout, state.availableFiles);
+    state.playlistNames = normalizePlaylistNames(fallback.playlistNames, state.layout.length);
+    state.playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, state.layout.length);
+    state.dapConfig = normalizeDapConfig(DEFAULT_DAP_CONFIG, state.layout.length, DEFAULT_DAP_CONFIG);
+    state.playlistAutoplay = normalizePlaylistAutoplayWithDap([], state.dapConfig, state.layout.length);
+    state.playlistDsp = normalizePlaylistDspFlags([], state.playlistAutoplay, state.layout.length);
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }
 
@@ -10801,27 +10413,27 @@ async function loadTracks({ reason = 'manual', audioResult = null } = {}) {
     await initializePlaybackState();
   } catch (err) {
     console.error(err);
-    hostPlaybackState = getDefaultHostPlaybackState();
-    setLivePlaybackVolume(hostPlaybackState.volume, { sync: false, announce: false });
+    state.hostPlaybackState = getDefaultHostPlaybackState();
+    setLivePlaybackVolume(state.hostPlaybackState.volume, { sync: false, announce: false });
   }
 
   renderZones();
   syncCurrentTrackState();
-  setStatus(getTrackReloadStatusMessage(reason, availableFiles.length));
+  setStatus(getTrackReloadStatusMessage(reason, state.availableFiles.length));
   ensureDapNoSilencePlayback({ reason: 'tracks-loaded' }).catch(() => {});
   connectLayoutStream();
 }
 
 function requestTracksReload({ reason = 'manual', audioResult = null } = {}) {
-  if (tracksReloadInFlight) {
-    tracksReloadQueued = true;
+  if (state.tracksReloadInFlight) {
+    state.tracksReloadQueued = true;
     if (reason === 'manual') {
-      tracksReloadQueuedReason = 'manual';
+      state.tracksReloadQueuedReason = 'manual';
     }
     return;
   }
 
-  tracksReloadInFlight = true;
+  state.tracksReloadInFlight = true;
   setPlaylistControlsLoading(true);
 
   loadTracks({ reason, audioResult })
@@ -10830,53 +10442,53 @@ function requestTracksReload({ reason = 'manual', audioResult = null } = {}) {
       setStatus('Не удалось обновить список треков.');
     })
     .finally(() => {
-      tracksReloadInFlight = false;
+      state.tracksReloadInFlight = false;
       setPlaylistControlsLoading(false);
 
-      if (!tracksReloadQueued) return;
-      const queuedReason = tracksReloadQueuedReason === 'manual' ? 'manual' : 'auto';
-      tracksReloadQueued = false;
-      tracksReloadQueuedReason = 'auto';
+      if (!state.tracksReloadQueued) return;
+      const queuedReason = state.tracksReloadQueuedReason === 'manual' ? 'manual' : 'auto';
+      state.tracksReloadQueued = false;
+      state.tracksReloadQueuedReason = 'auto';
       requestTracksReload({ reason: queuedReason });
     });
 }
 
 async function pollAudioCatalogChanges() {
-  if (audioCatalogPollInFlight || tracksReloadInFlight) return;
-  if (!audioCatalogSignature) return;
+  if (state.audioCatalogPollInFlight || state.tracksReloadInFlight) return;
+  if (!state.audioCatalogSignature) return;
 
-  audioCatalogPollInFlight = true;
+  state.audioCatalogPollInFlight = true;
   try {
     const catalogResult = await fetchFileList('/api/audio', { logErrors: false });
     if (!catalogResult.ok) return;
 
     const nextSignature = buildAudioCatalogSignature(catalogResult.files, catalogResult.folders);
-    if (nextSignature === audioCatalogSignature) return;
+    if (nextSignature === state.audioCatalogSignature) return;
 
     requestTracksReload({ reason: 'auto', audioResult: catalogResult });
   } finally {
-    audioCatalogPollInFlight = false;
+    state.audioCatalogPollInFlight = false;
   }
 }
 
 function startAudioCatalogAutoRefresh() {
   stopAudioCatalogAutoRefresh();
-  audioCatalogPollTimer = setInterval(() => {
+  state.audioCatalogPollTimer = setInterval(() => {
     pollAudioCatalogChanges();
   }, AUDIO_CATALOG_POLL_INTERVAL_MS);
 }
 
 function stopAudioCatalogAutoRefresh() {
-  if (audioCatalogPollTimer !== null) {
-    clearInterval(audioCatalogPollTimer);
-    audioCatalogPollTimer = null;
+  if (state.audioCatalogPollTimer !== null) {
+    clearInterval(state.audioCatalogPollTimer);
+    state.audioCatalogPollTimer = null;
   }
 }
 
 function resetFadeState() {
-  fadeCancel.cancelled = true;
-  fadeCancel = { cancelled: false };
-  overlayHandoffInFlight = false;
+  state.fadeCancel.cancelled = true;
+  state.fadeCancel = { cancelled: false };
+  state.overlayHandoffInFlight = false;
 }
 
 function fadeOutAndStop(audio, durationSeconds, curve, track) {
@@ -10897,16 +10509,16 @@ function fadeOutAndStop(audio, durationSeconds, curve, track) {
       setTrackPaused(track.key, false, track);
       stopProgressLoop();
       resetProgress(track.key);
-      if (currentTrack && currentTrack.key === track.key) {
-        currentAudio = null;
-        currentTrack = null;
+      if (state.currentTrack && state.currentTrack.key === track.key) {
+        state.currentAudio = null;
+        state.currentTrack = null;
       }
       syncNowPlayingPanel();
       requestHostPlaybackSync(true);
       return safeResolve();
     }
     resetFadeState();
-    const token = fadeCancel;
+    const token = state.fadeCancel;
     const start = performance.now();
     const startVolume = clampVolume(audio.volume);
 
@@ -10924,9 +10536,9 @@ function fadeOutAndStop(audio, durationSeconds, curve, track) {
         setTrackPaused(track.key, false, track);
         stopProgressLoop();
         resetProgress(track.key);
-        if (currentTrack && currentTrack.key === track.key) {
-          currentAudio = null;
-          currentTrack = null;
+        if (state.currentTrack && state.currentTrack.key === track.key) {
+          state.currentAudio = null;
+          state.currentTrack = null;
         }
         syncNowPlayingPanel();
         requestHostPlaybackSync(true);
@@ -10955,7 +10567,7 @@ function fadeOutAndPause(audio, durationSeconds, curve) {
     }
 
     resetFadeState();
-    const token = fadeCancel;
+    const token = state.fadeCancel;
     const start = performance.now();
     const startVolume = clampVolume(audio.volume);
 
@@ -11005,8 +10617,8 @@ function shouldTriggerAutoplayOverlayTransition(audio, track) {
   if (!audio || !track) return false;
   if (!isHostRole()) return false;
   if (audio.paused) return false;
-  if (currentAudio !== audio) return false;
-  if (!currentTrack || currentTrack.key !== track.key) return false;
+  if (state.currentAudio !== audio) return false;
+  if (!state.currentTrack || state.currentTrack.key !== track.key) return false;
   if (!Number.isFinite(audio.duration) || audio.duration <= 0) return false;
   if (!Number.isFinite(audio.currentTime) || audio.currentTime < 0) return false;
 
@@ -11057,8 +10669,8 @@ function createAudio(track) {
   });
 
   audio.addEventListener('ended', () => {
-    const isCurrentAudioInstance = currentAudio === audio;
-    const wasCurrentTrack = isCurrentAudioInstance && Boolean(currentTrack && currentTrack.key === key);
+    const isCurrentAudioInstance = state.currentAudio === audio;
+    const wasCurrentTrack = isCurrentAudioInstance && Boolean(state.currentTrack && state.currentTrack.key === key);
     if (!wasCurrentTrack) return;
 
     const overlayState = audio.dataset.autoplayOverlayState;
@@ -11066,8 +10678,8 @@ function createAudio(track) {
       overlayState === AUTOPLAY_OVERLAY_STATE_PENDING || overlayState === AUTOPLAY_OVERLAY_STATE_STARTED;
 
     if (!isAutoplayOverlayHandoff) {
-      currentAudio = null;
-      currentTrack = null;
+      state.currentAudio = null;
+      state.currentTrack = null;
       resetLiveDspNextTrackPreview();
     }
     setButtonPlaying(key, false, track);
@@ -11100,9 +10712,9 @@ function createAudio(track) {
     setTrackPaused(key, false, track);
     stopProgressLoop();
     resetProgress(key);
-    if (currentTrack && currentTrack.key === key) {
-      currentAudio = null;
-      currentTrack = null;
+    if (state.currentTrack && state.currentTrack.key === key) {
+      state.currentAudio = null;
+      state.currentTrack = null;
       resetLiveDspNextTrackPreview();
     }
     syncNowPlayingPanel();
@@ -11120,12 +10732,12 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
   const duration = overlaySeconds * 1000;
   const initialOldVolume = clampVolume(oldAudio ? oldAudio.volume : 1);
   resetFadeState();
-  const token = fadeCancel;
-  overlayHandoffInFlight = true;
+  const token = state.fadeCancel;
+  state.overlayHandoffInFlight = true;
 
   function step(now) {
     if (token.cancelled) {
-      overlayHandoffInFlight = false;
+      state.overlayHandoffInFlight = false;
       return;
     }
     const progress = Math.min((now - start) / duration, 1);
@@ -11137,7 +10749,7 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
     if (progress < 1) {
       requestAnimationFrame(step);
     } else {
-      overlayHandoffInFlight = false;
+      state.overlayHandoffInFlight = false;
       if (oldAudio) {
         oldAudio.pause();
         oldAudio.currentTime = 0;
@@ -11147,8 +10759,8 @@ function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, n
           setTrackPaused(oldTrack.key, false, oldTrack);
         }
       }
-      currentAudio = newAudio;
-      currentTrack = newTrack;
+      state.currentAudio = newAudio;
+      state.currentTrack = newTrack;
       setButtonPlaying(newTrack.key, true, newTrack);
       setTrackPaused(newTrack.key, false, newTrack);
       startProgressLoop(newAudio, newTrack.key);
@@ -11181,29 +10793,29 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     playlistIndex: resolvedPlaylistIndex,
     playlistPosition: resolvedPlaylistPosition,
   };
-  const isTargetDapTrack = isDapTrackContext(track, dapConfig);
+  const isTargetDapTrack = isDapTrackContext(track, state.dapConfig);
   if (isHostRole() && isTargetDapTrack && !Boolean(playbackContext && playbackContext.fromDapInterruptedResume)) {
     clearDapInterruptedPlaybackSnapshot();
   }
   const shouldArmDapNoSilence =
     isHostRole() &&
-    isDapEnabled(dapConfig) &&
+    isDapEnabled(state.dapConfig) &&
     isTargetDapTrack &&
     !Boolean(playbackContext && playbackContext.fromAutoplay) &&
     !Boolean(playbackContext && playbackContext.fromDapNoSilence);
   if (shouldArmDapNoSilence) {
-    armDapNoSilenceByPlaylistIndex(track.playlistIndex, dapConfig);
+    armDapNoSilenceByPlaylistIndex(track.playlistIndex, state.dapConfig);
   }
   const isSwitchingAwayFromDap =
     isHostRole() &&
     isDapNoSilenceActive() &&
-    currentTrack &&
-    currentAudio &&
-    !currentAudio.paused &&
-    isDapTrackContext(currentTrack) &&
+    state.currentTrack &&
+    state.currentAudio &&
+    !state.currentAudio.paused &&
+    isDapTrackContext(state.currentTrack) &&
     !isTargetDapTrack;
   if (isSwitchingAwayFromDap) {
-    captureDapInterruptedPlaybackSnapshot(currentTrack, currentAudio, dapConfig);
+    captureDapInterruptedPlaybackSnapshot(state.currentTrack, state.currentAudio, state.dapConfig);
   }
   const overlaySeconds = isSwitchingAwayFromDap ? 0 : baseOverlaySeconds;
   const targetVolume = getEffectiveLiveVolume(track);
@@ -11231,8 +10843,8 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     return;
   }
 
-  if (currentTrack && currentTrack.key === track.key && currentAudio && !currentAudio.paused) {
-    const paused = await pauseCurrentPlayback(track, currentAudio);
+  if (state.currentTrack && state.currentTrack.key === track.key && state.currentAudio && !state.currentAudio.paused) {
+    const paused = await pauseCurrentPlayback(track, state.currentAudio);
     if (paused) {
       await ensureDapNoSilencePlayback({ reason: 'track-toggle-pause' });
     }
@@ -11242,13 +10854,13 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     return;
   }
 
-  if (currentTrack && currentTrack.key === track.key && currentAudio && currentAudio.paused) {
+  if (state.currentTrack && state.currentTrack.key === track.key && state.currentAudio && state.currentAudio.paused) {
     try {
       setTrackPaused(track.key, false, track);
-      await currentAudio.play();
+      await state.currentAudio.play();
       setButtonPlaying(track.key, true, track);
-      startProgressLoop(currentAudio, track.key);
-      stopUnexpectedLiveAudios([currentAudio]);
+      startProgressLoop(state.currentAudio, track.key);
+      stopUnexpectedLiveAudios([state.currentAudio]);
       setStatus(`Играет: ${file}`);
       triggerLiveDspTransitionForTrack(track);
     } catch (err) {
@@ -11266,7 +10878,7 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
 
   const audio = createAudio(track);
   audio.dataset.filename = file;
-  audio.volume = overlaySeconds > 0 && currentAudio && !currentAudio.paused ? 0 : targetVolume;
+  audio.volume = overlaySeconds > 0 && state.currentAudio && !state.currentAudio.paused ? 0 : targetVolume;
 
   try {
     if (startAtSeconds !== null) {
@@ -11274,32 +10886,32 @@ async function handlePlay(file, button, basePath = '/audio', playbackContext = {
     }
     await audio.play();
 
-    if (currentAudio && !currentAudio.paused && overlaySeconds > 0) {
-      const oldTrack = currentTrack;
+    if (state.currentAudio && !state.currentAudio.paused && overlaySeconds > 0) {
+      const oldTrack = state.currentTrack;
       setButtonPlaying(track.key, true, track);
       setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
       triggerLiveDspTransitionForTrack(track);
-      applyOverlay(currentAudio, audio, targetVolume, overlaySeconds, curve, track, oldTrack);
+      applyOverlay(state.currentAudio, audio, targetVolume, overlaySeconds, curve, track, oldTrack);
     } else {
-      if (currentAudio) {
-        currentAudio.pause();
+      if (state.currentAudio) {
+        state.currentAudio.pause();
         if (!isSwitchingAwayFromDap) {
-          currentAudio.currentTime = 0;
+          state.currentAudio.currentTime = 0;
         }
-        if (currentTrack) {
-          setButtonPlaying(currentTrack.key, false, currentTrack);
+        if (state.currentTrack) {
+          setButtonPlaying(state.currentTrack.key, false, state.currentTrack);
           if (isSwitchingAwayFromDap) {
-            setTrackPausedByContext(currentTrack.key, true, currentTrack);
+            setTrackPausedByContext(state.currentTrack.key, true, state.currentTrack);
           } else {
-            setTrackPaused(currentTrack.key, false, currentTrack);
+            setTrackPaused(state.currentTrack.key, false, state.currentTrack);
           }
         }
       }
       resetFadeState();
       audio.volume = targetVolume;
-      currentAudio = audio;
-      currentTrack = track;
+      state.currentAudio = audio;
+      state.currentTrack = track;
       setButtonPlaying(track.key, true, track);
       setTrackPaused(track.key, false, track);
       startProgressLoop(audio, track.key);
@@ -11404,10 +11016,9 @@ async function stopServer({ requireConfirmation = true } = {}) {
   setStatus('Останавливаем сервер...');
 
   try {
-    const res = await fetch('/api/shutdown', { method: 'POST' });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      const message = data && (data.error || data.message);
+    const { ok: shutdownOk, data: shutdownData } = await api.postShutdown();
+    if (!shutdownOk) {
+      const message = shutdownData && (shutdownData.error || shutdownData.message);
       throw new Error(message || 'Request failed');
     }
     setStatus('Сервер останавливается. Окно будет закрыто.');
@@ -11444,20 +11055,19 @@ async function logoutClient({ requireConfirmation = true } = {}) {
   setStatus('Отключаемся...');
 
   try {
-    const res = await fetch('/api/auth/logout', { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
+    const { ok, data } = await api.postAuthLogout();
+    if (!ok) {
       const message = data && (data.error || data.message);
       throw new Error(message || 'Не удалось отключиться');
     }
 
-    clearLayoutStreamConnection();
+    closeLayoutStream();
     stopHostProgressLoop();
     stopCoHostProgressLoop();
     stopAndClearLocalPlayback();
 
-    currentUser = null;
-    authUsersState = [];
+    state.currentUser = null;
+    state.authUsersState = [];
     applyRoleUi(ROLE_SLAVE);
     setStatus('Вы отключены. Войдите снова.');
 
@@ -11491,12 +11101,12 @@ function initServerControls() {
 }
 
 function initDapSettingsControls() {
-  updateDapSettingsUi(currentRole);
+  updateDapSettingsUi(state.currentRole);
 
   if (dapEnabledToggle) {
     dapEnabledToggle.addEventListener('change', async () => {
       if (!isHostRole()) {
-        updateDapSettingsUi(currentRole);
+        updateDapSettingsUi(state.currentRole);
         setStatus('DAP может менять только хост.');
         return;
       }
@@ -11504,13 +11114,13 @@ function initDapSettingsControls() {
       const enabled = Boolean(dapEnabledToggle.checked);
       let playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect ? dapPlaylistSelect.value : null);
       if (playlistIndex === null) {
-        playlistIndex = normalizePlaylistTrackIndex(dapConfig.playlistIndex);
+        playlistIndex = normalizePlaylistTrackIndex(state.dapConfig.playlistIndex);
       }
-      if (playlistIndex === null && layout.length > 0) {
+      if (playlistIndex === null && state.layout.length > 0) {
         playlistIndex = 0;
       }
       if (enabled && playlistIndex === null) {
-        updateDapSettingsUi(currentRole);
+        updateDapSettingsUi(state.currentRole);
         setStatus('Выберите плей-лист для DAP.');
         return;
       }
@@ -11519,8 +11129,8 @@ function initDapSettingsControls() {
         enabled,
         playlistIndex,
         volumePercent: normalizeDapVolumePercent(
-          dapVolumePercentInput ? dapVolumePercentInput.value : dapConfig.volumePercent,
-          dapConfig.volumePercent,
+          dapVolumePercentInput ? dapVolumePercentInput.value : state.dapConfig.volumePercent,
+          state.dapConfig.volumePercent,
         ),
       };
       const message = enabled
@@ -11533,14 +11143,14 @@ function initDapSettingsControls() {
   if (dapPlaylistSelect) {
     dapPlaylistSelect.addEventListener('change', async () => {
       if (!isHostRole()) {
-        updateDapSettingsUi(currentRole);
+        updateDapSettingsUi(state.currentRole);
         setStatus('DAP может менять только хост.');
         return;
       }
 
       const playlistIndex = normalizePlaylistTrackIndex(dapPlaylistSelect.value);
       if (playlistIndex === null) {
-        updateDapSettingsUi(currentRole);
+        updateDapSettingsUi(state.currentRole);
         setStatus('Выберите плей-лист для DAP.');
         return;
       }
@@ -11549,8 +11159,8 @@ function initDapSettingsControls() {
         enabled: true,
         playlistIndex,
         volumePercent: normalizeDapVolumePercent(
-          dapVolumePercentInput ? dapVolumePercentInput.value : dapConfig.volumePercent,
-          dapConfig.volumePercent,
+          dapVolumePercentInput ? dapVolumePercentInput.value : state.dapConfig.volumePercent,
+          state.dapConfig.volumePercent,
         ),
       };
       await syncDapConfig(nextDap, { successMessage: `DAP переключен на плей-лист ${playlistIndex + 1}.` });
@@ -11560,16 +11170,16 @@ function initDapSettingsControls() {
   if (dapVolumePercentInput) {
     dapVolumePercentInput.addEventListener('change', async () => {
       if (!isHostRole()) {
-        updateDapSettingsUi(currentRole);
+        updateDapSettingsUi(state.currentRole);
         setStatus('DAP может менять только хост.');
         return;
       }
 
-      const nextVolumePercent = normalizeDapVolumePercent(dapVolumePercentInput.value, dapConfig.volumePercent);
+      const nextVolumePercent = normalizeDapVolumePercent(dapVolumePercentInput.value, state.dapConfig.volumePercent);
       dapVolumePercentInput.value = String(nextVolumePercent);
       const nextDap = {
-        enabled: Boolean(dapConfig.enabled),
-        playlistIndex: normalizePlaylistTrackIndex(dapConfig.playlistIndex),
+        enabled: Boolean(state.dapConfig.enabled),
+        playlistIndex: normalizePlaylistTrackIndex(state.dapConfig.playlistIndex),
         volumePercent: nextVolumePercent,
       };
       await syncDapConfig(nextDap, { successMessage: `Громкость DAP: ${nextVolumePercent}%.` });
@@ -11631,7 +11241,7 @@ async function onVolumePresetButtonClick(event) {
     setStatus(`Live громкость: ${formatVolumePresetLabel(targetVolume)}.`);
   } catch (err) {
     console.error(err);
-    const fallbackVolume = normalizeLiveVolumePreset(hostPlaybackState.volume, previousVolume);
+    const fallbackVolume = normalizeLiveVolumePreset(state.hostPlaybackState.volume, previousVolume);
     setLivePlaybackVolume(fallbackVolume, { sync: false, announce: false });
     setStatus(err && err.message ? err.message : 'Не удалось изменить live-громкость.');
   }
@@ -11648,7 +11258,7 @@ function initVolumePresetControls() {
   }
 
   if (showVolumePresetsToggle) {
-    showVolumePresetsToggle.checked = showVolumePresetsEnabled;
+    showVolumePresetsToggle.checked = state.showVolumePresetsEnabled;
     showVolumePresetsToggle.addEventListener('change', async () => {
       const nextEnabled = Boolean(showVolumePresetsToggle.checked);
       if (!nextEnabled && !canDisableVolumePresetsSetting()) {
@@ -11668,7 +11278,7 @@ function initVolumePresetControls() {
         return;
       }
 
-      const previousEnabled = showVolumePresetsEnabled;
+      const previousEnabled = state.showVolumePresetsEnabled;
       setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
       try {
         await requestCoHostSetVolumePresetsVisibility(nextEnabled);
@@ -11699,12 +11309,12 @@ function initLiveSeekControls() {
   }
 
   if (liveSeekEnabledToggle) {
-    liveSeekEnabledToggle.checked = liveSeekEnabled;
+    liveSeekEnabledToggle.checked = state.liveSeekEnabled;
     liveSeekEnabledToggle.addEventListener('change', async () => {
       const nextEnabled = Boolean(liveSeekEnabledToggle.checked);
 
       if (!isHostRole()) {
-        setLiveSeekEnabled(hostPlaybackState.allowLiveSeek, { persist: false, sync: false });
+        setLiveSeekEnabled(state.hostPlaybackState.allowLiveSeek, { persist: false, sync: false });
         setStatus('Только хост может менять настройку live seek.');
         return;
       }
@@ -11761,11 +11371,10 @@ async function loadVersion() {
   if (!appVersionEl) return;
 
   try {
-    const res = await fetch('/api/version');
-    if (!res.ok) {
+    const { ok, data } = await api.fetchVersion();
+    if (!ok) {
       throw new Error('Request failed');
     }
-    const data = await res.json();
     if (data && data.version) {
       appVersionEl.textContent = `Версия: ${data.version}`;
     } else {
@@ -11816,21 +11425,21 @@ function setUpdateStatus(text) {
 function startShutdownCountdown(seconds = 20) {
   let remaining = Math.max(0, Math.floor(seconds));
 
-  if (shutdownCountdownTimer) {
-    clearTimeout(shutdownCountdownTimer);
-    shutdownCountdownTimer = null;
+  if (state.shutdownCountdownTimer) {
+    clearTimeout(state.shutdownCountdownTimer);
+    state.shutdownCountdownTimer = null;
   }
 
   const tick = () => {
     if (remaining <= 0) {
-      shutdownCountdownTimer = null;
+      state.shutdownCountdownTimer = null;
       stopServer({ requireConfirmation: false });
       return;
     }
 
     setUpdateMessage(`Приложение будет закрыто через ${remaining} с.`);
     remaining -= 1;
-    shutdownCountdownTimer = setTimeout(tick, 1000);
+    state.shutdownCountdownTimer = setTimeout(tick, 1000);
   };
 
   tick();
@@ -11848,11 +11457,10 @@ async function checkForUpdates() {
   const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
 
   try {
-    const res = await fetch(`/api/update/check?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`);
-    if (!res.ok) {
+    const { ok, data } = await api.fetchUpdateCheck(allowPrerelease);
+    if (!ok) {
       throw new Error('Request failed');
     }
-    const data = await res.json();
 
     if (data && data.currentVersion && appVersionEl) {
       appVersionEl.textContent = `Версия: ${data.currentVersion}`;
@@ -11887,16 +11495,15 @@ async function applyUpdate() {
   const allowPrerelease = Boolean(isHostRole() && allowPrereleaseInput && allowPrereleaseInput.checked);
 
   try {
-    const res = await fetch(`/api/update/apply?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`, { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
+    const { ok, data } = await api.postUpdateApply(allowPrerelease);
 
-    if (!res.ok) {
+    if (!ok) {
       const message = data && (data.error || data.message);
       throw new Error(message || 'Не удалось выполнить запрос');
     }
 
     const message = (data && (data.message || data.error)) || 'Обновление выполнено';
-    const installed = res.ok && typeof message === 'string' && message.toLowerCase().includes('обновление установлено');
+    const installed = ok && typeof message === 'string' && message.toLowerCase().includes('обновление установлено');
 
     if (installed) {
       setUpdateStatus('Обновление установлено.');
@@ -11945,7 +11552,7 @@ async function bootstrap() {
     document.removeEventListener('fullscreenchange', updateTouchFullscreenToggleState);
     document.removeEventListener('webkitfullscreenchange', updateTouchFullscreenToggleState);
     stopAudioCatalogAutoRefresh();
-    clearLayoutStreamConnection();
+    closeLayoutStream();
     stopHostProgressLoop();
     stopCoHostProgressLoop();
     clearQueuedCoHostSeekCommands();
@@ -11960,7 +11567,7 @@ async function bootstrap() {
     hideCollapsedPlaylistsOverlay();
     removeCollapsedPlaylistsHint();
     clearTouchCopyHold();
-    if (touchCopyDragActive) {
+    if (state.touchCopyDragActive) {
       cleanupTouchCopyDrag({ restoreLayout: false });
     }
   });
