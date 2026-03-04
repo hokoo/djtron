@@ -15,10 +15,10 @@ import {
   ROLE_HOST,
 } from '/shared/playback/index.js';
 
-import * as api from './modules/api.js';
-import { LayoutSync } from './modules/layout-sync.js';
-import { ConfigManager } from './modules/config.js';
-import { legacyToPlaylists, playlistsToLegacy, legacyDapToM2A } from './modules/model-converter.js';
+import * as api from './api-domain.js';
+import { LayoutSync } from './layout-sync.js';
+import { ConfigManager } from './config-manager.js';
+import { legacyToPlaylists, playlistsToLegacy, legacyDapToM2A } from './model-converter.js';
 
 // --- Domain Layer ---
 const audioEngine = new BrowserAudioEngine();

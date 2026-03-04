@@ -1,62 +1,124 @@
-/**
- * API client — fetch wrappers for server endpoints.
- * All methods return Promises. Errors throw with message from server.
- */
+// public/modules/api.js — all fetch wrappers
 
-const BASE = '';
-
-async function request(method, url, body = null) {
-  const opts = {
-    method,
-    credentials: 'include',
-    headers: {},
-  };
-  if (body !== null) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(`${BASE}${url}`, opts);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-  const ct = res.headers.get('content-type') || '';
-  return ct.includes('json') ? res.json() : res.text();
+async function request(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok, status: response.status, data };
 }
 
-// --- Auth ---
-export const authSession = () => request('GET', '/api/auth/session');
-export const authLogin = (password) => request('POST', '/api/auth/login', { password });
-export const authLogout = () => request('POST', '/api/auth/logout');
-export const authClients = () => request('GET', '/api/auth/clients');
-export const authSetRole = (clientId, role) => request('POST', '/api/auth/clients/role', { clientId, role });
-export const authDisconnect = (clientId) => request('POST', '/api/auth/clients/disconnect', { clientId });
+export async function fetchConfig() {
+  return request('/api/config');
+}
 
-// --- Layout ---
-export const layoutGet = () => request('GET', '/api/layout');
-export const layoutUpdate = (state) => request('POST', '/api/layout', state);
-export const layoutReset = () => request('POST', '/api/layout/reset');
+export async function fetchAuthSession() {
+  return request('/api/auth/session');
+}
 
-// --- Playback ---
-export const playbackGet = () => request('GET', '/api/playback');
-export const playbackUpdate = (state) => request('POST', '/api/playback', state);
-export const playbackCommand = (cmd) => request('POST', '/api/playback/command', cmd);
+export async function postAuthLogin(username, password) {
+  return request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ username, password }),
+  });
+}
 
-// --- Audio catalog ---
-export const audioCatalog = () => request('GET', '/api/audio');
-export const audioAttributes = (file) => request('GET', `/api/audio/attributes?file=${encodeURIComponent(file)}`);
+export async function postAuthLogout() {
+  return request('/api/auth/logout', { method: 'POST' });
+}
 
-// --- DSP transitions ---
-export const dspTransitionsGet = (playlistId) => request('GET', `/api/dsp/transitions?playlist=${encodeURIComponent(playlistId || '')}`);
-export const dspTransitionsPost = (data) => request('POST', '/api/dsp/transitions', data);
+export async function fetchAuthClients() {
+  return request('/api/auth/clients');
+}
 
-// --- Config ---
-export const configGet = () => request('GET', '/api/config');
+export async function postAuthClientRole(username, role) {
+  return request('/api/auth/clients/role', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ username, role }),
+  });
+}
 
-// --- Version / Update ---
-export const versionGet = () => request('GET', '/api/version');
-export const updateCheck = () => request('GET', '/api/update/check');
-export const updateApply = () => request('POST', '/api/update/apply');
+export async function postAuthClientDisconnect(username) {
+  return request('/api/auth/clients/disconnect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ username }),
+  });
+}
 
-// --- Shutdown ---
-export const shutdown = () => request('POST', '/api/shutdown');
+export async function fetchLayout() {
+  return request('/api/layout');
+}
+
+export async function postLayout(body) {
+  return request('/api/layout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function postLayoutReset() {
+  return request('/api/layout/reset', { method: 'POST' });
+}
+
+export async function fetchPlayback() {
+  return request('/api/playback');
+}
+
+export async function postPlayback(body) {
+  return request('/api/playback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function postPlaybackCommand(command) {
+  return request('/api/playback/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(command),
+  });
+}
+
+export async function fetchDspStatus(limit) {
+  const qs = Number.isFinite(limit) ? `?limit=${limit}` : '';
+  return request(`/api/dsp/transitions${qs}`);
+}
+
+export async function fetchDspTransitionPair(fromFile, toFile) {
+  return request(`/api/dsp/transitions?from=${encodeURIComponent(fromFile)}&to=${encodeURIComponent(toFile)}`);
+}
+
+export async function postDspTransitions(body) {
+  return request('/api/dsp/transitions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchAudioAttributes(file) {
+  return request(`/api/audio/attributes?file=${encodeURIComponent(file)}`);
+}
+
+export async function fetchFileList(url) {
+  return request(url);
+}
+
+export async function fetchVersion() {
+  return request('/api/version');
+}
+
+export async function fetchUpdateCheck(allowPrerelease) {
+  return request(`/api/update/check?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`);
+}
+
+export async function postUpdateApply(allowPrerelease) {
+  return request(`/api/update/apply?allowPrerelease=${allowPrerelease ? 'true' : 'false'}`, { method: 'POST' });
+}
+
+export async function postShutdown() {
+  return request('/api/shutdown', { method: 'POST' });
+}
