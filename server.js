@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { version: appVersion } = require('./package.json');
 const { PlaybackCommandBus } = require('./lib/playback/commandBus');
 const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
@@ -22,6 +23,7 @@ const { getContentType, isInside, safeResolve, serveAudioWithRange, createPublic
 const { normalizeAudioRelativePath } = require('./src/audio/metadata');
 const { isServerRequest, parseCookies, safeCompareStrings, resolveLocalNetworkIp } = require('./src/http/network');
 const { readJsonBody } = require('./src/http/body');
+const execFileAsync = promisify(execFile);
 
 const configManager = new ConfigManager({ appDir: __dirname });
 configManager.materialize();
@@ -683,6 +685,7 @@ function handleAudioFile(req, res, pathname, baseResolved, basePrefix) {
 }
 
 const handlePublic = createPublicHandler({ publicDirResolved: PUBLIC_DIR_RESOLVED });
+const handleSharedStatic = createPublicHandler({ publicDirResolved: path.join(__dirname, 'shared') });
 
 
 // --- HttpRouter + AuthSessionManager wiring ---
@@ -719,6 +722,7 @@ router.register('GET', '/api/update/check', handleUpdateCheck, { auth: 'session'
 router.register('POST', '/api/update/apply', handleUpdateApply, { auth: 'session' });
 
 // Wildcard routes (catch-alls, order matters: more specific first)
+router.register('GET|HEAD', '/shared/*', (req, res) => handleSharedStatic(req, res, req.pathname.replace(/^\/shared/, '')), { auth: 'none' });
 router.register('GET|HEAD', '/api/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'session' });
 router.register('GET|HEAD', '/audio/*', (req, res) => handleAudioFile(req, res, req.pathname, AUDIO_DIR_RESOLVED, '/audio/'), { auth: 'session', authResponseKind: 'text' });
 router.register('GET|HEAD', '/*', (req, res) => handlePublic(req, res, req.pathname), { auth: 'none' });
