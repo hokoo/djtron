@@ -13,6 +13,7 @@ const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
 const { HttpRouter } = require('./src/http/HttpRouter');
 const { AuthService } = require('./src/auth/AuthService');
 const { createAuthGuard } = require('./src/http/middlewares/auth');
+const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
 const { DspJobManager } = require('./src/dsp/DspJobManager');
 
 function loadEnvFile() {
@@ -1269,6 +1270,20 @@ function keepLayoutStreamAlive() {
 let sharedLayoutState = loadPersistedLayoutState();
 let sharedPlaybackState = getDefaultPlaybackState();
 setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
+
+const playbackGateway = new PlaybackGateway({
+  getState: () => sharedPlaybackState,
+  setState: (next) => { sharedPlaybackState = next; },
+  sanitizeState: sanitizePlaybackState,
+  serializeState: serializePlaybackState,
+  buildPayload: buildPlaybackPayload,
+  broadcastUpdate: broadcastPlaybackUpdate,
+  sanitizeCommand: sanitizePlaybackCommand,
+  sanitizeClientId,
+  sanitizeSessionRole,
+  commandBus: livePlaybackCommandBus,
+  ROLE_HOST,
+});
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -4793,7 +4808,7 @@ function handleApiLayoutReset(req, res) {
 }
 
 function handleApiPlaybackGet(req, res) {
-  sendJson(res, 200, buildPlaybackPayload(null));
+  sendJson(res, 200, playbackGateway.getSnapshot(null));
 }
 
 async function handleApiLayoutUpdate(req, res) {
@@ -4934,16 +4949,8 @@ async function handleApiPlaybackUpdate(req, res) {
     return;
   }
 
-  const nextState = sanitizePlaybackState(body);
-  const sourceClientId = sanitizeClientId(body.clientId);
-  const hasChanged = serializePlaybackState(nextState) !== serializePlaybackState(sharedPlaybackState);
-
-  if (hasChanged) {
-    sharedPlaybackState = nextState;
-    broadcastPlaybackUpdate(sourceClientId);
-  }
-
-  sendJson(res, 200, buildPlaybackPayload(sourceClientId));
+  const result = playbackGateway.updateState(body);
+  sendJson(res, 200, result.payload);
 }
 
 function handleApiLayoutStream(req, res) {
@@ -5139,36 +5146,8 @@ async function handleApiPlaybackCommand(req, res) {
     return;
   }
 
-  const command = sanitizePlaybackCommand(body);
-  if (!command) {
-    sendJson(res, 400, { error: 'Некорректная команда воспроизведения' });
-    return;
-  }
-
-  const payload = {
-    ...command,
-    issuedAt: Date.now(),
-    sourceClientId: sanitizeClientId(body.clientId),
-    sourceRole: auth.isServer ? ROLE_HOST : sanitizeSessionRole(auth.role),
-    sourceUsername: auth.username,
-  };
-  const commandResult = await livePlaybackCommandBus.dispatch(
-    {
-      sourceRole: payload.sourceRole,
-      commandType: payload.type,
-      isServer: auth.isServer,
-    },
-    payload,
-  );
-  if (!commandResult.ok) {
-    sendJson(res, 403, { error: commandResult.message });
-    return;
-  }
-
-  sendJson(res, 200, {
-    ok: true,
-    command: payload,
-  });
+  const result = await playbackGateway.dispatchCommand(body, auth);
+  sendJson(res, result.status, result.ok ? result.payload : { error: result.error });
 }
 
 async function handleUpdateCheck(req, res) {
