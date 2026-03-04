@@ -92,6 +92,67 @@ class PlaybackGateway {
 
     return { ok: true, status: 200, payload: { ok: true, command: payload } };
   }
+  /**
+   * Sanitize a raw playback command into a normalized form.
+   * @param {object} rawCommand
+   * @param {object} layoutService - LayoutStateService instance for volume/seek helpers
+   * @returns {object|null}
+   */
+  static sanitizePlaybackCommand(rawCommand, layoutService) {
+    if (!rawCommand || typeof rawCommand !== 'object') return null;
+
+    const commandType = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
+    if (commandType === 'toggle-current') {
+      return { type: 'toggle-current' };
+    }
+
+    if (commandType === 'set-volume') {
+      const volume = layoutService.normalizeLiveVolumePreset(rawCommand.volume, null);
+      if (volume === null) return null;
+      return { type: 'set-volume', volume };
+    }
+
+    if (commandType === 'set-volume-presets-visible') {
+      return {
+        type: 'set-volume-presets-visible',
+        showVolumePresets: Boolean(rawCommand.showVolumePresets),
+      };
+    }
+
+    if (commandType === 'set-live-seek-enabled') {
+      return {
+        type: 'set-live-seek-enabled',
+        allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
+      };
+    }
+
+    if (commandType === 'seek-current') {
+      const { LayoutStateService } = require('../layout/LayoutStateService');
+      const positionRatio = LayoutStateService.normalizePlaybackSeekRatio(rawCommand.positionRatio);
+      if (positionRatio === null) return null;
+      return {
+        type: 'seek-current',
+        positionRatio,
+        finalize: Boolean(rawCommand.finalize),
+      };
+    }
+
+    if (commandType !== 'play-track') {
+      return null;
+    }
+
+    const { LayoutStateService } = require('../layout/LayoutStateService');
+    const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
+    if (!file) return null;
+
+    return {
+      type: 'play-track',
+      file,
+      basePath: '/audio',
+      playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistIndex),
+      playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistPosition),
+    };
+  }
 }
 
 module.exports = { PlaybackGateway };

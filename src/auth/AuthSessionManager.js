@@ -377,6 +377,73 @@ class AuthSessionManager {
   get sessions() {
     return this._sessions;
   }
+
+  // --- Password / authentication ---
+
+  static extractPasswordFromFile(content) {
+    if (typeof content !== 'string') return null;
+    const lines = content.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      return trimmed;
+    }
+    return null;
+  }
+
+  async getUserPassword(username) {
+    const { USERS_DIR } = this._config;
+    const { fs: _fs, path: _path, isInside } = this._deps;
+    const candidates = [`${username}.txt`, username];
+
+    for (const fileName of candidates) {
+      const fullPath = _path.resolve(USERS_DIR, fileName);
+      if (!isInside(USERS_DIR, fullPath)) continue;
+
+      try {
+        const stat = await _fs.promises.stat(fullPath);
+        if (!stat.isFile()) continue;
+        const raw = await _fs.promises.readFile(fullPath, 'utf8');
+        return AuthSessionManager.extractPasswordFromFile(raw);
+      } catch (err) {
+        if (err.code !== 'ENOENT') {
+          console.error('Failed to read user file', fullPath, err);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Authenticate a user by username and password.
+   * @param {string} username
+   * @param {string} password
+   * @returns {Promise<{ success: boolean, status?: number, token?: string, role?: string, username?: string, error?: string }>}
+   */
+  async authenticateUser(username, password) {
+    const normalizedUsername = this._normalizeUsername(username);
+    const passwordStr = typeof password === 'string' ? password : '';
+
+    if (!normalizedUsername || passwordStr.length === 0) {
+      return { success: false, status: 400, error: 'Укажите логин и пароль' };
+    }
+
+    try {
+      const expectedPassword = await this.getUserPassword(normalizedUsername);
+      const isValid = expectedPassword !== null && this._deps.safeCompareStrings(expectedPassword, passwordStr);
+
+      if (!isValid) {
+        return { success: false, status: 401, error: 'Неверный логин или пароль' };
+      }
+
+      const session = this.createSession(normalizedUsername);
+      return { success: true, token: session.token, role: session.role, username: normalizedUsername };
+    } catch (err) {
+      console.error('Auth login failed', err);
+      return { success: false, status: 500, error: 'Ошибка авторизации' };
+    }
+  }
 }
 
 module.exports = { AuthSessionManager };
