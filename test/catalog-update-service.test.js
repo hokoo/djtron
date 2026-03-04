@@ -20,32 +20,66 @@ function createCatalogService(overrides = {}) {
 }
 
 function createUpdateService(overrides = {}) {
-  const defaults = {
-    currentVersion: '1.0.0',
-    getLatestReleaseInfo: async () => ({
-      latestVersion: '1.1.0',
-      htmlUrl: 'https://github.com/test/releases/1.1.0',
-      isPrerelease: false,
-      releaseName: 'v1.1.0',
-      tarballUrl: 'https://github.com/test/tarball/1.1.0',
-    }),
-    compareVersions: (a, b) => {
-      const pa = a.split('.').map(Number);
-      const pb = b.split('.').map(Number);
-      for (let i = 0; i < 3; i++) {
-        if (pa[i] > pb[i]) return 1;
-        if (pa[i] < pb[i]) return -1;
-      }
-      return 0;
+  const mockFs = {
+    existsSync: () => false,
+    readFileSync: () => '{}',
+    writeFileSync: () => {},
+    createWriteStream: () => {
+      const { PassThrough } = require('node:stream');
+      return new PassThrough();
     },
-    downloadFile: async () => {},
-    extractTarball: async () => {},
-    findExtractedRoot: async () => '/tmp/extracted',
-    copyReleaseContents: async () => {},
-    appDir: '/app',
-    parseBooleanParam: (url, name) => url.searchParams.get(name) === 'true',
+    unlink: (_p, cb) => cb && cb(),
+    promises: {
+      mkdtemp: async () => '/tmp/test-update',
+      readdir: async () => [],
+      cp: async () => {},
+    },
   };
-  return new UpdateService({ ...defaults, ...overrides });
+
+  const config = {
+    currentVersion: overrides.currentVersion || '1.0.0',
+    appDir: overrides.appDir || '/app',
+    UPDATE_STATE_PATH: '/tmp/test-update-state.json',
+    GITHUB_API_URL: 'https://api.github.com/repos/test/test',
+    githubToken: null,
+    UPDATE_CACHE_WINDOW_MS: 0,
+    appVersion: overrides.currentVersion || '1.0.0',
+  };
+
+  const deps = {
+    fs: mockFs,
+    path: require('node:path'),
+    os: require('node:os'),
+    https: {},
+    execFile: (_cmd, _args, cb) => cb && cb(null, '', ''),
+  };
+
+  const svc = new UpdateService({ config, deps });
+
+  // Override internal methods for test isolation
+  svc._getLatestReleaseInfo = overrides.getLatestReleaseInfo || (async () => ({
+    latestVersion: '1.1.0',
+    htmlUrl: 'https://github.com/test/releases/1.1.0',
+    isPrerelease: false,
+    releaseName: 'v1.1.0',
+    tarballUrl: 'https://github.com/test/tarball/1.1.0',
+  }));
+  svc._compareVersions = overrides.compareVersions || ((a, b) => {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if (pa[i] > pb[i]) return 1;
+      if (pa[i] < pb[i]) return -1;
+    }
+    return 0;
+  });
+  svc._downloadFile = overrides.downloadFile || (async () => {});
+  svc._extractTarball = overrides.extractTarball || (async () => {});
+  svc._findExtractedRoot = overrides.findExtractedRoot || (async () => '/tmp/extracted');
+  svc._copyReleaseContents = overrides.copyReleaseContents || (async () => {});
+  svc._parseBooleanParam = overrides.parseBooleanParam || ((url, name) => url.searchParams.get(name) === 'true');
+
+  return svc;
 }
 
 describe('AudioCatalogService', () => {
