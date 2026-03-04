@@ -13,6 +13,8 @@ const { canDispatchLivePlaybackCommand } = require('./lib/playback/rolePolicy');
 const { HttpRouter } = require('./src/http/HttpRouter');
 const { AuthService } = require('./src/auth/AuthService');
 const { createAuthGuard } = require('./src/http/middlewares/auth');
+const { PlaybackGateway } = require('./src/playback/PlaybackGateway');
+const { DspJobManager } = require('./src/dsp/DspJobManager');
 const { AudioCatalogService } = require('./src/catalog/AudioCatalogService');
 const { UpdateService } = require('./src/update/UpdateService');
 
@@ -1270,6 +1272,20 @@ function keepLayoutStreamAlive() {
 let sharedLayoutState = loadPersistedLayoutState();
 let sharedPlaybackState = getDefaultPlaybackState();
 setInterval(keepLayoutStreamAlive, 25 * 1000).unref();
+
+const playbackGateway = new PlaybackGateway({
+  getState: () => sharedPlaybackState,
+  setState: (next) => { sharedPlaybackState = next; },
+  sanitizeState: sanitizePlaybackState,
+  serializeState: serializePlaybackState,
+  buildPayload: buildPlaybackPayload,
+  broadcastUpdate: broadcastPlaybackUpdate,
+  sanitizeCommand: sanitizePlaybackCommand,
+  sanitizeClientId,
+  sanitizeSessionRole,
+  commandBus: livePlaybackCommandBus,
+  ROLE_HOST,
+});
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -4187,10 +4203,22 @@ function getDspTransitionByPair(fromFile, toFile, options = {}) {
   return { ok: true, error: null, item: existing, descriptor };
 }
 
+const dspJobManager = new DspJobManager({
+  enqueue: enqueueDspTransition,
+  getTransitionByPair: getDspTransitionByPair,
+  getQueueSummary: buildDspQueueSummary,
+  serializeTransition: serializeDspTransition,
+  getTransitions: () => dspTransitions.values(),
+  scheduleFromLayout: scheduleDspTransitionsFromLayout,
+  resolveOutputPath: resolveDspTransitionOutputPathById,
+  buildOutputUrl: buildDspTransitionOutputUrl,
+  ensureReady: ensureFfmpegAvailable,
+  enabled: DSP_ENABLED,
+  STATUS_READY: DSP_STATUS_READY,
+});
+
 async function handleApiDspTransitionsGet(req, res, requestUrl) {
-  if (DSP_ENABLED) {
-    await ensureFfmpegAvailable();
-  }
+  await dspJobManager.ensureReady();
 
   const fromFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('from') : null;
   const toFile = requestUrl && requestUrl.searchParams ? requestUrl.searchParams.get('to') : null;
@@ -4204,7 +4232,7 @@ async function handleApiDspTransitionsGet(req, res, requestUrl) {
   }
 
   if (fromFile && toFile) {
-    const lookup = getDspTransitionByPair(fromFile, toFile, {});
+    const lookup = dspJobManager.getTransitionByPair(fromFile, toFile, {});
     if (!lookup.ok) {
       sendJson(res, 400, { error: lookup.error || 'Некорректный запрос transition.' });
       return;
@@ -4212,73 +4240,30 @@ async function handleApiDspTransitionsGet(req, res, requestUrl) {
 
     let inferredReadyTransition = null;
     if (!lookup.item && lookup.descriptor && fs.existsSync(lookup.descriptor.outputPath)) {
-      inferredReadyTransition = {
-        id: lookup.descriptor.id,
-        fromFile: lookup.descriptor.fromFile,
-        toFile: lookup.descriptor.toFile,
-        status: DSP_STATUS_READY,
-        transitionSeconds: lookup.descriptor.transitionSeconds,
-        sliceSeconds: lookup.descriptor.sliceSeconds,
-        attempts: 0,
-        error: null,
-        outputUrl: buildDspTransitionOutputUrl(lookup.descriptor.id),
-        outputFileName: lookup.descriptor.outputFileName,
-        outputSizeBytes: null,
-        sourceMtimeMs: null,
-        createdAt: null,
-        updatedAt: null,
-        lastRequestedAt: null,
-      };
+      inferredReadyTransition = dspJobManager.buildInferredReadyStub(lookup.descriptor);
     }
 
     const transition =
       lookup.item ||
       inferredReadyTransition ||
-      (lookup.descriptor
-        ? {
-            id: lookup.descriptor.id,
-            fromFile: lookup.descriptor.fromFile,
-            toFile: lookup.descriptor.toFile,
-            status: 'missing',
-            transitionSeconds: lookup.descriptor.transitionSeconds,
-            sliceSeconds: lookup.descriptor.sliceSeconds,
-            attempts: 0,
-            error: null,
-            outputUrl: null,
-            outputFileName: null,
-            outputSizeBytes: null,
-            sourceMtimeMs: null,
-            createdAt: null,
-            updatedAt: null,
-            lastRequestedAt: null,
-          }
-        : null);
+      (lookup.descriptor ? dspJobManager.buildMissingTransitionStub(lookup.descriptor) : null);
 
     sendJson(res, 200, {
-      transition: lookup.item ? serializeDspTransition(lookup.item) : transition,
-      queue: buildDspQueueSummary(),
+      transition: lookup.item ? dspJobManager.serializeTransition(lookup.item) : transition,
+      queue: dspJobManager.getQueueSummary(),
     });
     return;
   }
 
-  const transitions = Array.from(dspTransitions.values())
-    .sort((left, right) => {
-      const leftUpdated = Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
-      const rightUpdated = Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
-      return rightUpdated - leftUpdated;
-    })
-    .slice(0, limit)
-    .map((item) => serializeDspTransition(item))
-    .filter(Boolean);
-
+  const transitions = dspJobManager.listTransitions(limit);
   sendJson(res, 200, {
     transitions,
-    queue: buildDspQueueSummary(),
+    queue: dspJobManager.getQueueSummary(),
   });
 }
 
 async function handleApiDspTransitionsPost(req, res) {
-  if (!DSP_ENABLED) {
+  if (!dspJobManager.enabled) {
     sendJson(res, 503, { error: 'DSP отключен в extra.conf (dsp_enabled=false).' });
     return;
   }
@@ -4301,114 +4286,38 @@ async function handleApiDspTransitionsPost(req, res) {
     return;
   }
 
-  const force = Boolean(body.force);
-  const transitionSeconds = body.transitionSeconds;
-  const sliceSeconds = body.sliceSeconds;
-  const priority = body.priority === 'high' ? 'high' : 'normal';
-  const sourceLabel = typeof body.source === 'string' && body.source.trim() ? body.source.trim().slice(0, 64) : 'api';
-  const requestTransitions = [];
+  const result = dspJobManager.enqueueBatch(body, {
+    layout: sharedLayoutState.layout,
+    playlistDsp: sharedLayoutState.playlistDsp,
+  });
 
-  if (typeof body.from === 'string' || typeof body.to === 'string') {
-    if (typeof body.from !== 'string' || typeof body.to !== 'string') {
-      sendJson(res, 400, { error: 'Для одиночного transition нужны оба поля: from и to.' });
-      return;
-    }
-    requestTransitions.push({ fromFile: body.from, toFile: body.to });
-  }
-
-  if (Array.isArray(body.transitions)) {
-    for (const entry of body.transitions) {
-      if (!entry || typeof entry !== 'object') continue;
-      if (typeof entry.from !== 'string' || typeof entry.to !== 'string') continue;
-      requestTransitions.push({ fromFile: entry.from, toFile: entry.to });
-      if (requestTransitions.length >= 2000) break;
-    }
-  }
-
-  const includeLayout = Boolean(body.fromLayout) || requestTransitions.length === 0;
-  if (includeLayout) {
-    const layoutTransitions = collectAdjacentLayoutTransitions(sharedLayoutState.layout, sharedLayoutState.playlistDsp);
-    layoutTransitions.forEach((entry) => requestTransitions.push(entry));
-  }
-
-  if (!requestTransitions.length) {
-    sendJson(res, 400, { error: 'Не переданы transition-пары для обработки.' });
+  if (result.error) {
+    sendJson(res, 400, { error: result.error });
     return;
   }
 
-  const dedupe = new Set();
-  const accepted = [];
-  requestTransitions.forEach((entry) => {
-    const fromFile = typeof entry.fromFile === 'string' ? entry.fromFile.trim() : '';
-    const toFile = typeof entry.toFile === 'string' ? entry.toFile.trim() : '';
-    if (!fromFile || !toFile) return;
-    const key = `${fromFile}\n${toFile}`;
-    if (dedupe.has(key)) return;
-    dedupe.add(key);
-    accepted.push({ fromFile, toFile });
-  });
-
-  let created = 0;
-  let enqueued = 0;
-  let failed = 0;
-  const transitions = [];
-
-  accepted.forEach((entry) => {
-    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
-      force,
-      transitionSeconds,
-      sliceSeconds,
-      source: sourceLabel,
-      priority,
-    });
-    if (!result.ok || !result.item) {
-      failed += 1;
-      return;
-    }
-    if (result.created) created += 1;
-    if (result.enqueued) enqueued += 1;
-    transitions.push(serializeDspTransition(result.item));
-  });
-
-  sendJson(res, 200, {
-    request: {
-      totalPairs: requestTransitions.length,
-      uniquePairs: accepted.length,
-      force,
-      priority,
-      source: sourceLabel,
-      fromLayout: includeLayout,
-    },
-    summary: {
-      created,
-      enqueued,
-      failed,
-    },
-    queue: buildDspQueueSummary(),
-    transitions: transitions.slice(0, 200),
-  });
+  sendJson(res, 200, result);
   appendDspLog('transition.request', {
-    source: sourceLabel,
-    force,
-    priority,
-    fromLayout: includeLayout,
-    totalPairs: requestTransitions.length,
-    uniquePairs: accepted.length,
-    created,
-    enqueued,
-    failed,
+    source: result.request.source,
+    force: result.request.force,
+    priority: result.request.priority,
+    fromLayout: result.request.fromLayout,
+    totalPairs: result.request.totalPairs,
+    uniquePairs: result.request.uniquePairs,
+    created: result.summary.created,
+    enqueued: result.summary.enqueued,
+    failed: result.summary.failed,
   });
 }
 
 function handleApiDspTransitionFile(req, res, pathname) {
-  const prefix = '/api/dsp/transitions/file/';
-  const id = pathname.startsWith(prefix) ? pathname.slice(prefix.length).trim() : '';
+  const id = req.params && req.params.id ? req.params.id.trim() : '';
   if (!/^[a-f0-9]{40}$/.test(id)) {
     sendJson(res, 400, { error: 'Некорректный transition id' });
     return;
   }
 
-  const filePath = resolveDspTransitionOutputPathById(id);
+  const filePath = dspJobManager.resolveOutputPath(id);
   if (!filePath) {
     sendJson(res, 403, { error: 'Forbidden' });
     return;
@@ -4913,7 +4822,7 @@ function handleApiLayoutReset(req, res) {
 
   persistLayoutState(sharedLayoutState);
   broadcastLayoutUpdate(null);
-  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
     source: 'layout-update',
     priority: 'normal',
     force: false,
@@ -4924,7 +4833,7 @@ function handleApiLayoutReset(req, res) {
 }
 
 function handleApiPlaybackGet(req, res) {
-  sendJson(res, 200, buildPlaybackPayload(null));
+  sendJson(res, 200, playbackGateway.getSnapshot(null));
 }
 
 async function handleApiLayoutUpdate(req, res) {
@@ -5035,7 +4944,7 @@ async function handleApiLayoutUpdate(req, res) {
     };
     persistLayoutState(sharedLayoutState);
     broadcastLayoutUpdate(sourceClientId);
-    scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+    dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
       source: 'layout-update',
       priority: 'normal',
       force: false,
@@ -5065,16 +4974,8 @@ async function handleApiPlaybackUpdate(req, res) {
     return;
   }
 
-  const nextState = sanitizePlaybackState(body);
-  const sourceClientId = sanitizeClientId(body.clientId);
-  const hasChanged = serializePlaybackState(nextState) !== serializePlaybackState(sharedPlaybackState);
-
-  if (hasChanged) {
-    sharedPlaybackState = nextState;
-    broadcastPlaybackUpdate(sourceClientId);
-  }
-
-  sendJson(res, 200, buildPlaybackPayload(sourceClientId));
+  const result = playbackGateway.updateState(body);
+  sendJson(res, 200, result.payload);
 }
 
 function handleApiLayoutStream(req, res) {
@@ -5270,36 +5171,8 @@ async function handleApiPlaybackCommand(req, res) {
     return;
   }
 
-  const command = sanitizePlaybackCommand(body);
-  if (!command) {
-    sendJson(res, 400, { error: 'Некорректная команда воспроизведения' });
-    return;
-  }
-
-  const payload = {
-    ...command,
-    issuedAt: Date.now(),
-    sourceClientId: sanitizeClientId(body.clientId),
-    sourceRole: auth.isServer ? ROLE_HOST : sanitizeSessionRole(auth.role),
-    sourceUsername: auth.username,
-  };
-  const commandResult = await livePlaybackCommandBus.dispatch(
-    {
-      sourceRole: payload.sourceRole,
-      commandType: payload.type,
-      isServer: auth.isServer,
-    },
-    payload,
-  );
-  if (!commandResult.ok) {
-    sendJson(res, 403, { error: commandResult.message });
-    return;
-  }
-
-  sendJson(res, 200, {
-    ok: true,
-    command: payload,
-  });
+  const result = await playbackGateway.dispatchCommand(body, auth);
+  sendJson(res, result.status, result.ok ? result.payload : { error: result.error });
 }
 
 async function handleUpdateCheck(req, res) {
@@ -5448,7 +5321,7 @@ if (DSP_ENABLED) {
     noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
     tempoCacheItems: dspTempoCache.size,
   });
-  scheduleDspTransitionsFromLayout(sharedLayoutState.layout, {
+  dspJobManager.scheduleFromLayout(sharedLayoutState.layout, {
     source: 'startup',
     priority: 'normal',
     force: false,
