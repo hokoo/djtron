@@ -287,16 +287,10 @@ export function applyIncomingLayoutState(
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(normalizedAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(normalizedDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = normalizedTrackTitleModes;
-  state.playlists = Array.isArray(nextPlaylists)
-    ? nextPlaylists
-    : buildPlaylistsFromLegacyShape({
-        layout: state.layout,
-        playlistNames: state.playlistNames,
-        playlistMeta: state.playlistMeta,
-        playlistAutoplay: state.playlistAutoplay,
-        playlistDsp: state.playlistDsp,
-        trackTitleModesByTrack: normalizedTrackTitleModes,
-      });
+  if (!Array.isArray(nextPlaylists)) {
+    throw new Error('Неверный формат playlists в layout payload.');
+  }
+  state.playlists = nextPlaylists;
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? _deps.getDapPlaylistIndex(state.dapConfig) : null;
   const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
@@ -1115,53 +1109,25 @@ function buildM2ADapConfigFromLegacy(dapConfig, playlists) {
 
 function normalizeServerLayoutPayload(data) {
   const payload = data && typeof data === 'object' ? data : {};
-
-  if (Array.isArray(payload.playlists)) {
-    const playlists = payload.playlists;
-    const legacy = buildLegacyShapeFromPlaylists(playlists, payload.trackTitleModesByTrack);
-    const explicitTrackTitleModes =
-      payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
-        ? payload.trackTitleModesByTrack
-        : null;
-    return {
-      playlists,
-      layout: Array.isArray(legacy.layout) ? legacy.layout : [[]],
-      playlistNames: Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [],
-      playlistMeta: Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [],
-      playlistAutoplay: Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [],
-      playlistDsp: Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [],
-      dapConfig: buildLegacyDapConfigFromM2A(payload.dapConfig, playlists),
-      trackTitleModesByTrack: explicitTrackTitleModes || legacy.trackTitleModesByTrack || {},
-      version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
-    };
+  if (!Array.isArray(payload.playlists)) {
+    throw new Error('Неверный формат layout payload: playlists обязательны.');
   }
 
-  const legacyLayout = Array.isArray(payload.layout) ? payload.layout : [[]];
-  const legacyNames = Array.isArray(payload.playlistNames) ? payload.playlistNames : [];
-  const legacyMeta = Array.isArray(payload.playlistMeta) ? payload.playlistMeta : [];
-  const legacyAutoplay = Array.isArray(payload.playlistAutoplay) ? payload.playlistAutoplay : [];
-  const legacyDsp = Array.isArray(payload.playlistDsp) ? payload.playlistDsp : [];
-  const trackTitleModes =
-    payload && payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
+  const playlists = payload.playlists;
+  const legacy = buildLegacyShapeFromPlaylists(playlists, payload.trackTitleModesByTrack);
+  const explicitTrackTitleModes =
+    payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
       ? payload.trackTitleModesByTrack
-      : _deps.serializeTrackTitleModesByTrack();
-
+      : null;
   return {
-    playlists: buildPlaylistsFromLegacyShape({
-      layout: legacyLayout,
-      playlistNames: legacyNames,
-      playlistMeta: legacyMeta,
-      playlistAutoplay: legacyAutoplay,
-      playlistDsp: legacyDsp,
-      trackTitleModesByTrack: trackTitleModes,
-    }),
-    layout: legacyLayout,
-    playlistNames: legacyNames,
-    playlistMeta: legacyMeta,
-    playlistAutoplay: legacyAutoplay,
-    playlistDsp: legacyDsp,
-    dapConfig: payload && payload.dapConfig && typeof payload.dapConfig === 'object' ? payload.dapConfig : { ...DEFAULT_DAP_CONFIG },
-    trackTitleModesByTrack: trackTitleModes,
+    playlists,
+    layout: Array.isArray(legacy.layout) ? legacy.layout : [[]],
+    playlistNames: Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [],
+    playlistMeta: Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [],
+    playlistAutoplay: Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [],
+    playlistDsp: Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [],
+    dapConfig: buildLegacyDapConfigFromM2A(payload.dapConfig, playlists),
+    trackTitleModesByTrack: explicitTrackTitleModes || legacy.trackTitleModesByTrack || {},
     version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
   };
 }
@@ -1230,7 +1196,13 @@ export function connectLayoutStream() {
   createLayoutStream({
     onLayout(payload) {
       if (!payload) return;
-      const normalizedPayload = normalizeServerLayoutPayload(payload);
+      let normalizedPayload;
+      try {
+        normalizedPayload = normalizeServerLayoutPayload(payload);
+      } catch (err) {
+        console.error('Игнорируем неподдерживаемый layout payload', err);
+        return;
+      }
       applyIncomingLayoutState(
         normalizedPayload.layout,
         normalizedPayload.playlistNames,
@@ -1329,16 +1301,7 @@ export async function initializeLayoutState() {
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = nextTrackTitleModes;
-  state.playlists = Array.isArray(serverState.playlists)
-    ? serverState.playlists
-    : buildPlaylistsFromLegacyShape({
-        layout: state.layout,
-        playlistNames: state.playlistNames,
-        playlistMeta: state.playlistMeta,
-        playlistAutoplay: state.playlistAutoplay,
-        playlistDsp: state.playlistDsp,
-        trackTitleModesByTrack: state.trackTitleModesByTrack,
-      });
+  state.playlists = serverState.playlists;
   _deps.saveTrackTitleModesByTrackSetting();
   state.layoutVersion = serverState.version;
 
