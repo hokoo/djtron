@@ -402,8 +402,6 @@ export function buildLocalPlaybackSnapshot() {
       allowLiveSeek: state.liveSeekEnabled,
       dapPlayback,
       playlistId: null,
-      playlistIndex: null,
-      playlistPosition: null,
     };
   }
 
@@ -422,8 +420,6 @@ export function buildLocalPlaybackSnapshot() {
     allowLiveSeek: state.liveSeekEnabled,
     dapPlayback,
     playlistId: normalizePlaybackIdentity(state.currentTrack.playlistId, 64),
-    playlistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
   };
 }
 
@@ -532,8 +528,6 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
     basePath: '/audio',
     playlistId: normalizePlaybackIdentity(rawCommand.playlistId, 64),
     trackId: normalizePlaybackIdentity(rawCommand.trackId, 80),
-    playlistIndex: normalizePlaylistTrackIndex(rawCommand.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(rawCommand.playlistPosition),
     sourceRole,
     sourceClientId,
     sourceUsername,
@@ -601,8 +595,6 @@ export async function requestHostPlayTrack(file, basePath = '/audio', playbackCo
     basePath,
     playlistId: resolvedContext.playlistId,
     trackId: resolvedContext.trackId,
-    playlistIndex: resolvedContext.playlistIndex,
-    playlistPosition: resolvedContext.playlistPosition,
   };
   await dispatchHostPlaybackCommand(command);
   return true;
@@ -779,8 +771,6 @@ export async function requestCoHostPlayTrack(file, basePath = '/audio', playback
     basePath,
     playlistId: resolvedContext.playlistId,
     trackId: resolvedContext.trackId,
-    playlistIndex: resolvedContext.playlistIndex,
-    playlistPosition: resolvedContext.playlistPosition,
   };
   await sendLivePlaybackCommand(command);
   return true;
@@ -1375,8 +1365,6 @@ export function getDefaultHostPlaybackState() {
     allowLiveSeek: false,
     dapPlayback: getDefaultDapPlaybackState(),
     playlistId: null,
-    playlistIndex: null,
-    playlistPosition: null,
     updatedAt: 0,
     sourceClientId: null,
   };
@@ -1390,8 +1378,6 @@ export function getDefaultDapPlaybackState() {
     currentTime: 0,
     duration: null,
     playlistId: null,
-    playlistIndex: null,
-    playlistPosition: null,
     interrupted: false,
     updatedAt: 0,
   };
@@ -1440,8 +1426,6 @@ export function sanitizeIncomingDapPlaybackState(rawState) {
     currentTime,
     duration,
     playlistId: resolvedContext.playlistId || playlistId,
-    playlistIndex: resolvedContext.playlistIndex,
-    playlistPosition: resolvedContext.playlistPosition,
     interrupted: Boolean(rawState.interrupted),
     updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
   };
@@ -1506,8 +1490,6 @@ export function sanitizeIncomingHostPlaybackState(rawState) {
     allowLiveSeek: base.allowLiveSeek,
     dapPlayback: sanitizeIncomingDapPlaybackState(rawState.dapPlayback),
     playlistId: resolvedContext.playlistId || playlistId,
-    playlistIndex: resolvedContext.playlistIndex,
-    playlistPosition: resolvedContext.playlistPosition,
     updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
     sourceClientId,
   };
@@ -1531,13 +1513,9 @@ export function serializeHostPlaybackState(state) {
       currentTime: normalized.dapPlayback.currentTime,
       duration: normalized.dapPlayback.duration,
       playlistId: normalized.dapPlayback.playlistId,
-      playlistIndex: normalized.dapPlayback.playlistIndex,
-      playlistPosition: normalized.dapPlayback.playlistPosition,
       interrupted: normalized.dapPlayback.interrupted,
     },
     playlistId: normalized.playlistId,
-    playlistIndex: normalized.playlistIndex,
-    playlistPosition: normalized.playlistPosition,
     updatedAt: normalized.updatedAt,
   });
 }
@@ -1669,8 +1647,6 @@ export function buildDapPlaybackSnapshotForSync(config = state.dapConfig) {
         currentTime,
         duration,
         playlistId: normalizePlaybackIdentity(state.currentTrack.playlistId, 64),
-        playlistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
-        playlistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
         interrupted: false,
         updatedAt: Date.now(),
       };
@@ -1703,8 +1679,6 @@ export function buildDapPlaybackSnapshotForSync(config = state.dapConfig) {
     currentTime,
     duration,
     playlistId: normalizePlaybackIdentity(interruptedTrack.playlistId, 64),
-    playlistIndex: normalizePlaylistTrackIndex(interruptedTrack.playlistIndex),
-    playlistPosition: normalizePlaylistTrackIndex(interruptedTrack.playlistPosition),
     interrupted: true,
     updatedAt: Date.now(),
   };
@@ -1772,9 +1746,22 @@ export function clearLiveDspNextTrackHighlight() {
 }
 
 export function normalizeTrackPlaybackContext(playbackContext = null) {
+  const playlistIndex = normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistIndex : null);
+  const playlistPosition = normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistPosition : null);
+  if (playlistIndex !== null && playlistPosition !== null) {
+    return { playlistIndex, playlistPosition };
+  }
+
+  const resolvedContext = resolvePlaylistTrackContextByIds({
+    file: playbackContext && (playbackContext.file || playbackContext.trackFile),
+    playlistId: playbackContext ? playbackContext.playlistId : null,
+    trackId: playbackContext ? playbackContext.trackId : null,
+    playlistIndex,
+    playlistPosition,
+  });
   return {
-    playlistIndex: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistIndex : null),
-    playlistPosition: normalizePlaylistTrackIndex(playbackContext ? playbackContext.playlistPosition : null),
+    playlistIndex: normalizePlaylistTrackIndex(resolvedContext.playlistIndex),
+    playlistPosition: normalizePlaylistTrackIndex(resolvedContext.playlistPosition),
   };
 }
 
@@ -2000,8 +1987,9 @@ export function buildHostTrackHighlightDescriptor() {
   if (!isRemoteLiveMirrorRole()) return 'none';
   if (!state.hostPlaybackState || !state.hostPlaybackState.trackFile) return 'none';
 
-  const playlistIndex = normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex);
-  const playlistPosition = normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition);
+  const hostPlaybackContext = normalizeTrackPlaybackContext(state.hostPlaybackState);
+  const playlistIndex = normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(hostPlaybackContext.playlistPosition);
   return [
     trackKey(state.hostPlaybackState.trackFile, '/audio'),
     playlistIndex === null ? '' : String(playlistIndex),

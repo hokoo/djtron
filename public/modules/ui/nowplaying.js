@@ -86,10 +86,7 @@ export function syncHostTrackHighlight(force = false) {
   _deps.clearHostTrackHighlight();
   if (descriptor === 'none') return;
 
-  const playbackContext = {
-    playlistIndex: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-    playlistPosition: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
-  };
+  const playbackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
   const hostTrackKey = trackKey(state.hostPlaybackState.trackFile, '/audio');
   const targetCard = _deps.getTrackCardByContext(hostTrackKey, playbackContext);
   if (!targetCard) return;

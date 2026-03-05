@@ -1135,9 +1135,10 @@ export function getLiveLockedPlaylistIndex() {
     }
   }
 
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
   const hostPlaybackIndex =
     state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
-      ? _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
+      ? _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex)
       : null;
 
   if (hostPlaybackIndex !== null) {
@@ -1156,9 +1157,10 @@ export function syncPlaylistHeaderActiveState() {
       ? _deps.normalizePlaylistTrackIndex(state.currentTrack.playlistIndex)
       : null;
   const isLocalPlaybackPaused = Boolean(state.currentTrack && state.currentAudio && state.currentAudio.paused);
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
   const hostPlaybackIndex =
     state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
-      ? _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
+      ? _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex)
       : null;
   const livePlaybackIndex = isHostRole() ? localPlaybackIndex : hostPlaybackIndex;
   const isLivePlaybackPaused = isHostRole() ? isLocalPlaybackPaused : Boolean(state.hostPlaybackState.paused);
@@ -1169,8 +1171,9 @@ export function syncPlaylistHeaderActiveState() {
         ? state.hostPlaybackState.dapPlayback
         : null,
   );
+  const dapPlaybackContext = _deps.normalizeTrackPlaybackContext(dapPlaybackState);
   const dapPlaybackIndex = dapPlaybackState.trackFile
-    ? _deps.normalizePlaylistTrackIndex(dapPlaybackState.playlistIndex)
+    ? _deps.normalizePlaylistTrackIndex(dapPlaybackContext.playlistIndex)
     : null;
   const isDapPlaybackPaused = Boolean(!dapPlaybackState.trackFile || dapPlaybackState.paused);
   const zones = zonesContainer.querySelectorAll('.zone');
@@ -2692,10 +2695,7 @@ export function isTrackCardDragBlocked(card) {
   }
 
   if (state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()) {
-    const hostContext = {
-      playlistIndex: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-      playlistPosition: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
-    };
+    const hostContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
     if (isTrackCardContextActive(card, state.hostPlaybackState.trackFile, hostContext)) {
       return true;
     }

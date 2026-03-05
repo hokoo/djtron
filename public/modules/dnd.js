@@ -320,11 +320,12 @@ export function resolveQueueNextPlaybackAnchor() {
     ? state.hostPlaybackState.trackFile.trim()
     : '';
   if (!hostTrackFile || state.hostPlaybackState.paused) return null;
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
 
   return {
     file: hostTrackFile,
-    playlistIndex: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-    playlistPosition: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
+    playlistIndex: _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex),
+    playlistPosition: _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistPosition),
   };
 }
 
