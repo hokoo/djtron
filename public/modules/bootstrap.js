@@ -18,7 +18,6 @@ import {
 import * as api from './api-domain.js';
 import { LayoutSync } from './layout-sync.js';
 import { ConfigManager } from './config-manager.js';
-import { legacyToPlaylists, playlistsToLegacy, legacyDapToM2A } from './model-converter.js';
 
 // --- Domain Layer ---
 const audioEngine = new BrowserAudioEngine();
@@ -39,7 +38,7 @@ const config = new ConfigManager();
 // --- SSE Connection ---
 const layoutSync = new LayoutSync({
   onLayoutUpdate: (data) => {
-    const playlists = legacyToPlaylists(data);
+    const playlists = Array.isArray(data && data.playlists) ? data.playlists : [];
     playlists.forEach(pl => {
       if (playlistRepo.getPlaylist(pl.id)) {
         playlistRepo.updatePlaylist(pl);
@@ -78,7 +77,7 @@ async function init() {
     audioEngine.setStopFade(config.get('stopFadeSeconds'));
 
     const layout = await api.layoutGet();
-    const playlists = legacyToPlaylists(layout);
+    const playlists = Array.isArray(layout && layout.playlists) ? layout.playlists : [];
     playlists.forEach(pl => playlistRepo.createPlaylist(pl));
 
     layoutSync.connect();

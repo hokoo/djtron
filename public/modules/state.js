@@ -1,4 +1,5 @@
 // public/modules/state.js — shared mutable state and immutable constants
+import { legacyDapToM2A, legacyToPlaylists, m2aDapToLegacy, playlistsToLegacy } from './model-converter.js';
 
 export const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
@@ -90,6 +91,7 @@ export const DAP_MAX_VOLUME_PERCENT = 100;
 export const DEFAULT_DAP_CONFIG = Object.freeze({
   enabled: false,
   playlistIndex: null,
+  playlistId: null,
   volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
 });
 export const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
@@ -152,6 +154,19 @@ export const state = {
   playlistMeta: [{ type: PLAYLIST_TYPE_MANUAL }],
   playlistAutoplay: [false],
   playlistDsp: [false],
+  playlists: [
+    {
+      id: 'p-0',
+      name: 'Плей-лист 1',
+      type: PLAYLIST_TYPE_MANUAL,
+      tracks: [],
+      settings: {
+        autoPlayEnabled: false,
+        dspEnabled: false,
+      },
+      uiState: null,
+    },
+  ],
   dapConfig: { ...DEFAULT_DAP_CONFIG },
   availableFiles: [],
   availableFolders: [],
@@ -190,11 +205,13 @@ export const state = {
       paused: false,
       currentTime: 0,
       duration: null,
+      playlistId: null,
       playlistIndex: null,
       playlistPosition: null,
       interrupted: false,
       updatedAt: 0,
     },
+    playlistId: null,
     playlistIndex: null,
     playlistPosition: null,
     updatedAt: 0,
@@ -350,3 +367,92 @@ export const state = {
   collapsedPlaylistsHintEl: null,
   collapsedPlaylistLayoutLength: null,
 };
+
+function serializeTrackTitleModesByTrackValue(value) {
+  if (value instanceof Map) {
+    const result = {};
+    for (const [key, mode] of value.entries()) {
+      if (typeof key !== 'string' || !key) continue;
+      if (mode !== TRACK_TITLE_MODE_ATTRIBUTES) continue;
+      result[key] = mode;
+    }
+    return result;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return { ...value };
+  }
+  return {};
+}
+
+export function syncPlaylistsFromLegacyState() {
+  const previousPlaylists = Array.isArray(state.playlists) ? state.playlists : [];
+  const generatedPlaylists = legacyToPlaylists({
+    layout: Array.isArray(state.layout) ? state.layout : [[]],
+    playlistNames: Array.isArray(state.playlistNames) ? state.playlistNames : [],
+    playlistMeta: Array.isArray(state.playlistMeta) ? state.playlistMeta : [],
+    playlistAutoplay: Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay : [],
+    playlistDsp: Array.isArray(state.playlistDsp) ? state.playlistDsp : [],
+    trackTitleModesByTrack: serializeTrackTitleModesByTrackValue(state.trackTitleModesByTrack),
+  });
+  const playlists = Array.isArray(generatedPlaylists) && generatedPlaylists.length
+    ? generatedPlaylists.map((playlist, playlistIndex) => {
+        const previousPlaylist = previousPlaylists[playlistIndex];
+        const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+        const previousTracks = previousPlaylist && Array.isArray(previousPlaylist.tracks) ? previousPlaylist.tracks : [];
+        return {
+          ...playlist,
+          id: previousPlaylist && typeof previousPlaylist.id === 'string' && previousPlaylist.id
+            ? previousPlaylist.id
+            : playlist.id,
+          tracks: tracks.map((track, trackIndex) => {
+            const previousTrack = previousTracks[trackIndex];
+            return {
+              ...track,
+              id: previousTrack && typeof previousTrack.id === 'string' && previousTrack.id
+                ? previousTrack.id
+                : track.id,
+            };
+          }),
+        };
+      })
+    : [];
+
+  state.playlists = playlists;
+
+  const normalizedDap = legacyDapToM2A(state.dapConfig);
+  let playlistId = normalizedDap.playlistId;
+  const playlistIndex = Number.isInteger(state.dapConfig && state.dapConfig.playlistIndex)
+    ? state.dapConfig.playlistIndex
+    : null;
+  if (playlistIndex !== null && playlists[playlistIndex]) {
+    playlistId = playlists[playlistIndex].id;
+  } else if (playlistId && !playlists.some((playlist) => playlist && playlist.id === playlistId)) {
+    playlistId = null;
+  }
+  state.dapConfig = {
+    ...(state.dapConfig || {}),
+    playlistId,
+  };
+
+  return state.playlists;
+}
+
+export function syncLegacyStateFromPlaylists() {
+  const playlists = Array.isArray(state.playlists) ? state.playlists : [];
+  const legacy = playlistsToLegacy(playlists);
+  state.layout = Array.isArray(legacy.layout) ? legacy.layout : [[]];
+  state.playlistNames = Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [];
+  state.playlistMeta = Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [];
+  state.playlistAutoplay = Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [];
+  state.playlistDsp = Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [];
+
+  const legacyDap = m2aDapToLegacy(state.dapConfig, playlists);
+  state.dapConfig = {
+    ...(state.dapConfig || {}),
+    playlistIndex: legacyDap.playlistIndex,
+  };
+
+  return state.layout;
+}
+
+syncPlaylistsFromLegacyState();

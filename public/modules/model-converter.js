@@ -96,9 +96,12 @@ export function playlistsToLegacy(playlists, extraState = {}) {
  */
 export function legacyDapToM2A(dapConfig, playlistCount) {
   if (!dapConfig) return { enabled: false, playlistId: null, volumePercent: 5 };
+  const explicitPlaylistId = typeof dapConfig.playlistId === 'string' && dapConfig.playlistId.trim()
+    ? dapConfig.playlistId.trim()
+    : null;
   return {
     enabled: Boolean(dapConfig.enabled),
-    playlistId: typeof dapConfig.playlistIndex === 'number' ? `p-${dapConfig.playlistIndex}` : null,
+    playlistId: explicitPlaylistId || (typeof dapConfig.playlistIndex === 'number' ? `p-${dapConfig.playlistIndex}` : null),
     volumePercent: dapConfig.volumePercent || 5,
   };
 }
@@ -106,12 +109,22 @@ export function legacyDapToM2A(dapConfig, playlistCount) {
 /**
  * Convert M2A DAP config back to legacy format.
  */
-export function m2aDapToLegacy(dapConfig) {
+export function m2aDapToLegacy(dapConfig, playlists = null) {
   if (!dapConfig) return { enabled: false, playlistIndex: null, volumePercent: 5 };
-  const idxMatch = dapConfig.playlistId ? dapConfig.playlistId.match(/^p-(\d+)$/) : null;
+  let playlistIndex = null;
+  if (Array.isArray(playlists) && typeof dapConfig.playlistId === 'string' && dapConfig.playlistId.trim()) {
+    const resolved = playlists.findIndex((playlist) => playlist && playlist.id === dapConfig.playlistId.trim());
+    if (resolved >= 0) {
+      playlistIndex = resolved;
+    }
+  }
+  if (playlistIndex === null) {
+    const idxMatch = dapConfig.playlistId ? dapConfig.playlistId.match(/^p-(\d+)$/) : null;
+    playlistIndex = idxMatch ? parseInt(idxMatch[1], 10) : null;
+  }
   return {
     enabled: Boolean(dapConfig.enabled),
-    playlistIndex: idxMatch ? parseInt(idxMatch[1], 10) : null,
+    playlistIndex,
     volumePercent: dapConfig.volumePercent || 5,
   };
 }

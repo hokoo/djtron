@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_HOST, state } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_HOST, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState, setLivePlaybackVolume
@@ -54,8 +54,9 @@ export function applyIncomingLayoutState(
   nextTrackTitleModesByTrack = null,
   version = null,
   render = true,
+  nextPlaylists = null,
 ) {
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousLayout = _deps.ensurePlaylists(state.layout);
   const previousMeta = _deps.normalizePlaylistMeta(state.playlistMeta, previousLayout.length);
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
@@ -111,6 +112,11 @@ export function applyIncomingLayoutState(
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(normalizedAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(normalizedDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = normalizedTrackTitleModes;
+  if (Array.isArray(nextPlaylists)) {
+    state.playlists = nextPlaylists;
+  } else {
+    syncPlaylistsFromLegacyState();
+  }
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? _deps.getDapPlaylistIndex(state.dapConfig) : null;
   const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
@@ -644,34 +650,51 @@ function normalizeServerLayoutPayload(data) {
   const payload = data && typeof data === 'object' ? data : {};
 
   if (Array.isArray(payload.playlists)) {
+    const playlists = payload.playlists;
     const legacy = playlistsToLegacy(payload.playlists);
     const explicitTrackTitleModes =
       payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
         ? payload.trackTitleModesByTrack
         : null;
     return {
+      playlists,
       layout: Array.isArray(legacy.layout) ? legacy.layout : [[]],
       playlistNames: Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [],
       playlistMeta: Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [],
       playlistAutoplay: Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [],
       playlistDsp: Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [],
-      dapConfig: m2aDapToLegacy(payload.dapConfig),
+      dapConfig: m2aDapToLegacy(payload.dapConfig, playlists),
       trackTitleModesByTrack: explicitTrackTitleModes || legacy.trackTitleModesByTrack || {},
       version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
     };
   }
 
+  const legacyLayout = Array.isArray(payload.layout) ? payload.layout : [[]];
+  const legacyNames = Array.isArray(payload.playlistNames) ? payload.playlistNames : [];
+  const legacyMeta = Array.isArray(payload.playlistMeta) ? payload.playlistMeta : [];
+  const legacyAutoplay = Array.isArray(payload.playlistAutoplay) ? payload.playlistAutoplay : [];
+  const legacyDsp = Array.isArray(payload.playlistDsp) ? payload.playlistDsp : [];
+  const trackTitleModes =
+    payload && payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
+      ? payload.trackTitleModesByTrack
+      : _deps.serializeTrackTitleModesByTrack();
+
   return {
-    layout: Array.isArray(payload.layout) ? payload.layout : [[]],
-    playlistNames: Array.isArray(payload.playlistNames) ? payload.playlistNames : [],
-    playlistMeta: Array.isArray(payload.playlistMeta) ? payload.playlistMeta : [],
-    playlistAutoplay: Array.isArray(payload.playlistAutoplay) ? payload.playlistAutoplay : [],
-    playlistDsp: Array.isArray(payload.playlistDsp) ? payload.playlistDsp : [],
+    playlists: legacyToPlaylists({
+      layout: legacyLayout,
+      playlistNames: legacyNames,
+      playlistMeta: legacyMeta,
+      playlistAutoplay: legacyAutoplay,
+      playlistDsp: legacyDsp,
+      trackTitleModesByTrack: trackTitleModes,
+    }),
+    layout: legacyLayout,
+    playlistNames: legacyNames,
+    playlistMeta: legacyMeta,
+    playlistAutoplay: legacyAutoplay,
+    playlistDsp: legacyDsp,
     dapConfig: payload && payload.dapConfig && typeof payload.dapConfig === 'object' ? payload.dapConfig : { ...DEFAULT_DAP_CONFIG },
-    trackTitleModesByTrack:
-      payload && payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
-        ? payload.trackTitleModesByTrack
-        : _deps.serializeTrackTitleModesByTrack(),
+    trackTitleModesByTrack: trackTitleModes,
     version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
   };
 }
@@ -693,7 +716,14 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   const payloadAutoplay = _deps.normalizePlaylistAutoplayWithDap(state.playlistAutoplay, payloadDapConfig, payloadState.layout.length);
   const payloadDsp = _deps.normalizePlaylistDspFlags(state.playlistDsp, payloadAutoplay, payloadState.layout.length);
   const payloadTrackTitleModes = _deps.serializeTrackTitleModesByTrack();
-  const payloadPlaylists = legacyToPlaylists({
+  state.layout = payloadState.layout;
+  state.playlistNames = payloadState.playlistNames;
+  state.playlistMeta = payloadState.playlistMeta;
+  state.playlistAutoplay = payloadAutoplay;
+  state.playlistDsp = payloadDsp;
+  state.dapConfig = payloadDapConfig;
+  const payloadPlaylists = syncPlaylistsFromLegacyState();
+  const fallbackPlaylists = legacyToPlaylists({
     layout: payloadState.layout,
     playlistNames: payloadState.playlistNames,
     playlistMeta: payloadState.playlistMeta,
@@ -703,7 +733,7 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   });
 
   const { ok, data } = await api.postLayout({
-    playlists: payloadPlaylists,
+    playlists: Array.isArray(payloadPlaylists) && payloadPlaylists.length ? payloadPlaylists : fallbackPlaylists,
     dapConfig: legacyDapToM2A(payloadDapConfig, payloadState.layout.length),
     trackTitleModesByTrack: payloadTrackTitleModes,
     clientId,
@@ -726,6 +756,7 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     normalizedResponse.trackTitleModesByTrack,
     normalizedResponse.version,
     renderOnApply,
+    normalizedResponse.playlists,
   );
 }
 
@@ -744,6 +775,7 @@ export function connectLayoutStream() {
         normalizedPayload.trackTitleModesByTrack,
         normalizedPayload.version,
         true,
+        normalizedPayload.playlists,
       );
     },
     onPlayback(payload) {
@@ -831,6 +863,7 @@ export async function initializeLayoutState() {
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = nextTrackTitleModes;
+  state.playlists = Array.isArray(serverState.playlists) ? serverState.playlists : syncPlaylistsFromLegacyState();
   _deps.saveTrackTitleModesByTrackSetting();
   state.layoutVersion = serverState.version;
 
