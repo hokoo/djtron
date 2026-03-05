@@ -13,7 +13,6 @@ export const SETTINGS_KEYS = {
   trackTitleModesByTrack: 'player:trackTitleModesByTrack',
 };
 export const LAYOUT_STORAGE_KEY = 'player:playlists';
-export const LEGACY_LAYOUT_KEY = 'player:zones';
 export const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
 export const RUNTIME_LOCAL_OVERRIDE_KEYS = {
   allowContextMenu: ['djtron:config:allowContextMenu', 'djtron:allowContextMenu'],

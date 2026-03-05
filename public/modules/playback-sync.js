@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state, syncPlaylistsFromLegacyState } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -1194,8 +1194,7 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   state.playlistAutoplay = payloadAutoplay;
   state.playlistDsp = payloadDsp;
   state.dapConfig = payloadDapConfig;
-  const payloadPlaylists = syncPlaylistsFromLegacyState();
-  const fallbackPlaylists = buildPlaylistsFromLegacyShape({
+  const payloadPlaylists = buildPlaylistsFromLegacyShape({
     layout: payloadState.layout,
     playlistNames: payloadState.playlistNames,
     playlistMeta: payloadState.playlistMeta,
@@ -1205,8 +1204,8 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   });
 
   const { ok, data } = await api.postLayout({
-    playlists: Array.isArray(payloadPlaylists) && payloadPlaylists.length ? payloadPlaylists : fallbackPlaylists,
-    dapConfig: buildM2ADapConfigFromLegacy(payloadDapConfig, Array.isArray(payloadPlaylists) && payloadPlaylists.length ? payloadPlaylists : fallbackPlaylists),
+    playlists: payloadPlaylists,
+    dapConfig: buildM2ADapConfigFromLegacy(payloadDapConfig, payloadPlaylists),
     trackTitleModesByTrack: payloadTrackTitleModes,
     clientId,
     version: state.layoutVersion,
@@ -1335,7 +1334,7 @@ export async function initializeLayoutState() {
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = nextTrackTitleModes;
-  state.playlists = Array.isArray(serverState.playlists) ? serverState.playlists : syncPlaylistsFromLegacyState();
+  state.playlists = Array.isArray(serverState.playlists) ? serverState.playlists : [];
   _deps.saveTrackTitleModesByTrackSetting();
   state.layoutVersion = serverState.version;
 
@@ -1345,7 +1344,6 @@ export async function initializeLayoutState() {
 
   try {
     localStorage.removeItem(LAYOUT_STORAGE_KEY);
-    localStorage.removeItem(LEGACY_LAYOUT_KEY);
   } catch (err) {
     // Ignore storage cleanup errors.
   }

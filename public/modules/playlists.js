@@ -1,6 +1,6 @@
 // public/modules/playlists.js — playlist management, track cards, audio catalog
 
-import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
+import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, handlePlay, setLivePlaybackVolume } from './audio.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole, isSlaveRole } from './roles.js';
@@ -454,7 +454,7 @@ export function isServerLayoutEmpty(playlists) {
 }
 
 export function readLegacyLocalLayout(files) {
-  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY) || localStorage.getItem(LEGACY_LAYOUT_KEY);
+  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
   if (!raw) return null;
 
   try {
@@ -483,7 +483,6 @@ export function syncLayoutFromDom() {
   state.playlistNames = normalizePlaylistNames(state.playlistNames, state.layout.length);
   state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
   applyDapConstraintsForCurrentLayout();
-  syncPlaylistsFromLegacyState();
 }
 
 export function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
@@ -1481,7 +1480,6 @@ export function renderZones() {
     removeCollapsedPlaylistsHint();
   }
   applyDapConstraintsForCurrentLayout();
-  syncPlaylistsFromLegacyState();
   updateDapSettingsUi(state.currentRole);
   const trackOccurrence = _deps.buildTrackOccurrenceMap(state.layout);
   const renderOrder = buildPlaylistRenderOrder(state.layout.length, state.dapConfig);
