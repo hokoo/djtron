@@ -18,6 +18,7 @@ import { setLiveSeekEnabled, syncHostNowPlayingPanel, syncNowPlayingPanel } from
 import { setStatus } from './ui/status.js';
 import { setShowVolumePresetsEnabled, updateVolumePresetsUi } from './ui/volume.js';
 import { trackKey } from './utils.js';
+import { legacyToPlaylists, playlistsToLegacy, legacyDapToM2A, m2aDapToLegacy } from './model-converter.js';
 
 const _deps = {};
 
@@ -639,6 +640,42 @@ export function requestHostPlaybackSync(force = false) {
     });
 }
 
+function normalizeServerLayoutPayload(data) {
+  const payload = data && typeof data === 'object' ? data : {};
+
+  if (Array.isArray(payload.playlists)) {
+    const legacy = playlistsToLegacy(payload.playlists);
+    const explicitTrackTitleModes =
+      payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
+        ? payload.trackTitleModesByTrack
+        : null;
+    return {
+      layout: Array.isArray(legacy.layout) ? legacy.layout : [[]],
+      playlistNames: Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [],
+      playlistMeta: Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [],
+      playlistAutoplay: Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [],
+      playlistDsp: Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [],
+      dapConfig: m2aDapToLegacy(payload.dapConfig),
+      trackTitleModesByTrack: explicitTrackTitleModes || legacy.trackTitleModesByTrack || {},
+      version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
+    };
+  }
+
+  return {
+    layout: Array.isArray(payload.layout) ? payload.layout : [[]],
+    playlistNames: Array.isArray(payload.playlistNames) ? payload.playlistNames : [],
+    playlistMeta: Array.isArray(payload.playlistMeta) ? payload.playlistMeta : [],
+    playlistAutoplay: Array.isArray(payload.playlistAutoplay) ? payload.playlistAutoplay : [],
+    playlistDsp: Array.isArray(payload.playlistDsp) ? payload.playlistDsp : [],
+    dapConfig: payload && payload.dapConfig && typeof payload.dapConfig === 'object' ? payload.dapConfig : { ...DEFAULT_DAP_CONFIG },
+    trackTitleModesByTrack:
+      payload && payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
+        ? payload.trackTitleModesByTrack
+        : _deps.serializeTrackTitleModesByTrack(),
+    version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
+  };
+}
+
 export async function fetchSharedLayoutState() {
   const { ok, data } = await api.fetchLayout();
 
@@ -647,19 +684,7 @@ export async function fetchSharedLayoutState() {
     throw new Error(message || 'Не удалось получить конфигурацию плей-листов');
   }
 
-  return {
-    layout: Array.isArray(data.layout) ? data.layout : [[]],
-    playlistNames: Array.isArray(data.playlistNames) ? data.playlistNames : [],
-    playlistMeta: Array.isArray(data.playlistMeta) ? data.playlistMeta : [],
-    playlistAutoplay: Array.isArray(data.playlistAutoplay) ? data.playlistAutoplay : [],
-    playlistDsp: Array.isArray(data.playlistDsp) ? data.playlistDsp : [],
-    dapConfig: data && data.dapConfig && typeof data.dapConfig === 'object' ? data.dapConfig : { ...DEFAULT_DAP_CONFIG },
-    trackTitleModesByTrack:
-      data && data.trackTitleModesByTrack && typeof data.trackTitleModesByTrack === 'object'
-        ? data.trackTitleModesByTrack
-        : _deps.serializeTrackTitleModesByTrack(),
-    version: Number.isFinite(Number(data.version)) ? Number(data.version) : 0,
-  };
+  return normalizeServerLayoutPayload(data);
 }
 
 export async function pushSharedLayout({ renderOnApply = true } = {}) {
@@ -667,15 +692,20 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   const payloadDapConfig = _deps.normalizeDapConfig(state.dapConfig, payloadState.layout.length, state.dapConfig);
   const payloadAutoplay = _deps.normalizePlaylistAutoplayWithDap(state.playlistAutoplay, payloadDapConfig, payloadState.layout.length);
   const payloadDsp = _deps.normalizePlaylistDspFlags(state.playlistDsp, payloadAutoplay, payloadState.layout.length);
-
-  const { ok, data } = await api.postLayout({
+  const payloadTrackTitleModes = _deps.serializeTrackTitleModesByTrack();
+  const payloadPlaylists = legacyToPlaylists({
     layout: payloadState.layout,
     playlistNames: payloadState.playlistNames,
     playlistMeta: payloadState.playlistMeta,
     playlistAutoplay: payloadAutoplay,
     playlistDsp: payloadDsp,
-    dapConfig: payloadDapConfig,
-    trackTitleModesByTrack: _deps.serializeTrackTitleModesByTrack(),
+    trackTitleModesByTrack: payloadTrackTitleModes,
+  });
+
+  const { ok, data } = await api.postLayout({
+    playlists: payloadPlaylists,
+    dapConfig: legacyDapToM2A(payloadDapConfig, payloadState.layout.length),
+    trackTitleModesByTrack: payloadTrackTitleModes,
     clientId,
     version: state.layoutVersion,
   });
@@ -685,15 +715,16 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     throw new Error(message || 'Не удалось синхронизировать плей-листы');
   }
 
+  const normalizedResponse = normalizeServerLayoutPayload(data);
   applyIncomingLayoutState(
-    data.layout,
-    data.playlistNames,
-    data.playlistMeta,
-    data.playlistAutoplay,
-    data.playlistDsp,
-    data.dapConfig,
-    data.trackTitleModesByTrack,
-    data.version,
+    normalizedResponse.layout,
+    normalizedResponse.playlistNames,
+    normalizedResponse.playlistMeta,
+    normalizedResponse.playlistAutoplay,
+    normalizedResponse.playlistDsp,
+    normalizedResponse.dapConfig,
+    normalizedResponse.trackTitleModesByTrack,
+    normalizedResponse.version,
     renderOnApply,
   );
 }
@@ -701,16 +732,17 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
 export function connectLayoutStream() {
   createLayoutStream({
     onLayout(payload) {
-      if (!payload || !Array.isArray(payload.layout)) return;
+      if (!payload) return;
+      const normalizedPayload = normalizeServerLayoutPayload(payload);
       applyIncomingLayoutState(
-        payload.layout,
-        payload.playlistNames,
-        payload.playlistMeta,
-        payload.playlistAutoplay,
-        payload.playlistDsp,
-        payload.dapConfig,
-        payload.trackTitleModesByTrack,
-        payload.version,
+        normalizedPayload.layout,
+        normalizedPayload.playlistNames,
+        normalizedPayload.playlistMeta,
+        normalizedPayload.playlistAutoplay,
+        normalizedPayload.playlistDsp,
+        normalizedPayload.dapConfig,
+        normalizedPayload.trackTitleModesByTrack,
+        normalizedPayload.version,
         true,
       );
     },

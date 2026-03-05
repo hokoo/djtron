@@ -290,9 +290,10 @@ async function handleApiDspTransitionsPost(req, res) {
     return;
   }
 
+  const dspSnapshot = layoutService.buildDspLayoutSnapshot();
   const result = dspJobManager.enqueueBatch(body, {
-    layout: layoutService.layoutState.layout,
-    playlistDsp: layoutService.layoutState.playlistDsp,
+    layout: dspSnapshot.layout,
+    playlistDsp: dspSnapshot.playlistDsp,
   });
 
   if (result.error) {
@@ -437,11 +438,12 @@ function handleApiLayoutReset(req, res) {
 
   layoutService.persistLayoutState(layoutService.layoutState);
   layoutService.broadcastLayoutUpdate(null);
-  dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
+  const dspSnapshot = layoutService.buildDspLayoutSnapshot();
+  dspJobManager.scheduleFromLayout(dspSnapshot.layout, {
     source: 'layout-update',
     priority: 'normal',
     force: false,
-    playlistDspFlags: layoutService.layoutState.playlistDsp,
+    playlistDspFlags: dspSnapshot.playlistDsp,
   });
 
   sendJson(res, 200, layoutService.buildLayoutPayload(null));
@@ -463,11 +465,12 @@ async function handleApiLayoutUpdate(req, res) {
   const result = layoutService.applyLayoutUpdate(body, {
     isServer: req.auth.isServer,
     onLayoutChanged: (state) => {
-      dspJobManager.scheduleFromLayout(state.layout, {
+      const dspSnapshot = layoutService.buildDspLayoutSnapshot(state);
+      dspJobManager.scheduleFromLayout(dspSnapshot.layout, {
         source: 'layout-update',
         priority: 'normal',
         force: false,
-        playlistDspFlags: state.playlistDsp,
+        playlistDspFlags: dspSnapshot.playlistDsp,
       });
     },
   });
@@ -761,11 +764,12 @@ if (DSP_ENABLED) {
     noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
     tempoCacheItems: dspJobManager.getTempoCacheSize(),
   });
-  dspJobManager.scheduleFromLayout(layoutService.layoutState.layout, {
+  const startupDspSnapshot = layoutService.buildDspLayoutSnapshot();
+  dspJobManager.scheduleFromLayout(startupDspSnapshot.layout, {
     source: 'startup',
     priority: 'normal',
     force: false,
-    playlistDspFlags: layoutService.layoutState.playlistDsp,
+    playlistDspFlags: startupDspSnapshot.playlistDsp,
   });
 }
 

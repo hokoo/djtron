@@ -46,27 +46,15 @@
 | ui/settings.js | 89 | Transition settings |
 | ui/status.js | 109 | Status bar, overlays |
 
-### Phase 3B: Server Data Model Migration — DEFERRED
-- model-converter.js handles legacy↔M2A conversion on the client
-- Server keeps array-of-paths format for now
-- Can be migrated later when client M2A integration deepens
+### Phase 3B (current): Server Data Model Migration
+- `src/layout/LayoutStateService.js` переведён на M2A-формат:
+  - `layoutState.playlists[]` вместо `layout + playlistNames + playlistMeta + playlistAutoplay + playlistDsp`
+  - `dapConfig.playlistId` вместо `dapConfig.playlistIndex`
+- `/api/layout` и SSE `layout` теперь публикуют M2A payload (`playlists`, `dapConfig`, `trackTitleModesByTrack`)
+- Legacy payload для `POST /api/layout` более не принимается (новое приложение без backward compatibility)
+- DSP планирование переведено на snapshot из M2A (`layoutService.buildDspLayoutSnapshot()`)
 
-### PR-C — Audio player extraction
-- `src/client/audio/player.js` — Web Audio API wrapper
-- `src/client/audio/probe.js` — audio duration detection
-
-### PR-D — UI components
-- `src/client/ui/playlists.js` — playlist rendering, drag-and-drop
-- `src/client/ui/playback.js` — playback controls
-- `src/client/ui/auth.js` — login form, user management
-- `src/client/ui/dsp.js` — DSP setup panel
-
-### PR-E — State management
-- `src/client/state/layout.js` — client-side layout state
-- `src/client/state/playback.js` — playback state sync
-- `src/client/state/config.js` — runtime config
-
-## Acceptance (фаза 3)
-- script.js → entry point ~100 строк
-- Все UI-функции работают идентично
-- Нет регрессий в touch/drag-and-drop поведении
+## Статус фазы 3
+- 3A: выполнено
+- 3B: выполнено (серверная модель M2A активирована)
+- 3C: выполнено

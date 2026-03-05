@@ -144,11 +144,13 @@ class PlaybackGateway {
     const { LayoutStateService } = require('../layout/LayoutStateService');
     const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
     if (!file) return null;
+    const playlistId = typeof rawCommand.playlistId === 'string' ? rawCommand.playlistId.trim().slice(0, 64) : null;
 
     return {
       type: 'play-track',
       file,
       basePath: '/audio',
+      playlistId: playlistId || null,
       playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistIndex),
       playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistPosition),
     };

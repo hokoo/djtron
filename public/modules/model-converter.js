@@ -107,11 +107,11 @@ export function legacyDapToM2A(dapConfig, playlistCount) {
  * Convert M2A DAP config back to legacy format.
  */
 export function m2aDapToLegacy(dapConfig) {
-  if (!dapConfig) return { enabled: false, playlistIndex: 0, volumePercent: 5 };
+  if (!dapConfig) return { enabled: false, playlistIndex: null, volumePercent: 5 };
   const idxMatch = dapConfig.playlistId ? dapConfig.playlistId.match(/^p-(\d+)$/) : null;
   return {
     enabled: Boolean(dapConfig.enabled),
-    playlistIndex: idxMatch ? parseInt(idxMatch[1], 10) : 0,
+    playlistIndex: idxMatch ? parseInt(idxMatch[1], 10) : null,
     volumePercent: dapConfig.volumePercent || 5,
   };
 }

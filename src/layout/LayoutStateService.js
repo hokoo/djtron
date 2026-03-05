@@ -33,18 +33,40 @@ class LayoutStateService {
   get trackTitleModes() { return this._trackTitleModes; }
   set trackTitleModes(value) { this._trackTitleModes = value; }
 
-  // ── Group 1: Default state factories (static) ─────────────────────
+  // ── Group 1: Defaults ──────────────────────────────────────────────
+
+  static defaultPlaylistId(index) {
+    return `p-${Math.max(0, index)}`;
+  }
+
+  static defaultPlaylistName(index) {
+    return `Плей-лист ${index + 1}`;
+  }
+
+  createDefaultPlaylist(index = 0) {
+    return {
+      id: LayoutStateService.defaultPlaylistId(index),
+      name: LayoutStateService.defaultPlaylistName(index),
+      type: 'manual',
+      tracks: [],
+      settings: {
+        autoPlayEnabled: false,
+        dspEnabled: false,
+      },
+      uiState: null,
+    };
+  }
 
   getDefaultLayoutState() {
     return {
       version: 0,
       updatedAt: 0,
-      layout: [[]],
-      playlistNames: ['Плей-лист 1'],
-      playlistMeta: [{ type: 'manual' }],
-      playlistAutoplay: [false],
-      playlistDsp: [false],
-      dapConfig: { ...this._config.DEFAULT_DAP_CONFIG },
+      playlists: [this.createDefaultPlaylist(0)],
+      dapConfig: {
+        enabled: false,
+        playlistId: null,
+        volumePercent: this.normalizeDapVolumePercent(this._config.DAP_DEFAULT_VOLUME_PERCENT),
+      },
       trackTitleModesByTrack: {},
     };
   }
@@ -52,6 +74,7 @@ class LayoutStateService {
   getDefaultPlaybackState() {
     return {
       trackFile: null,
+      trackId: null,
       paused: false,
       currentTime: 0,
       duration: null,
@@ -62,6 +85,7 @@ class LayoutStateService {
       overlaySeconds: 0,
       nextDspSliceSeconds: 0,
       nextDspSourceSeconds: 0,
+      playlistId: null,
       playlistIndex: null,
       playlistPosition: null,
       updatedAt: 0,
@@ -71,9 +95,11 @@ class LayoutStateService {
   static getDefaultDapPlaybackState() {
     return {
       trackFile: null,
+      trackId: null,
       paused: false,
       currentTime: 0,
       duration: null,
+      playlistId: null,
       playlistIndex: null,
       playlistPosition: null,
       interrupted: false,
@@ -81,11 +107,7 @@ class LayoutStateService {
     };
   }
 
-  static defaultPlaylistName(index) {
-    return `Плей-лист ${index + 1}`;
-  }
-
-  // ── Group 2: Layout sanitization/normalization (static where possible) ──
+  // ── Group 2: Layout sanitization/normalization ─────────────────────
 
   sanitizePlaylistName(value, index) {
     if (typeof value !== 'string') {
@@ -98,126 +120,6 @@ class LayoutStateService {
     }
 
     return normalized.slice(0, this._config.PLAYLIST_NAME_MAX_LENGTH);
-  }
-
-  static sanitizeLayout(layout) {
-    if (!Array.isArray(layout)) return null;
-
-    const normalized = [];
-
-    layout.forEach((playlist) => {
-      if (!Array.isArray(playlist)) return;
-
-      const clean = [];
-      playlist.forEach((value) => {
-        if (typeof value !== 'string') return;
-        const file = value.trim();
-        if (!file) return;
-        clean.push(file);
-      });
-
-      normalized.push(clean);
-    });
-
-    return normalized;
-  }
-
-  normalizePlaylistNames(playlistNames, layoutLength) {
-    const result = [];
-
-    for (let index = 0; index < layoutLength; index += 1) {
-      const rawName = Array.isArray(playlistNames) ? playlistNames[index] : null;
-      result.push(this.sanitizePlaylistName(rawName, index));
-    }
-
-    return result;
-  }
-
-  static normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength) {
-    const result = [];
-
-    for (let index = 0; index < layoutLength; index += 1) {
-      const rawValue = Array.isArray(playlistAutoplay) ? playlistAutoplay[index] : false;
-      result.push(Boolean(rawValue));
-    }
-
-    return result;
-  }
-
-  static normalizePlaylistDspFlags(playlistDsp, playlistAutoplay, layoutLength) {
-    const normalizedAutoplay = LayoutStateService.normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
-    const result = [];
-
-    for (let index = 0; index < layoutLength; index += 1) {
-      const rawValue = Array.isArray(playlistDsp) ? playlistDsp[index] : false;
-      result.push(Boolean(rawValue) && Boolean(normalizedAutoplay[index]));
-    }
-
-    return result;
-  }
-
-  normalizeDapVolumePercent(value, fallback) {
-    const effectiveFallback = fallback !== undefined ? fallback : this._config.DAP_DEFAULT_VOLUME_PERCENT;
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      return this.normalizeDapVolumePercent(effectiveFallback, this._config.DAP_DEFAULT_VOLUME_PERCENT);
-    }
-
-    const rounded = Math.round(numeric);
-    if (rounded < this._config.DAP_MIN_VOLUME_PERCENT) return this._config.DAP_MIN_VOLUME_PERCENT;
-    if (rounded > this._config.DAP_MAX_VOLUME_PERCENT) return this._config.DAP_MAX_VOLUME_PERCENT;
-    return rounded;
-  }
-
-  sanitizeDapConfig(dapConfig, layoutLength, fallback) {
-    const effectiveFallback = fallback !== undefined ? fallback : this._config.DEFAULT_DAP_CONFIG;
-    const expectedLayoutLength = Number.isInteger(layoutLength) && layoutLength >= 0 ? layoutLength : 0;
-    const safeFallback =
-      effectiveFallback && typeof effectiveFallback === 'object'
-        ? {
-            enabled: Boolean(effectiveFallback.enabled),
-            playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(effectiveFallback.playlistIndex),
-            volumePercent: this.normalizeDapVolumePercent(effectiveFallback.volumePercent, this._config.DAP_DEFAULT_VOLUME_PERCENT),
-          }
-        : { ...this._config.DEFAULT_DAP_CONFIG };
-    const rawConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : null;
-
-    const requestedEnabled =
-      rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'enabled')
-        ? Boolean(rawConfig.enabled)
-        : safeFallback.enabled;
-    const requestedPlaylistIndex =
-      rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'playlistIndex')
-        ? LayoutStateService.normalizePlaylistTrackIndex(rawConfig.playlistIndex)
-        : safeFallback.playlistIndex;
-    const playlistIndex =
-      requestedPlaylistIndex !== null &&
-      requestedPlaylistIndex >= 0 &&
-      requestedPlaylistIndex < expectedLayoutLength
-        ? requestedPlaylistIndex
-        : null;
-    const volumePercent = this.normalizeDapVolumePercent(
-      rawConfig && Object.prototype.hasOwnProperty.call(rawConfig, 'volumePercent')
-        ? rawConfig.volumePercent
-        : safeFallback.volumePercent,
-      safeFallback.volumePercent,
-    );
-    const enabled = Boolean(requestedEnabled && playlistIndex !== null);
-
-    return {
-      enabled,
-      playlistIndex,
-      volumePercent,
-    };
-  }
-
-  normalizePlaylistAutoplayWithDap(playlistAutoplay, dapConfig, layoutLength) {
-    const normalized = LayoutStateService.normalizePlaylistAutoplayFlags(playlistAutoplay, layoutLength);
-    const sanitizedDap = this.sanitizeDapConfig(dapConfig, layoutLength, this._config.DEFAULT_DAP_CONFIG);
-    if (sanitizedDap.enabled && sanitizedDap.playlistIndex !== null) {
-      normalized[sanitizedDap.playlistIndex] = true;
-    }
-    return normalized;
   }
 
   sanitizeTrackTitleMode(value) {
@@ -275,37 +177,218 @@ class LayoutStateService {
     return '';
   }
 
-  sanitizePlaylistMetaEntry(value) {
-    if (!value || typeof value !== 'object') {
-      return { type: 'manual' };
+  sanitizePlaylistId(value, index = 0) {
+    if (typeof value === 'string') {
+      const normalized = value.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
+      if (normalized) return normalized;
+    }
+    return LayoutStateService.defaultPlaylistId(index);
+  }
+
+  sanitizeTrackId(value, playlistId, index = 0) {
+    if (typeof value === 'string') {
+      const normalized = value.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 80);
+      if (normalized) return normalized;
+    }
+    return `${playlistId}-t-${Math.max(0, index)}`;
+  }
+
+  sanitizeTrackSrc(value) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.startsWith('/audio/')) {
+      return trimmed;
+    }
+    if (trimmed.startsWith('audio/')) {
+      return `/${trimmed}`;
+    }
+    return `/audio/${trimmed.replace(/^\/+/, '')}`;
+  }
+
+  static trackSrcToRelativePath(src) {
+    if (typeof src !== 'string') return '';
+    let normalized = src.trim();
+    if (!normalized) return '';
+
+    normalized = normalized.replace(/^https?:\/\/[^/]+/i, '');
+    const queryIndex = normalized.indexOf('?');
+    if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+    const hashIndex = normalized.indexOf('#');
+    if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+
+    if (normalized.startsWith('/audio/')) {
+      normalized = normalized.slice('/audio/'.length);
+    } else if (normalized.startsWith('audio/')) {
+      normalized = normalized.slice('audio/'.length);
+    } else {
+      normalized = normalized.replace(/^\/+/, '');
     }
 
-    if (value.type !== 'folder') {
-      return { type: 'manual' };
+    return normalized.trim();
+  }
+
+  sanitizePlaylistTrack(rawTrack, playlistId, trackIndex, usedTrackIds) {
+    const raw = rawTrack && typeof rawTrack === 'object' ? rawTrack : null;
+    const rawSrc = raw
+      ? (typeof raw.src === 'string' ? raw.src : (typeof raw.file === 'string' ? raw.file : raw.path))
+      : rawTrack;
+    const src = this.sanitizeTrackSrc(rawSrc);
+    if (!src) return null;
+
+    let trackId = this.sanitizeTrackId(raw ? raw.id : null, playlistId, trackIndex);
+    if (usedTrackIds.has(trackId)) {
+      let suffix = 1;
+      while (usedTrackIds.has(`${trackId}-${suffix}`)) suffix += 1;
+      trackId = `${trackId}-${suffix}`;
+    }
+    usedTrackIds.add(trackId);
+
+    const meta = {};
+    const titleMode = this.sanitizeTrackTitleMode(raw && raw.meta ? raw.meta.titleMode : null);
+    if (titleMode) {
+      meta.titleMode = titleMode;
     }
 
-    const folderKey = LayoutStateService.sanitizeFolderKey(value.folderKey);
-    if (!folderKey) {
-      return { type: 'manual' };
+    const originalPath = LayoutStateService.trackSrcToRelativePath(src);
+    if (originalPath) {
+      meta.originalPath = originalPath;
     }
 
-    const fallbackName = this._path.basename(folderKey) || folderKey;
     return {
-      type: 'folder',
-      folderKey,
-      folderOriginalName: this.sanitizeFolderOriginalName(value.folderOriginalName, fallbackName),
+      id: trackId,
+      src,
+      meta,
     };
   }
 
-  normalizePlaylistMeta(playlistMeta, layoutLength) {
-    const result = [];
+  sanitizePlaylist(rawPlaylist, index, usedPlaylistIds) {
+    const raw = rawPlaylist && typeof rawPlaylist === 'object' && !Array.isArray(rawPlaylist)
+      ? rawPlaylist
+      : {};
 
-    for (let index = 0; index < layoutLength; index += 1) {
-      const rawValue = Array.isArray(playlistMeta) ? playlistMeta[index] : null;
-      result.push(this.sanitizePlaylistMetaEntry(rawValue));
+    let playlistId = this.sanitizePlaylistId(raw.id, index);
+    if (usedPlaylistIds.has(playlistId)) {
+      let suffix = 1;
+      while (usedPlaylistIds.has(`${playlistId}-${suffix}`)) suffix += 1;
+      playlistId = `${playlistId}-${suffix}`;
+    }
+    usedPlaylistIds.add(playlistId);
+
+    const type = raw.type === 'folder' ? 'folder' : 'manual';
+
+    const tracksRaw = Array.isArray(raw.tracks) ? raw.tracks : [];
+    const usedTrackIds = new Set();
+    const tracks = [];
+    tracksRaw.forEach((track, trackIndex) => {
+      const normalized = this.sanitizePlaylistTrack(track, playlistId, trackIndex, usedTrackIds);
+      if (normalized) tracks.push(normalized);
+    });
+
+    const settingsRaw = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
+    const autoPlayEnabled = Boolean(settingsRaw.autoPlayEnabled);
+    const dspEnabled = Boolean(settingsRaw.dspEnabled) && autoPlayEnabled;
+
+    const playlist = {
+      id: playlistId,
+      name: this.sanitizePlaylistName(raw.name, index),
+      type,
+      tracks,
+      settings: {
+        autoPlayEnabled,
+        dspEnabled,
+      },
+      uiState: typeof raw.uiState === 'string' && raw.uiState.trim() ? raw.uiState.trim().slice(0, 64) : null,
+    };
+
+    if (type === 'folder') {
+      const folderKey = LayoutStateService.sanitizeFolderKey(raw.folderKey);
+      if (folderKey) {
+        const fallbackName = this._path.basename(folderKey) || folderKey;
+        playlist.folderKey = folderKey;
+        playlist.folderOriginalName = this.sanitizeFolderOriginalName(raw.folderOriginalName, fallbackName);
+      } else {
+        playlist.type = 'manual';
+      }
     }
 
-    return result;
+    return playlist;
+  }
+
+  sanitizePlaylists(playlists) {
+    if (!Array.isArray(playlists)) return null;
+
+    const usedPlaylistIds = new Set();
+    const normalized = [];
+    playlists.forEach((playlist, index) => {
+      const sanitized = this.sanitizePlaylist(playlist, index, usedPlaylistIds);
+      if (sanitized) normalized.push(sanitized);
+    });
+
+    if (!normalized.length) {
+      normalized.push(this.createDefaultPlaylist(0));
+    }
+
+    return normalized;
+  }
+
+  normalizeDapVolumePercent(value, fallback) {
+    const effectiveFallback = fallback !== undefined ? fallback : this._config.DAP_DEFAULT_VOLUME_PERCENT;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return this.normalizeDapVolumePercent(effectiveFallback, this._config.DAP_DEFAULT_VOLUME_PERCENT);
+    }
+
+    const rounded = Math.round(numeric);
+    if (rounded < this._config.DAP_MIN_VOLUME_PERCENT) return this._config.DAP_MIN_VOLUME_PERCENT;
+    if (rounded > this._config.DAP_MAX_VOLUME_PERCENT) return this._config.DAP_MAX_VOLUME_PERCENT;
+    return rounded;
+  }
+
+  sanitizeDapConfig(dapConfig, playlists, fallback) {
+    const availablePlaylists = Array.isArray(playlists) ? playlists : [];
+    const playlistIds = new Set(availablePlaylists.map((item) => item.id));
+
+    const safeFallbackRaw = fallback && typeof fallback === 'object' ? fallback : this._config.DEFAULT_DAP_CONFIG || {};
+    const safeFallbackId =
+      typeof safeFallbackRaw.playlistId === 'string' && safeFallbackRaw.playlistId.trim()
+        ? safeFallbackRaw.playlistId.trim()
+        : (() => {
+            const fallbackIndex = LayoutStateService.normalizePlaylistTrackIndex(safeFallbackRaw.playlistIndex);
+            if (fallbackIndex === null || !availablePlaylists[fallbackIndex]) return null;
+            return availablePlaylists[fallbackIndex].id;
+          })();
+
+    const raw = dapConfig && typeof dapConfig === 'object' ? dapConfig : null;
+    const requestedEnabled = raw && Object.prototype.hasOwnProperty.call(raw, 'enabled')
+      ? Boolean(raw.enabled)
+      : Boolean(safeFallbackRaw.enabled);
+
+    let requestedPlaylistId = raw && typeof raw.playlistId === 'string' ? raw.playlistId.trim() : '';
+    if (!requestedPlaylistId && raw && Object.prototype.hasOwnProperty.call(raw, 'playlistIndex')) {
+      const rawIndex = LayoutStateService.normalizePlaylistTrackIndex(raw.playlistIndex);
+      if (rawIndex !== null && availablePlaylists[rawIndex]) {
+        requestedPlaylistId = availablePlaylists[rawIndex].id;
+      }
+    }
+    if (!requestedPlaylistId && typeof safeFallbackId === 'string') {
+      requestedPlaylistId = safeFallbackId;
+    }
+
+    const playlistId = requestedPlaylistId && playlistIds.has(requestedPlaylistId) ? requestedPlaylistId : null;
+    const enabled = Boolean(requestedEnabled && playlistId);
+
+    const volumePercent = this.normalizeDapVolumePercent(
+      raw && Object.prototype.hasOwnProperty.call(raw, 'volumePercent') ? raw.volumePercent : safeFallbackRaw.volumePercent,
+      safeFallbackRaw.volumePercent,
+    );
+
+    return {
+      enabled,
+      playlistId,
+      volumePercent,
+    };
   }
 
   static normalizePlaylistTrackIndex(value) {
@@ -351,11 +434,16 @@ class LayoutStateService {
     }
 
     const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
+    const trackId = typeof rawPlayback.trackId === 'string' ? rawPlayback.trackId.trim().slice(0, 80) : null;
+    const playlistId = typeof rawPlayback.playlistId === 'string' ? rawPlayback.playlistId.trim().slice(0, 64) : null;
+
     if (!trackFile) {
       const updatedAt = Number(rawPlayback.updatedAt);
       if (Number.isFinite(updatedAt) && updatedAt > 0) {
         base.updatedAt = updatedAt;
       }
+      base.trackId = trackId || null;
+      base.playlistId = playlistId || null;
       return base;
     }
 
@@ -371,9 +459,11 @@ class LayoutStateService {
     const updatedAt = Number(rawPlayback.updatedAt);
     return {
       trackFile,
+      trackId: trackId || null,
       paused: Boolean(rawPlayback.paused),
       currentTime,
       duration,
+      playlistId: playlistId || null,
       playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
       playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
       interrupted: Boolean(rawPlayback.interrupted),
@@ -408,7 +498,10 @@ class LayoutStateService {
     } else if (nextDspSourceSeconds > nextDspSliceSeconds) {
       nextDspSourceSeconds = nextDspSliceSeconds;
     }
+
     const trackFile = typeof rawPlayback.trackFile === 'string' ? rawPlayback.trackFile.trim() : '';
+    const trackId = typeof rawPlayback.trackId === 'string' ? rawPlayback.trackId.trim().slice(0, 80) : null;
+    const playlistId = typeof rawPlayback.playlistId === 'string' ? rawPlayback.playlistId.trim().slice(0, 64) : null;
     if (!trackFile) {
       return {
         ...this.getDefaultPlaybackState(),
@@ -419,6 +512,8 @@ class LayoutStateService {
         overlaySeconds,
         nextDspSliceSeconds: 0,
         nextDspSourceSeconds: 0,
+        trackId,
+        playlistId,
         updatedAt: Date.now(),
       };
     }
@@ -434,6 +529,7 @@ class LayoutStateService {
 
     return {
       trackFile,
+      trackId,
       paused: Boolean(rawPlayback.paused),
       currentTime,
       duration,
@@ -444,56 +540,34 @@ class LayoutStateService {
       overlaySeconds,
       nextDspSliceSeconds,
       nextDspSourceSeconds,
+      playlistId,
       playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
       playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
       updatedAt: Date.now(),
     };
   }
 
-  // ── Group 3: Playback helpers ─────────────────────────────────────
+  // ── Group 3: Playback/Layout constraints ───────────────────────────
 
   static hasLivePlaybackTrack(state) {
     return Boolean(state && typeof state.trackFile === 'string' && state.trackFile.trim());
   }
 
-  isDeletingLivePlaybackPlaylist(nextLayout) {
+  isDeletingLivePlaybackPlaylist(nextPlaylists) {
     if (!LayoutStateService.hasLivePlaybackTrack(this._playbackState)) return false;
+
+    const playlistId = typeof this._playbackState.playlistId === 'string' ? this._playbackState.playlistId.trim() : '';
+    if (playlistId) {
+      return !Array.isArray(nextPlaylists) || !nextPlaylists.some((playlist) => playlist && playlist.id === playlistId);
+    }
 
     const livePlaylistIndex = LayoutStateService.normalizePlaylistTrackIndex(this._playbackState.playlistIndex);
     if (livePlaylistIndex === null) return false;
 
-    if (!Array.isArray(this._layoutState.layout[livePlaylistIndex])) return false;
-    return !Array.isArray(nextLayout[livePlaylistIndex]);
+    return !Array.isArray(nextPlaylists) || !nextPlaylists[livePlaylistIndex];
   }
 
-  static detectRemovedPlaylistIndex(previousLayout, nextLayout) {
-    if (!Array.isArray(previousLayout) || !Array.isArray(nextLayout)) return null;
-    if (previousLayout.length !== nextLayout.length + 1) return null;
-
-    const serializedPrevious = previousLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
-    const serializedNext = nextLayout.map((playlist) => JSON.stringify(Array.isArray(playlist) ? playlist : []));
-
-    let removedIndex = -1;
-    for (let index = 0; index < serializedNext.length; index += 1) {
-      if (serializedPrevious[index] === serializedNext[index]) continue;
-      removedIndex = index;
-      break;
-    }
-
-    if (removedIndex === -1) {
-      return previousLayout.length - 1;
-    }
-
-    for (let index = removedIndex; index < serializedNext.length; index += 1) {
-      if (serializedPrevious[index + 1] !== serializedNext[index]) {
-        return null;
-      }
-    }
-
-    return removedIndex;
-  }
-
-  // ── Group 4: Layout persistence ───────────────────────────────────
+  // ── Group 4: Persistence ────────────────────────────────────────────
 
   loadPersistedLayoutState() {
     try {
@@ -503,24 +577,16 @@ class LayoutStateService {
 
       const raw = this._fs.readFileSync(this._config.LAYOUT_STATE_PATH, 'utf8');
       const parsed = JSON.parse(raw);
-      const sanitizedLayout = LayoutStateService.sanitizeLayout(parsed.layout);
-      if (!sanitizedLayout) {
+      const playlists = this.sanitizePlaylists(parsed.playlists);
+      if (!playlists) {
         return this.getDefaultLayoutState();
       }
-      const sanitizedNames = this.normalizePlaylistNames(parsed.playlistNames, sanitizedLayout.length);
-      const sanitizedMeta = this.normalizePlaylistMeta(parsed.playlistMeta, sanitizedLayout.length);
-      const persistedDap = this.sanitizeDapConfig(parsed.dapConfig, sanitizedLayout.length, this._config.DEFAULT_DAP_CONFIG);
-      // DAP must always start disabled after server reboot, while preserving selected playlist/volume.
+
+      const persistedDap = this.sanitizeDapConfig(parsed.dapConfig, playlists, this._config.DEFAULT_DAP_CONFIG);
       const sanitizedDap = {
         ...persistedDap,
         enabled: false,
       };
-      const sanitizedAutoplay = this.normalizePlaylistAutoplayWithDap(
-        parsed.playlistAutoplay,
-        sanitizedDap,
-        sanitizedLayout.length,
-      );
-      const sanitizedDsp = LayoutStateService.normalizePlaylistDspFlags(parsed.playlistDsp, sanitizedAutoplay, sanitizedLayout.length);
       const sanitizedTrackTitleModes = this.sanitizeTrackTitleModesByTrack(parsed.trackTitleModesByTrack);
 
       const version = Number(parsed.version);
@@ -529,11 +595,7 @@ class LayoutStateService {
       return {
         version: Number.isFinite(version) && version >= 0 ? version : 0,
         updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : 0,
-        layout: sanitizedLayout,
-        playlistNames: sanitizedNames,
-        playlistMeta: sanitizedMeta,
-        playlistAutoplay: sanitizedAutoplay,
-        playlistDsp: sanitizedDsp,
+        playlists,
         dapConfig: sanitizedDap,
         trackTitleModesByTrack: sanitizedTrackTitleModes,
       };
@@ -563,6 +625,7 @@ class LayoutStateService {
   serializePlaybackState(state) {
     return JSON.stringify({
       trackFile: typeof state.trackFile === 'string' ? state.trackFile : null,
+      trackId: typeof state.trackId === 'string' ? state.trackId : null,
       paused: Boolean(state.paused),
       currentTime: Number.isFinite(state.currentTime) && state.currentTime >= 0 ? state.currentTime : 0,
       duration: Number.isFinite(state.duration) && state.duration > 0 ? state.duration : null,
@@ -573,9 +636,11 @@ class LayoutStateService {
         const normalizedDap = this.sanitizeDapPlaybackState(state.dapPlayback);
         return {
           trackFile: normalizedDap.trackFile,
+          trackId: normalizedDap.trackId,
           paused: normalizedDap.paused,
           currentTime: normalizedDap.currentTime,
           duration: normalizedDap.duration,
+          playlistId: normalizedDap.playlistId,
           playlistIndex: normalizedDap.playlistIndex,
           playlistPosition: normalizedDap.playlistPosition,
           interrupted: normalizedDap.interrupted,
@@ -584,6 +649,7 @@ class LayoutStateService {
       overlaySeconds: ConfigManager.parseBoundedNumberConfigValue(state.overlaySeconds, 0, { min: 0, max: 120 }),
       nextDspSliceSeconds: ConfigManager.parseBoundedNumberConfigValue(state.nextDspSliceSeconds, 0, { min: 0, max: 120 }),
       nextDspSourceSeconds: ConfigManager.parseBoundedNumberConfigValue(state.nextDspSourceSeconds, 0, { min: 0, max: 120 }),
+      playlistId: typeof state.playlistId === 'string' ? state.playlistId : null,
       playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(state.playlistIndex),
       playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(state.playlistPosition),
     });
@@ -591,11 +657,7 @@ class LayoutStateService {
 
   buildLayoutPayload(sourceClientId = null) {
     return {
-      layout: this._layoutState.layout,
-      playlistNames: this._layoutState.playlistNames,
-      playlistMeta: this._layoutState.playlistMeta,
-      playlistAutoplay: this._layoutState.playlistAutoplay,
-      playlistDsp: this._layoutState.playlistDsp,
+      playlists: this._layoutState.playlists,
       dapConfig: this._layoutState.dapConfig,
       trackTitleModesByTrack: this._layoutState.trackTitleModesByTrack,
       version: this._layoutState.version,
@@ -608,6 +670,7 @@ class LayoutStateService {
     const normalizedDapPlayback = this.sanitizeDapPlaybackState(this._playbackState.dapPlayback);
     return {
       trackFile: this._playbackState.trackFile,
+      trackId: this._playbackState.trackId,
       paused: this._playbackState.paused,
       currentTime: this._playbackState.currentTime,
       duration: this._playbackState.duration,
@@ -616,9 +679,11 @@ class LayoutStateService {
       allowLiveSeek: Boolean(this._playbackState.allowLiveSeek),
       dapPlayback: {
         trackFile: normalizedDapPlayback.trackFile,
+        trackId: normalizedDapPlayback.trackId,
         paused: normalizedDapPlayback.paused,
         currentTime: normalizedDapPlayback.currentTime,
         duration: normalizedDapPlayback.duration,
+        playlistId: normalizedDapPlayback.playlistId,
         playlistIndex: normalizedDapPlayback.playlistIndex,
         playlistPosition: normalizedDapPlayback.playlistPosition,
         interrupted: normalizedDapPlayback.interrupted,
@@ -633,6 +698,7 @@ class LayoutStateService {
         min: 0,
         max: 120,
       }),
+      playlistId: this._playbackState.playlistId,
       playlistIndex: this._playbackState.playlistIndex,
       playlistPosition: this._playbackState.playlistPosition,
       updatedAt: this._playbackState.updatedAt,
@@ -703,6 +769,24 @@ class LayoutStateService {
     }
   }
 
+  buildDspLayoutSnapshot(layoutState = this._layoutState) {
+    const playlists = layoutState && Array.isArray(layoutState.playlists) ? layoutState.playlists : [];
+
+    const layout = playlists.map((playlist) => {
+      const tracks = Array.isArray(playlist && playlist.tracks) ? playlist.tracks : [];
+      return tracks
+        .map((track) => LayoutStateService.trackSrcToRelativePath(track && track.src))
+        .filter(Boolean);
+    });
+
+    const playlistDsp = playlists.map((playlist) => {
+      const settings = playlist && playlist.settings && typeof playlist.settings === 'object' ? playlist.settings : {};
+      return Boolean(settings.dspEnabled) && Boolean(settings.autoPlayEnabled);
+    });
+
+    return { layout, playlistDsp };
+  }
+
   /**
    * Apply a layout update from the API handler.
    * @param {object} body - parsed request body
@@ -712,61 +796,42 @@ class LayoutStateService {
    * @returns {{ status: number, payload: object }}
    */
   applyLayoutUpdate(body, { isServer, onLayoutChanged } = {}) {
-    const nextLayout = LayoutStateService.sanitizeLayout(body.layout);
-    if (!nextLayout) {
-      return { status: 400, payload: { error: 'Неверный формат плей-листов' } };
+    if (!body || typeof body !== 'object') {
+      return { status: 400, payload: { error: 'Неверный формат состояния layout' } };
     }
 
-    if (this.isDeletingLivePlaybackPlaylist(nextLayout)) {
+    const nextPlaylists = this.sanitizePlaylists(body.playlists);
+    if (!nextPlaylists) {
+      return { status: 400, payload: { error: 'Неверный формат playlists' } };
+    }
+
+    if (this.isDeletingLivePlaybackPlaylist(nextPlaylists)) {
       return { status: 409, payload: { error: 'Нельзя удалить плей-лист, который сейчас играет на лайве.' } };
     }
 
-    const nextPlaylistNames = this.normalizePlaylistNames(body.playlistNames, nextLayout.length);
-    const nextPlaylistMeta = this.normalizePlaylistMeta(
-      Array.isArray(body.playlistMeta) ? body.playlistMeta : this._layoutState.playlistMeta,
-      nextLayout.length,
+    const currentDapConfig = this.sanitizeDapConfig(
+      this._layoutState.dapConfig,
+      this._layoutState.playlists,
+      this._config.DEFAULT_DAP_CONFIG,
     );
-    let nextDapConfig = isServer
+
+    if (
+      !isServer &&
+      currentDapConfig.enabled &&
+      currentDapConfig.playlistId &&
+      !nextPlaylists.some((playlist) => playlist.id === currentDapConfig.playlistId)
+    ) {
+      return { status: 409, payload: { error: 'Нельзя удалить плей-лист, выбранный для DAP.' } };
+    }
+
+    const nextDapConfig = isServer
       ? this.sanitizeDapConfig(
           body && Object.prototype.hasOwnProperty.call(body, 'dapConfig') ? body.dapConfig : this._layoutState.dapConfig,
-          nextLayout.length,
-          this._layoutState.dapConfig,
+          nextPlaylists,
+          currentDapConfig,
         )
-      : this.sanitizeDapConfig(this._layoutState.dapConfig, nextLayout.length, this._layoutState.dapConfig);
-    if (!isServer) {
-      const currentDapIndex = LayoutStateService.normalizePlaylistTrackIndex(this._layoutState.dapConfig && this._layoutState.dapConfig.playlistIndex);
-      const isCurrentDapEnabled = Boolean(this._layoutState.dapConfig && this._layoutState.dapConfig.enabled);
-      const removedPlaylistIndex = LayoutStateService.detectRemovedPlaylistIndex(this._layoutState.layout, nextLayout);
-      if (currentDapIndex !== null && removedPlaylistIndex !== null) {
-        if (isCurrentDapEnabled && removedPlaylistIndex === currentDapIndex) {
-          return { status: 409, payload: { error: 'Нельзя удалить плей-лист, выбранный для DAP.' } };
-        }
+      : this.sanitizeDapConfig(currentDapConfig, nextPlaylists, currentDapConfig);
 
-        if (removedPlaylistIndex < currentDapIndex) {
-          nextDapConfig = this.sanitizeDapConfig(
-            {
-              ...this._layoutState.dapConfig,
-              enabled: isCurrentDapEnabled,
-              playlistIndex: currentDapIndex - 1,
-            },
-            nextLayout.length,
-            this._layoutState.dapConfig,
-          );
-        }
-      }
-    }
-    const nextPlaylistAutoplay = isServer
-      ? this.normalizePlaylistAutoplayWithDap(body.playlistAutoplay, nextDapConfig, nextLayout.length)
-      : this.normalizePlaylistAutoplayWithDap(this._layoutState.playlistAutoplay, nextDapConfig, nextLayout.length);
-    const nextPlaylistDsp = isServer
-      ? LayoutStateService.normalizePlaylistDspFlags(
-          body && Object.prototype.hasOwnProperty.call(body, 'playlistDsp')
-            ? body.playlistDsp
-            : this._layoutState.playlistDsp,
-          nextPlaylistAutoplay,
-          nextLayout.length,
-        )
-      : LayoutStateService.normalizePlaylistDspFlags(this._layoutState.playlistDsp, nextPlaylistAutoplay, nextLayout.length);
     const nextTrackTitleModesByTrack = this.sanitizeTrackTitleModesByTrack(
       body && Object.prototype.hasOwnProperty.call(body, 'trackTitleModesByTrack')
         ? body.trackTitleModesByTrack
@@ -775,26 +840,19 @@ class LayoutStateService {
 
     const sourceClientId = LayoutStateService.sanitizeClientId(body.clientId);
     const hasChanged =
-      JSON.stringify(nextLayout) !== JSON.stringify(this._layoutState.layout) ||
-      JSON.stringify(nextPlaylistNames) !== JSON.stringify(this._layoutState.playlistNames) ||
-      JSON.stringify(nextPlaylistMeta) !== JSON.stringify(this._layoutState.playlistMeta) ||
-      JSON.stringify(nextPlaylistAutoplay) !== JSON.stringify(this._layoutState.playlistAutoplay) ||
-      JSON.stringify(nextPlaylistDsp) !== JSON.stringify(this._layoutState.playlistDsp) ||
+      JSON.stringify(nextPlaylists) !== JSON.stringify(this._layoutState.playlists) ||
       JSON.stringify(nextDapConfig) !== JSON.stringify(this._layoutState.dapConfig) ||
       JSON.stringify(nextTrackTitleModesByTrack) !== JSON.stringify(this._layoutState.trackTitleModesByTrack);
 
     if (hasChanged) {
       this._layoutState = {
-        layout: nextLayout,
-        playlistNames: nextPlaylistNames,
-        playlistMeta: nextPlaylistMeta,
-        playlistAutoplay: nextPlaylistAutoplay,
-        playlistDsp: nextPlaylistDsp,
+        playlists: nextPlaylists,
         dapConfig: nextDapConfig,
         trackTitleModesByTrack: nextTrackTitleModesByTrack,
         version: this._layoutState.version + 1,
         updatedAt: Date.now(),
       };
+
       this.persistLayoutState(this._layoutState);
       this.broadcastLayoutUpdate(sourceClientId);
       if (typeof onLayoutChanged === 'function') {
