@@ -141,18 +141,17 @@ class PlaybackGateway {
       return null;
     }
 
-    const { LayoutStateService } = require('../layout/LayoutStateService');
     const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
     if (!file) return null;
     const playlistId = typeof rawCommand.playlistId === 'string' ? rawCommand.playlistId.trim().slice(0, 64) : null;
+    const trackId = typeof rawCommand.trackId === 'string' ? rawCommand.trackId.trim().slice(0, 80) : null;
 
     return {
       type: 'play-track',
       file,
       basePath: '/audio',
       playlistId: playlistId || null,
-      playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistIndex),
-      playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawCommand.playlistPosition),
+      trackId: trackId || null,
     };
   }
 }

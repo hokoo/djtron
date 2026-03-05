@@ -4,7 +4,8 @@
   "description": "djTRON player for discos and music events with per-track controls and overlay transitions.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test"
+    "sync:playback-lib": "node scripts/sync-playback-lib.js",
+    "start": "npm run --silent sync:playback-lib && node server.js",
+    "test": "npm run --silent sync:playback-lib && node --test"
   }
 }

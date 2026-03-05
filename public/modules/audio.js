@@ -7,11 +7,66 @@ import { state, AUTOPLAY_OVERLAY_STATE_IDLE, AUTOPLAY_OVERLAY_STATE_PENDING,
 import { clampVolume, normalizeLiveVolumePreset, formatVolumePresetLabel } from './config.js';
 import { isHostRole, isCoHostRole } from './roles.js';
 import { trackKey } from './utils.js';
+import { BrowserAudioEngine } from '/shared/playback/index.js';
 
 const _deps = {};
+const liveAudioEngine = new BrowserAudioEngine();
 
 export function setAudioDeps(d) {
   Object.assign(_deps, d);
+}
+
+function mapCurveToAudioEngine(curve) {
+  return curve === 'linear' ? 'linear' : 'ease';
+}
+
+function buildTrackAudioSrc(track) {
+  if (!track || typeof track.file !== 'string' || !track.file.trim()) return '';
+  const basePath = typeof track.basePath === 'string' && track.basePath.trim() ? track.basePath.trim() : '/audio';
+  const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
+  return `${normalizedBase}/${encodeURIComponent(track.file)}`;
+}
+
+function normalizeTrackIdentity(value, maxLength = 64) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, Math.max(1, maxLength));
+}
+
+function syncBrowserAudioEngineConfig(trackOrContext = state.currentTrack) {
+  liveAudioEngine.setOverlap(getOverlaySeconds(), mapCurveToAudioEngine(getTransitionCurve()));
+  liveAudioEngine.setStopFade(getStopFadeSeconds());
+  liveAudioEngine.setVolume(getEffectiveLiveVolume(trackOrContext));
+}
+
+function clearBrowserAudioEngineSource() {
+  liveAudioEngine.currentAudio = null;
+  liveAudioEngine.currentSegment = null;
+  liveAudioEngine.fadingOutAudio = null;
+  liveAudioEngine.activeSources = [];
+}
+
+export function clearAudioEngineCurrentSource() {
+  clearBrowserAudioEngineSource();
+}
+
+function syncBrowserAudioEngineSource(track = state.currentTrack, audio = state.currentAudio) {
+  syncBrowserAudioEngineConfig(track);
+  if (!track || !audio) {
+    clearBrowserAudioEngineSource();
+    return;
+  }
+  const segment = liveAudioEngine.normalizeSegment({
+    kind: 'track',
+    src: buildTrackAudioSrc(track),
+    trackKey: track.key || null,
+    playlistId: normalizeTrackIdentity(track.playlistId, 64),
+    trackId: normalizeTrackIdentity(track.trackId, 80),
+  });
+  liveAudioEngine.currentAudio = audio;
+  liveAudioEngine.currentSegment = segment;
+  liveAudioEngine.activeSources = [segment];
 }
 
 // ── volume / transition settings ──────────────────────────────────────
@@ -61,12 +116,14 @@ export function getEffectiveLiveVolume(trackOrContext = null) {
 export function applyLiveVolumeToCurrentAudio() {
   if (!state.currentAudio) return;
   state.currentAudio.volume = getEffectiveLiveVolume(state.currentTrack);
+  syncBrowserAudioEngineConfig(state.currentTrack);
 }
 
 export function setLivePlaybackVolume(volume, { sync = false, announce = false } = {}) {
   const normalized = normalizeLiveVolumePreset(volume, state.livePlaybackVolume);
   const changed = Math.abs(normalized - state.livePlaybackVolume) >= 0.0001;
   state.livePlaybackVolume = normalized;
+  syncBrowserAudioEngineConfig(state.currentTrack);
 
   if (isHostRole()) {
     applyLiveVolumeToCurrentAudio();
@@ -88,6 +145,9 @@ export function resetFadeState() {
   state.fadeCancel.cancelled = true;
   state.fadeCancel = { cancelled: false };
   state.overlayHandoffInFlight = false;
+  if (typeof liveAudioEngine.cancelFade === 'function') {
+    liveAudioEngine.cancelFade();
+  }
 }
 
 export function fadeOutAndStop(audio, durationSeconds, curve, track) {
@@ -111,6 +171,7 @@ export function fadeOutAndStop(audio, durationSeconds, curve, track) {
       if (state.currentTrack && state.currentTrack.key === track.key) {
         state.currentAudio = null;
         state.currentTrack = null;
+        clearBrowserAudioEngineSource();
       }
       _deps.syncNowPlayingPanel();
       _deps.requestHostPlaybackSync(true);
@@ -120,6 +181,41 @@ export function fadeOutAndStop(audio, durationSeconds, curve, track) {
     const token = state.fadeCancel;
     const start = performance.now();
     const startVolume = clampVolume(audio.volume);
+    const watchCancellation = () => {
+      if (settled) return;
+      if (token.cancelled) {
+        safeResolve();
+        return;
+      }
+      requestAnimationFrame(watchCancellation);
+    };
+    requestAnimationFrame(watchCancellation);
+
+    if (typeof liveAudioEngine.fadeOut === 'function') {
+      syncBrowserAudioEngineSource(track, audio);
+      liveAudioEngine.fadeOut(audio, durationSeconds, () => {
+        if (token.cancelled) {
+          safeResolve();
+          return;
+        }
+        audio.pause();
+        audio.currentTime = 0;
+        audio.volume = startVolume;
+        _deps.setButtonPlaying(track.key, false, track);
+        _deps.setTrackPaused(track.key, false, track);
+        _deps.stopProgressLoop();
+        _deps.resetProgress(track.key);
+        if (state.currentTrack && state.currentTrack.key === track.key) {
+          state.currentAudio = null;
+          state.currentTrack = null;
+          clearBrowserAudioEngineSource();
+        }
+        _deps.syncNowPlayingPanel();
+        _deps.requestHostPlaybackSync(true);
+        safeResolve();
+      });
+      return;
+    }
 
     function step(now) {
       if (token.cancelled) return safeResolve();
@@ -138,6 +234,7 @@ export function fadeOutAndStop(audio, durationSeconds, curve, track) {
         if (state.currentTrack && state.currentTrack.key === track.key) {
           state.currentAudio = null;
           state.currentTrack = null;
+          clearBrowserAudioEngineSource();
         }
         _deps.syncNowPlayingPanel();
         _deps.requestHostPlaybackSync(true);
@@ -169,6 +266,29 @@ export function fadeOutAndPause(audio, durationSeconds, curve) {
     const token = state.fadeCancel;
     const start = performance.now();
     const startVolume = clampVolume(audio.volume);
+    const watchCancellation = () => {
+      if (settled) return;
+      if (token.cancelled) {
+        safeResolve(false);
+        return;
+      }
+      requestAnimationFrame(watchCancellation);
+    };
+    requestAnimationFrame(watchCancellation);
+
+    if (typeof liveAudioEngine.fadeOut === 'function') {
+      syncBrowserAudioEngineSource(state.currentTrack, audio);
+      liveAudioEngine.fadeOut(audio, durationSeconds, () => {
+        if (token.cancelled) {
+          safeResolve(false);
+          return;
+        }
+        audio.pause();
+        audio.volume = startVolume;
+        safeResolve(true);
+      });
+      return;
+    }
 
     function step(now) {
       if (token.cancelled) return safeResolve(false);
@@ -202,7 +322,10 @@ export async function pauseCurrentPlayback(track, audio) {
     const pausedWithFade = await fadeOutAndPause(audio, stopFadeSeconds, curve);
     if (!pausedWithFade) return false;
   } else if (!audio.paused) {
-    audio.pause();
+    syncBrowserAudioEngineSource(track, audio);
+    if (!liveAudioEngine.pause()) {
+      audio.pause();
+    }
   }
 
   _deps.stopProgressLoop();
@@ -210,6 +333,54 @@ export async function pauseCurrentPlayback(track, audio) {
   _deps.setTrackPaused(track.key, true, track);
   _deps.setStatus(`Пауза: ${track.file}`);
   return true;
+}
+
+export function stopCurrentPlaybackImmediately(track = state.currentTrack, audio = state.currentAudio) {
+  if (!track || !audio) return false;
+  syncBrowserAudioEngineSource(track, audio);
+  const previousStopFadeSeconds = Number.isFinite(liveAudioEngine.stopFadeSeconds)
+    ? liveAudioEngine.stopFadeSeconds
+    : 0;
+  liveAudioEngine.setStopFade(0);
+  liveAudioEngine.stopAll();
+  liveAudioEngine.setStopFade(previousStopFadeSeconds);
+  return true;
+}
+
+export function seekCurrentPlaybackToSeconds(nextTimeSeconds) {
+  if (!state.currentTrack || !state.currentAudio) return false;
+  const rawNextTime = Number(nextTimeSeconds);
+  if (!Number.isFinite(rawNextTime)) return false;
+  const duration = Number(state.currentAudio.duration);
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : null;
+  const safeNextTime = safeDuration === null
+    ? Math.max(0, rawNextTime)
+    : Math.max(0, Math.min(safeDuration, rawNextTime));
+
+  syncBrowserAudioEngineSource(state.currentTrack, state.currentAudio);
+  try {
+    liveAudioEngine.seekTo(safeNextTime);
+    return true;
+  } catch (err) {
+    try {
+      state.currentAudio.currentTime = safeNextTime;
+      return true;
+    } catch (fallbackErr) {
+      return false;
+    }
+  }
+}
+
+export async function resumeCurrentPlayback(track = state.currentTrack, audio = state.currentAudio) {
+  if (!track || !audio) return false;
+  syncBrowserAudioEngineSource(track, audio);
+  if (liveAudioEngine.resume()) return true;
+  try {
+    await audio.play();
+    return true;
+  } catch (err) {
+    return false;
+  }
 }
 
 export function shouldTriggerAutoplayOverlayTransition(audio, track) {
@@ -256,6 +427,7 @@ export function maybeTriggerAutoplayOverlayTransition(audio, track) {
 
 export function createAudio(track) {
   const { file, basePath, key } = track;
+  syncBrowserAudioEngineConfig(track);
   const encoded = encodeURIComponent(file);
   const normalizedBase = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
   const audio = _deps.trackLiveAudioInstance(new Audio(`${normalizedBase}/${encoded}`));
@@ -279,6 +451,7 @@ export function createAudio(track) {
     if (!isAutoplayOverlayHandoff) {
       state.currentAudio = null;
       state.currentTrack = null;
+      clearBrowserAudioEngineSource();
       _deps.resetLiveDspNextTrackPreview();
     }
     _deps.setButtonPlaying(key, false, track);
@@ -314,6 +487,7 @@ export function createAudio(track) {
     if (state.currentTrack && state.currentTrack.key === key) {
       state.currentAudio = null;
       state.currentTrack = null;
+      clearBrowserAudioEngineSource();
       _deps.resetLiveDspNextTrackPreview();
     }
     _deps.syncNowPlayingPanel();
@@ -327,50 +501,56 @@ export function createAudio(track) {
 
 export function applyOverlay(oldAudio, newAudio, targetVolume, overlaySeconds, curve, newTrack, oldTrack) {
   const safeTargetVolume = clampVolume(targetVolume);
-  const start = performance.now();
-  const duration = overlaySeconds * 1000;
-  const initialOldVolume = clampVolume(oldAudio ? oldAudio.volume : 1);
+  const duration = Math.max(0, overlaySeconds * 1000);
   resetFadeState();
   const token = state.fadeCancel;
   state.overlayHandoffInFlight = true;
 
-  function step(now) {
+  const finalizeHandoff = () => {
     if (token.cancelled) {
       state.overlayHandoffInFlight = false;
       return;
     }
-    const progress = Math.min((now - start) / duration, 1);
-    const eased = _deps.easing(progress, curve);
-    newAudio.volume = clampVolume(safeTargetVolume * eased);
+    state.overlayHandoffInFlight = false;
     if (oldAudio) {
-      oldAudio.volume = clampVolume(initialOldVolume * (1 - eased));
-    }
-    if (progress < 1) {
-      requestAnimationFrame(step);
-    } else {
-      state.overlayHandoffInFlight = false;
-      if (oldAudio) {
+      try {
         oldAudio.pause();
+      } catch (err) {}
+      try {
         oldAudio.currentTime = 0;
-        oldAudio.volume = initialOldVolume;
-        if (oldTrack) {
-          _deps.setButtonPlaying(oldTrack.key, false, oldTrack);
-          _deps.setTrackPaused(oldTrack.key, false, oldTrack);
-        }
+      } catch (err) {}
+      if (oldTrack) {
+        _deps.setButtonPlaying(oldTrack.key, false, oldTrack);
+        _deps.setTrackPaused(oldTrack.key, false, oldTrack);
       }
-      state.currentAudio = newAudio;
-      state.currentTrack = newTrack;
-      _deps.setButtonPlaying(newTrack.key, true, newTrack);
-      _deps.setTrackPaused(newTrack.key, false, newTrack);
-      _deps.startProgressLoop(newAudio, newTrack.key);
-      _deps.stopUnexpectedLiveAudios([newAudio]);
-      _deps.setStatus(`Играет: ${newTrack.file}`);
-      _deps.syncNowPlayingPanel();
-      _deps.requestHostPlaybackSync(true);
     }
+    state.currentAudio = newAudio;
+    state.currentTrack = newTrack;
+    syncBrowserAudioEngineSource(newTrack, newAudio);
+    _deps.setButtonPlaying(newTrack.key, true, newTrack);
+    _deps.setTrackPaused(newTrack.key, false, newTrack);
+    _deps.startProgressLoop(newAudio, newTrack.key);
+    _deps.stopUnexpectedLiveAudios([newAudio]);
+    _deps.setStatus(`Играет: ${newTrack.file}`);
+    _deps.syncNowPlayingPanel();
+    _deps.requestHostPlaybackSync(true);
+  };
+
+  liveAudioEngine.setOverlap(overlaySeconds, mapCurveToAudioEngine(curve));
+  if (oldAudio && duration > 0 && typeof liveAudioEngine.crossfade === 'function') {
+    liveAudioEngine.crossfade(oldAudio, newAudio, safeTargetVolume, overlaySeconds);
+    setTimeout(finalizeHandoff, duration + 34);
+    return;
   }
 
-  requestAnimationFrame(step);
+  newAudio.volume = safeTargetVolume;
+  if (oldAudio) {
+    try {
+      oldAudio.pause();
+      oldAudio.currentTime = 0;
+    } catch (err) {}
+  }
+  finalizeHandoff();
 }
 
 export async function handlePlay(file, button, basePath = '/audio', playbackContext = {}) {
@@ -385,10 +565,24 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
     Number.isInteger(playbackContext.playlistPosition) && playbackContext.playlistPosition >= 0
       ? playbackContext.playlistPosition
       : null;
+  const playlistEntry =
+    resolvedPlaylistIndex !== null && Array.isArray(state.playlists) ? state.playlists[resolvedPlaylistIndex] : null;
+  const trackEntry =
+    playlistEntry &&
+    resolvedPlaylistPosition !== null &&
+    Array.isArray(playlistEntry.tracks) &&
+    resolvedPlaylistPosition >= 0 &&
+    resolvedPlaylistPosition < playlistEntry.tracks.length
+      ? playlistEntry.tracks[resolvedPlaylistPosition]
+      : null;
+  const resolvedPlaylistId = normalizeTrackIdentity(playbackContext.playlistId, 64) || normalizeTrackIdentity(playlistEntry && playlistEntry.id, 64);
+  const resolvedTrackId = normalizeTrackIdentity(playbackContext.trackId, 80) || normalizeTrackIdentity(trackEntry && trackEntry.id, 80);
   const track = {
     file,
     basePath,
     key: trackKey(file, basePath),
+    playlistId: resolvedPlaylistId,
+    trackId: resolvedTrackId,
     playlistIndex: resolvedPlaylistIndex,
     playlistPosition: resolvedPlaylistPosition,
   };
@@ -418,6 +612,7 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
   }
   const overlaySeconds = isSwitchingAwayFromDap ? 0 : baseOverlaySeconds;
   const targetVolume = getEffectiveLiveVolume(track);
+  syncBrowserAudioEngineConfig(track);
 
   button.disabled = true;
 
@@ -429,6 +624,8 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
   if (isCoHostRole()) {
     try {
       await _deps.requestCoHostPlayTrack(file, basePath, {
+        playlistId: resolvedPlaylistId,
+        trackId: resolvedTrackId,
         playlistIndex: resolvedPlaylistIndex,
         playlistPosition: resolvedPlaylistPosition,
       });
@@ -456,7 +653,10 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
   if (state.currentTrack && state.currentTrack.key === track.key && state.currentAudio && state.currentAudio.paused) {
     try {
       _deps.setTrackPaused(track.key, false, track);
-      await state.currentAudio.play();
+      const resumed = await resumeCurrentPlayback(track, state.currentAudio);
+      if (!resumed) {
+        throw new Error('RESUME_FAILED');
+      }
       _deps.setButtonPlaying(track.key, true, track);
       _deps.startProgressLoop(state.currentAudio, track.key);
       _deps.stopUnexpectedLiveAudios([state.currentAudio]);
@@ -483,7 +683,10 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
     if (startAtSeconds !== null) {
       await _deps.seekAudioToOffset(audio, startAtSeconds);
     }
-    await audio.play();
+    const started = await resumeCurrentPlayback(track, audio);
+    if (!started) {
+      throw new Error('PLAY_START_FAILED');
+    }
 
     if (state.currentAudio && !state.currentAudio.paused && overlaySeconds > 0) {
       const oldTrack = state.currentTrack;
@@ -494,10 +697,9 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
       applyOverlay(state.currentAudio, audio, targetVolume, overlaySeconds, curve, track, oldTrack);
     } else {
       if (state.currentAudio) {
-        state.currentAudio.pause();
-        if (!isSwitchingAwayFromDap) {
-          state.currentAudio.currentTime = 0;
-        }
+        const previousTrack = state.currentTrack;
+        const previousAudio = state.currentAudio;
+        const stoppedByEngine = stopCurrentPlaybackImmediately(previousTrack, previousAudio);
         if (state.currentTrack) {
           _deps.setButtonPlaying(state.currentTrack.key, false, state.currentTrack);
           if (isSwitchingAwayFromDap) {
@@ -506,11 +708,17 @@ export async function handlePlay(file, button, basePath = '/audio', playbackCont
             _deps.setTrackPaused(state.currentTrack.key, false, state.currentTrack);
           }
         }
+        if (!isSwitchingAwayFromDap && !stoppedByEngine && previousAudio) {
+          try {
+            previousAudio.currentTime = 0;
+          } catch (err) {}
+        }
       }
       resetFadeState();
       audio.volume = targetVolume;
       state.currentAudio = audio;
       state.currentTrack = track;
+      syncBrowserAudioEngineSource(track, audio);
       _deps.setButtonPlaying(track.key, true, track);
       _deps.setTrackPaused(track.key, false, track);
       _deps.startProgressLoop(audio, track.key);

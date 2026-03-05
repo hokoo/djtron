@@ -227,8 +227,97 @@ function collectAdjacentLayoutTransitions(layout, playlistDspFlags, deps) {
   return transitions;
 }
 
+function toRelativeAudioFileFromTrack(track, deps) {
+  if (!track || typeof track !== 'object') return '';
+  const fromMeta = track.meta && typeof track.meta.originalPath === 'string' ? track.meta.originalPath.trim() : '';
+  if (fromMeta) {
+    return deps.normalizeAudioRelativePath(fromMeta);
+  }
+
+  const src = typeof track.src === 'string' ? track.src.trim() : '';
+  if (!src) return '';
+
+  let normalized = src.replace(/^https?:\/\/[^/]+/i, '');
+  const queryIndex = normalized.indexOf('?');
+  if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+  const hashIndex = normalized.indexOf('#');
+  if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+  if (normalized.startsWith('/audio/')) normalized = normalized.slice('/audio/'.length);
+  else if (normalized.startsWith('audio/')) normalized = normalized.slice('audio/'.length);
+  else normalized = normalized.replace(/^\/+/, '');
+
+  return deps.normalizeAudioRelativePath(normalized.trim());
+}
+
+function collectAdjacentPlaylistTransitions(playlists, deps) {
+  if (!Array.isArray(playlists)) return [];
+
+  const seen = new Set();
+  const transitions = [];
+
+  playlists.forEach((playlist) => {
+    if (!playlist || typeof playlist !== 'object') return;
+    const settings = playlist.settings && typeof playlist.settings === 'object' ? playlist.settings : {};
+    const dspEnabled = Boolean(settings.autoPlayEnabled) && Boolean(settings.dspEnabled);
+    if (!dspEnabled) return;
+
+    const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+    if (tracks.length < 2) return;
+
+    for (let index = 0; index < tracks.length - 1; index += 1) {
+      const fromFile = toRelativeAudioFileFromTrack(tracks[index], deps);
+      const toFile = toRelativeAudioFileFromTrack(tracks[index + 1], deps);
+      if (!fromFile || !toFile) continue;
+
+      const dedupeKey = `${fromFile}\n${toFile}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      transitions.push({ fromFile, toFile });
+    }
+  });
+
+  return transitions;
+}
+
 function scheduleDspTransitionsFromLayout(layout, options, state, cfg, deps) {
   const transitions = collectAdjacentLayoutTransitions(layout, options.playlistDspFlags, deps);
+  if (!transitions.length) {
+    return { total: 0, accepted: 0, created: 0, enqueued: 0, failed: 0 };
+  }
+
+  let accepted = 0;
+  let created = 0;
+  let enqueued = 0;
+  let failed = 0;
+
+  transitions.forEach((entry) => {
+    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
+      transitionSeconds: options.transitionSeconds,
+      sliceSeconds: options.sliceSeconds,
+      force: Boolean(options.force),
+      source: options.source || 'layout',
+      priority: options.priority || 'normal',
+    }, state, cfg, deps);
+    if (!result.ok) {
+      failed += 1;
+      return;
+    }
+    accepted += 1;
+    if (result.created) created += 1;
+    if (result.enqueued) enqueued += 1;
+  });
+
+  return {
+    total: transitions.length,
+    accepted,
+    created,
+    enqueued,
+    failed,
+  };
+}
+
+function scheduleDspTransitionsFromPlaylists(playlists, options, state, cfg, deps) {
+  const transitions = collectAdjacentPlaylistTransitions(playlists, deps);
   if (!transitions.length) {
     return { total: 0, accepted: 0, created: 0, enqueued: 0, failed: 0 };
   }
@@ -282,6 +371,8 @@ module.exports = {
   ensureFfmpegAvailable,
   enqueueDspTransition,
   collectAdjacentLayoutTransitions,
+  collectAdjacentPlaylistTransitions,
   scheduleDspTransitionsFromLayout,
+  scheduleDspTransitionsFromPlaylists,
   getDspTransitionByPair,
 };

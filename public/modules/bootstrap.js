@@ -2,7 +2,7 @@
  * djTRON — Client Bootstrap (Phase 3A)
  *
  * This module instantiates the M2A domain layer and connects it to the server.
- * Currently runs alongside the legacy script.js for verification.
+ * It is kept as an optional debug harness and is not loaded by default runtime.
  */
 
 import {

@@ -227,6 +227,45 @@ describe('DspJobManager', () => {
     assert.equal(result.accepted, 0);
   });
 
+  it('scheduleFromPlaylists schedules transitions from M2A playlists', () => {
+    const { manager } = createTestManager();
+    const result = manager.scheduleFromPlaylists([
+      {
+        id: 'p-0',
+        settings: { autoPlayEnabled: true, dspEnabled: true },
+        tracks: [
+          { id: 't-0', src: '/audio/a.mp3' },
+          { id: 't-1', src: '/audio/b.mp3' },
+        ],
+      },
+    ], {});
+    assert.equal(result.total, 1);
+    assert.equal(result.accepted, 1);
+    assert.equal(result.created, 1);
+  });
+
+  it('enqueueBatch supports fromLayout using playlists snapshot', () => {
+    const { manager } = createTestManager();
+    const result = manager.enqueueBatch(
+      { fromLayout: true },
+      {
+        playlists: [
+          {
+            id: 'p-0',
+            settings: { autoPlayEnabled: true, dspEnabled: true },
+            tracks: [
+              { id: 't-0', src: '/audio/a.mp3' },
+              { id: 't-1', src: '/audio/b.mp3' },
+            ],
+          },
+        ],
+      },
+    );
+    assert.equal(result.request.fromLayout, true);
+    assert.equal(result.request.uniquePairs, 1);
+    assert.equal(result.summary.created, 1);
+  });
+
   it('resolveOutputPath returns null for empty id', () => {
     const { manager } = createTestManager();
     assert.equal(manager.resolveOutputPath(''), null);
@@ -250,5 +289,33 @@ describe('DspJobManager', () => {
     const result = manager._collectAdjacentTransitions(layout, [true, false]);
     assert.equal(result.length, 1);
     assert.equal(result[0].fromFile, 'a.mp3');
+  });
+
+  it('_collectAdjacentTransitionsFromPlaylists extracts dsp-enabled adjacent pairs', () => {
+    const { manager } = createTestManager();
+    const result = manager._collectAdjacentTransitionsFromPlaylists([
+      {
+        id: 'p-0',
+        settings: { autoPlayEnabled: true, dspEnabled: true },
+        tracks: [
+          { id: 't-0', src: '/audio/a.mp3' },
+          { id: 't-1', src: '/audio/b.mp3?x=1' },
+          { id: 't-2', meta: { originalPath: 'c.mp3' }, src: '/audio/c.mp3' },
+        ],
+      },
+      {
+        id: 'p-1',
+        settings: { autoPlayEnabled: true, dspEnabled: false },
+        tracks: [
+          { id: 'x-0', src: '/audio/x.mp3' },
+          { id: 'x-1', src: '/audio/y.mp3' },
+        ],
+      },
+    ]);
+    assert.equal(result.length, 2);
+    assert.equal(result[0].fromFile, 'a.mp3');
+    assert.equal(result[0].toFile, 'b.mp3');
+    assert.equal(result[1].fromFile, 'b.mp3');
+    assert.equal(result[1].toFile, 'c.mp3');
   });
 });

@@ -4,7 +4,7 @@ import { setRoleDeps } from './modules/roles.js';
 import { applyRuntimeConfigFromSources,
   fetchRuntimeConfig, setConfigDeps
 } from './modules/config.js';
-import { setAudioDeps, getEffectiveLiveVolume } from './modules/audio.js';
+import { setAudioDeps, getEffectiveLiveVolume, seekCurrentPlaybackToSeconds } from './modules/audio.js';
 import { setStatusDeps,
   setStatus, hideCollapsedPlaylistsOverlay, removeCollapsedPlaylistsHint
 } from './modules/ui/status.js';
@@ -49,6 +49,7 @@ import { setPlaybackSyncDeps,
   isDspTransitionPlaybackActive, normalizePlaylistTrackIndex, queueCoHostSeekCurrentPlayback,
   refreshTrackDurationLabels, requestCoHostPlayTrack, requestCoHostSetLiveVolume,
   requestCoHostSetVolumePresetsVisibility, requestHostLiveSeekSync, requestHostPlaybackSync,
+  requestHostPlayTrack, requestHostSeekCurrentPlayback, requestHostSetLiveVolume,
   resetLiveDspNextTrackPreview, sanitizeIncomingDapPlaybackState,
   seekDspTransitionPlaybackByRatio, setDapNowPlayingProgress, setDapNowPlayingReelActive,
   setDapNowPlayingTime, setDspTransitionReelReverse, setHostNowPlayingProgress,
@@ -369,9 +370,9 @@ setNowPlayingDeps({
   buildDapPlaybackSnapshotForSync, sanitizeIncomingDapPlaybackState,
   isDapTrackContext, isDapPauseLocked, isDspTransitionPlaybackActive,
   updateVolumePresetsUi,
-  requestHostPlaybackSync, requestHostLiveSeekSync,
+  requestHostPlaybackSync, requestHostLiveSeekSync, requestHostSeekCurrentPlayback,
   queueCoHostSeekCurrentPlayback, clearQueuedCoHostSeekCommands,
-  seekDspTransitionPlaybackByRatio, updateProgress,
+  seekDspTransitionPlaybackByRatio, seekCurrentPlaybackToSeconds, updateProgress,
   toggleNowPlayingPlayback,
   initVolumePresetControls,
   setStatus,
@@ -394,7 +395,7 @@ setVolumeDeps({
   getLocalVolumePresetButtons: () => localVolumePresetButtons,
   setLocalVolumePresetButtons: (v) => { localVolumePresetButtons = v; },
   getEffectiveLiveVolume,
-  requestCoHostSetLiveVolume, requestCoHostSetVolumePresetsVisibility,
+  requestCoHostSetLiveVolume, requestCoHostSetVolumePresetsVisibility, requestHostSetLiveVolume,
   requestHostPlaybackSync,
   saveSetting, loadBooleanSetting,
 });
@@ -559,6 +560,7 @@ setPlaylistsDeps({
   reconcileDapInterruptedSnapshotWithLayout,
   reconcileTrackContextWithLayout,
   refreshTrackDurationLabels,
+  requestHostPlayTrack,
   requestHostPlaybackSync,
   resetTrackReferences,
   sanitizeIncomingDapPlaybackState,

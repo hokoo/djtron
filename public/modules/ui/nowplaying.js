@@ -467,6 +467,13 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
     return true;
   }
 
+  if (isHostRole() && typeof _deps.requestHostSeekCurrentPlayback === 'function') {
+    void _deps.requestHostSeekCurrentPlayback(ratio, { finalize: Boolean(finalize) }).catch((err) => {
+      console.error(err);
+    });
+    return true;
+  }
+
   if (isHostRole() && _deps.isDspTransitionPlaybackActive()) {
     return _deps.seekDspTransitionPlaybackByRatio(ratio);
   }
@@ -477,17 +484,21 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
   if (!Number.isFinite(duration) || duration <= 0) return false;
   const nextTime = Math.max(0, Math.min(duration, ratio * duration));
 
-  try {
-    if (typeof state.currentAudio.fastSeek === 'function') {
-      state.currentAudio.fastSeek(nextTime);
-    } else {
-      state.currentAudio.currentTime = nextTime;
-    }
-  } catch (err) {
+  if (typeof _deps.seekCurrentPlaybackToSeconds === 'function') {
+    if (!_deps.seekCurrentPlaybackToSeconds(nextTime)) return false;
+  } else {
     try {
-      state.currentAudio.currentTime = nextTime;
-    } catch (fallbackErr) {
-      return false;
+      if (typeof state.currentAudio.fastSeek === 'function') {
+        state.currentAudio.fastSeek(nextTime);
+      } else {
+        state.currentAudio.currentTime = nextTime;
+      }
+    } catch (err) {
+      try {
+        state.currentAudio.currentTime = nextTime;
+      } catch (fallbackErr) {
+        return false;
+      }
     }
   }
 

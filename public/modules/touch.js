@@ -1,14 +1,49 @@
 // public/modules/touch.js — touch interactions, zones pan, playlist reorder
 
-import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state } from './state.js';
+import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_HOST, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state } from './state.js';
 import { applyLiveVolumeToCurrentAudio } from './audio.js';
 import { isHostRole } from './roles.js';
 import { isDapTrackContext, updateDapSettingsUi } from './ui/dap.js';
 import { hideCollapsedPlaylistsOverlay,
   setStatus, showCollapsedPlaylistsHint, showCollapsedPlaylistsOverlay
 } from './ui/status.js';
+import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+const PLAYLIST_REORDER_COMMAND = 'playlist-reorder';
+
+const hostPlaylistReorderCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole }) =>
+    sourceRole === ROLE_HOST
+      ? { allowed: true }
+      : { allowed: false, reason: 'ACCESS_DENIED', message: 'Только хост может менять порядок плей-листов.' },
+  execute: async (payload) => {
+    if (!payload || typeof payload.run !== 'function') {
+      throw new Error('Некорректная команда перестановки плей-листов.');
+    }
+    await payload.run();
+  },
+});
+
+async function dispatchHostPlaylistReorderCommand(run) {
+  let runResult;
+  const result = await hostPlaylistReorderCommandBus.dispatch(
+    {
+      sourceRole: ROLE_HOST,
+      commandType: PLAYLIST_REORDER_COMMAND,
+      target: 'self',
+    },
+    {
+      run: async () => {
+        runResult = await run();
+      },
+    },
+  );
+  if (!result.ok) {
+    throw new Error(result.message || 'Команда перестановки плей-листов отклонена.');
+  }
+  return runResult;
+}
 
 export function setTouchDeps(d) {
   Object.assign(_deps, d);
@@ -1379,7 +1414,17 @@ export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPl
     setStatus('Порядок плей-листов может менять только хост.');
     return;
   }
+  try {
+    await dispatchHostPlaylistReorderCommand(() =>
+      reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPlaylistIndex),
+    );
+  } catch (err) {
+    console.error(err);
+    setStatus(err && err.message ? err.message : 'Не удалось изменить порядок плей-листов.');
+  }
+}
 
+async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPlaylistIndex) {
   state.layout = _deps.ensurePlaylists(state.layout);
   const sourceIndex = _deps.normalizePlaylistTrackIndex(sourcePlaylistIndex);
   const normalizedTargetIndex =
