@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state, syncLegacyStateFromPlaylists } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -1787,11 +1787,36 @@ export async function fetchSharedLayoutState() {
 }
 
 export async function pushSharedLayout({ renderOnApply = true } = {}) {
-  const payloadState = _deps.ensureFolderPlaylistsCoverage(state.layout, state.playlistNames, state.playlistMeta);
-  const payloadDapConfig = _deps.normalizeDapConfig(state.dapConfig, payloadState.layout.length, state.dapConfig);
-  const payloadAutoplay = _deps.normalizePlaylistAutoplayWithDap(state.playlistAutoplay, payloadDapConfig, payloadState.layout.length);
-  const payloadDsp = _deps.normalizePlaylistDspFlags(state.playlistDsp, payloadAutoplay, payloadState.layout.length);
   const payloadTrackTitleModes = _deps.serializeTrackTitleModesByTrack();
+  const sourceLegacyState = (() => {
+    if (Array.isArray(state.playlists) && state.playlists.length) {
+      return buildLegacyShapeFromPlaylists(state.playlists, payloadTrackTitleModes);
+    }
+    return {
+      layout: _deps.ensurePlaylists(state.layout),
+      playlistNames: Array.isArray(state.playlistNames) ? state.playlistNames.slice() : [],
+      playlistMeta: _deps.normalizePlaylistMeta(state.playlistMeta, _deps.ensurePlaylists(state.layout).length),
+      playlistAutoplay: Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [],
+      playlistDsp: Array.isArray(state.playlistDsp) ? state.playlistDsp.slice() : [],
+      trackTitleModesByTrack: payloadTrackTitleModes,
+    };
+  })();
+  const payloadState = _deps.ensureFolderPlaylistsCoverage(
+    sourceLegacyState.layout,
+    sourceLegacyState.playlistNames,
+    sourceLegacyState.playlistMeta,
+  );
+  const payloadDapConfig = _deps.normalizeDapConfig(state.dapConfig, payloadState.layout.length, state.dapConfig);
+  const payloadAutoplay = _deps.normalizePlaylistAutoplayWithDap(
+    sourceLegacyState.playlistAutoplay,
+    payloadDapConfig,
+    payloadState.layout.length,
+  );
+  const payloadDsp = _deps.normalizePlaylistDspFlags(
+    sourceLegacyState.playlistDsp,
+    payloadAutoplay,
+    payloadState.layout.length,
+  );
   state.layout = payloadState.layout;
   state.playlistNames = payloadState.playlistNames;
   state.playlistMeta = payloadState.playlistMeta;
@@ -1806,6 +1831,7 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     playlistDsp: payloadDsp,
     trackTitleModesByTrack: payloadTrackTitleModes,
   });
+  state.playlists = payloadPlaylists;
 
   const { ok, data } = await api.postLayout({
     playlists: payloadPlaylists,
@@ -1881,13 +1907,21 @@ export async function initializePlaybackState() {
 
 export async function initializeLayoutState() {
   const serverState = await fetchSharedLayoutState();
-  const incomingLayout = _deps.ensurePlaylists(serverState.layout);
-  const incomingNames = _deps.normalizePlaylistNames(serverState.playlistNames, incomingLayout.length);
-  const incomingMeta = _deps.normalizePlaylistMeta(serverState.playlistMeta, incomingLayout.length);
-  const incomingDap = _deps.normalizeDapConfig(serverState.dapConfig, incomingLayout.length, DEFAULT_DAP_CONFIG);
-  const incomingAutoplay = _deps.normalizePlaylistAutoplayWithDap(serverState.playlistAutoplay, incomingDap, incomingLayout.length);
-  const incomingDsp = _deps.normalizePlaylistDspFlags(serverState.playlistDsp, incomingAutoplay, incomingLayout.length);
-  const incomingTrackTitleModes = _deps.normalizeTrackTitleModesByTrackForFiles(serverState.trackTitleModesByTrack, state.availableFiles, '/audio');
+  const incomingLegacyState = syncLegacyStateFromPlaylists(serverState.playlists, {
+    dapConfig: serverState.dapConfig,
+    trackTitleModesByTrack: serverState.trackTitleModesByTrack,
+  });
+  const incomingLayout = _deps.ensurePlaylists(incomingLegacyState.layout);
+  const incomingNames = _deps.normalizePlaylistNames(incomingLegacyState.playlistNames, incomingLayout.length);
+  const incomingMeta = _deps.normalizePlaylistMeta(incomingLegacyState.playlistMeta, incomingLayout.length);
+  const incomingDap = _deps.normalizeDapConfig(incomingLegacyState.dapConfig, incomingLayout.length, DEFAULT_DAP_CONFIG);
+  const incomingAutoplay = _deps.normalizePlaylistAutoplayWithDap(incomingLegacyState.playlistAutoplay, incomingDap, incomingLayout.length);
+  const incomingDsp = _deps.normalizePlaylistDspFlags(incomingLegacyState.playlistDsp, incomingAutoplay, incomingLayout.length);
+  const incomingTrackTitleModes = _deps.normalizeTrackTitleModesByTrackForFiles(
+    incomingLegacyState.trackTitleModesByTrack,
+    state.availableFiles,
+    '/audio',
+  );
 
   let nextLayout = _deps.normalizeLayoutForFiles(incomingLayout, state.availableFiles);
   let nextNames = _deps.normalizePlaylistNames(incomingNames, nextLayout.length);

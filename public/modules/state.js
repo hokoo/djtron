@@ -418,6 +418,107 @@ function legacyDapToM2A(dapConfig) {
   };
 }
 
+function toLegacyFilePathFromTrack(track) {
+  if (track && track.meta && typeof track.meta.originalPath === 'string' && track.meta.originalPath.trim()) {
+    return track.meta.originalPath.trim();
+  }
+
+  const src = typeof track?.src === 'string' ? track.src.trim() : '';
+  if (!src) return '';
+
+  let normalized = src.replace(/^https?:\/\/[^/]+/i, '');
+  const queryIndex = normalized.indexOf('?');
+  if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+  const hashIndex = normalized.indexOf('#');
+  if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+  if (normalized.startsWith('/audio/')) normalized = normalized.slice('/audio/'.length);
+  else if (normalized.startsWith('audio/')) normalized = normalized.slice('audio/'.length);
+  else normalized = normalized.replace(/^\/+/, '');
+  return normalized.trim();
+}
+
+function buildLegacyShapeFromPlaylists(playlists, explicitTrackTitleModes = null) {
+  const normalizedPlaylists = Array.isArray(playlists) ? playlists : [];
+  const layout = [];
+  const playlistNames = [];
+  const playlistMeta = [];
+  const playlistAutoplay = [];
+  const playlistDsp = [];
+  const trackTitleModesByTrack =
+    explicitTrackTitleModes && typeof explicitTrackTitleModes === 'object'
+      ? { ...explicitTrackTitleModes }
+      : {};
+
+  normalizedPlaylists.forEach((playlist, playlistIndex) => {
+    const tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+    const files = [];
+    tracks.forEach((track) => {
+      const filePath = toLegacyFilePathFromTrack(track);
+      if (!filePath) return;
+      files.push(filePath);
+      if (track?.meta?.titleMode === TRACK_TITLE_MODE_ATTRIBUTES) {
+        trackTitleModesByTrack[filePath] = TRACK_TITLE_MODE_ATTRIBUTES;
+      }
+    });
+    layout.push(files);
+
+    playlistNames.push(
+      typeof playlist?.name === 'string' && playlist.name.trim()
+        ? playlist.name.trim()
+        : `Плей-лист ${playlistIndex + 1}`,
+    );
+
+    if (playlist?.type === PLAYLIST_TYPE_FOLDER) {
+      playlistMeta.push({
+        type: PLAYLIST_TYPE_FOLDER,
+        folderKey: typeof playlist?.folderKey === 'string' ? playlist.folderKey : undefined,
+        folderOriginalName: typeof playlist?.folderOriginalName === 'string' ? playlist.folderOriginalName : undefined,
+      });
+    } else {
+      playlistMeta.push({ type: PLAYLIST_TYPE_MANUAL });
+    }
+
+    const autoplayEnabled = Boolean(playlist?.settings?.autoPlayEnabled);
+    playlistAutoplay.push(autoplayEnabled);
+    playlistDsp.push(Boolean(playlist?.settings?.dspEnabled) && autoplayEnabled);
+  });
+
+  return {
+    layout,
+    playlistNames,
+    playlistMeta,
+    playlistAutoplay,
+    playlistDsp,
+    trackTitleModesByTrack,
+  };
+}
+
+function buildLegacyDapConfigFromM2A(dapConfig, playlists) {
+  const safeConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  let playlistIndex = null;
+
+  if (typeof safeConfig.playlistId === 'string' && safeConfig.playlistId.trim()) {
+    const normalizedId = safeConfig.playlistId.trim();
+    const foundIndex = safePlaylists.findIndex((playlist) => playlist && playlist.id === normalizedId);
+    if (foundIndex >= 0) {
+      playlistIndex = foundIndex;
+    } else {
+      const idxMatch = normalizedId.match(/^p-(\d+)$/);
+      playlistIndex = idxMatch ? parseInt(idxMatch[1], 10) : null;
+    }
+  }
+
+  return {
+    enabled: Boolean(safeConfig.enabled) && playlistIndex !== null,
+    playlistIndex,
+    playlistId: typeof safeConfig.playlistId === 'string' ? safeConfig.playlistId : null,
+    volumePercent: Number.isFinite(Number(safeConfig.volumePercent))
+      ? Number(safeConfig.volumePercent)
+      : DAP_DEFAULT_VOLUME_PERCENT,
+  };
+}
+
 function serializeTrackTitleModesByTrackValue(value) {
   if (value instanceof Map) {
     const result = {};
@@ -432,6 +533,52 @@ function serializeTrackTitleModesByTrackValue(value) {
     return { ...value };
   }
   return {};
+}
+
+export function syncLegacyStateFromPlaylists(
+  playlists = state.playlists,
+  {
+    dapConfig = state.dapConfig,
+    trackTitleModesByTrack = state.trackTitleModesByTrack,
+  } = {},
+) {
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  const explicitTitleModes = serializeTrackTitleModesByTrackValue(trackTitleModesByTrack);
+  const legacy = buildLegacyShapeFromPlaylists(safePlaylists, explicitTitleModes);
+
+  state.playlists = safePlaylists;
+  state.layout = Array.isArray(legacy.layout) && legacy.layout.length ? legacy.layout : [[]];
+  state.playlistNames =
+    Array.isArray(legacy.playlistNames) && legacy.playlistNames.length ? legacy.playlistNames : ['Плей-лист 1'];
+  state.playlistMeta =
+    Array.isArray(legacy.playlistMeta) && legacy.playlistMeta.length ? legacy.playlistMeta : [{ type: PLAYLIST_TYPE_MANUAL }];
+  state.playlistAutoplay =
+    Array.isArray(legacy.playlistAutoplay) && legacy.playlistAutoplay.length ? legacy.playlistAutoplay : [false];
+  state.playlistDsp =
+    Array.isArray(legacy.playlistDsp) && legacy.playlistDsp.length ? legacy.playlistDsp : [false];
+
+  const normalizedM2ADap = legacyDapToM2A(dapConfig);
+  const legacyDap = buildLegacyDapConfigFromM2A(normalizedM2ADap, safePlaylists);
+  state.dapConfig = {
+    ...(state.dapConfig || {}),
+    ...(dapConfig && typeof dapConfig === 'object' ? dapConfig : {}),
+    enabled: Boolean(legacyDap.enabled),
+    playlistIndex: legacyDap.playlistIndex,
+    playlistId: legacyDap.playlistId,
+    volumePercent: Number.isFinite(Number(normalizedM2ADap.volumePercent))
+      ? Number(normalizedM2ADap.volumePercent)
+      : DAP_DEFAULT_VOLUME_PERCENT,
+  };
+
+  return {
+    layout: state.layout,
+    playlistNames: state.playlistNames,
+    playlistMeta: state.playlistMeta,
+    playlistAutoplay: state.playlistAutoplay,
+    playlistDsp: state.playlistDsp,
+    dapConfig: state.dapConfig,
+    trackTitleModesByTrack: legacy.trackTitleModesByTrack,
+  };
 }
 
 export function syncPlaylistsFromLegacyState() {
