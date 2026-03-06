@@ -1237,6 +1237,7 @@ async function togglePlaylistDspLocally(playlistIndex) {
   const currentSettings = playlistEntry && playlistEntry.settings && typeof playlistEntry.settings === 'object'
     ? playlistEntry.settings
     : {};
+  const wasDspEnabled = Boolean(currentSettings.dspEnabled);
   if (!Boolean(currentSettings.autoPlayEnabled)) {
     setStatus('DSP можно включить только при активном автопроигрывании.');
     return;
@@ -1262,6 +1263,18 @@ async function togglePlaylistDspLocally(playlistIndex) {
 
   try {
     await _deps.pushSharedLayout();
+    if (
+      !wasDspEnabled &&
+      nextDspEnabled &&
+      state.currentTrack &&
+      state.currentAudio &&
+      !state.currentAudio.paused &&
+      _deps.normalizePlaylistTrackIndex(state.currentTrack.playlistIndex) === playlistIndex &&
+      (state.currentTrack.basePath || '/audio') === '/audio' &&
+      typeof _deps.triggerLiveDspTransitionForTrack === 'function'
+    ) {
+      _deps.triggerLiveDspTransitionForTrack(state.currentTrack);
+    }
     setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${state.playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
   } catch (err) {
     console.error(err);

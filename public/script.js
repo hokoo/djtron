@@ -600,6 +600,7 @@ setPlaylistsDeps({
   requestTrackPlaybackForCurrentRole,
   requestHostPlayTrack,
   requestHostPlaybackSync,
+  triggerLiveDspTransitionForTrack,
   resetTrackReferences,
   sanitizeIncomingDapPlaybackState,
   setDropEffectFromEvent,
