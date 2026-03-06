@@ -679,7 +679,7 @@ export async function tryAutoplayNextTrack(finishedTrack) {
 
   state.autoplayStartInFlight = true;
   try {
-    const nextTrack = _deps.resolveAutoplayNextTrack(finishedTrack);
+    const nextTrack = _deps.resolveAutoplayNextTrack(finishedTrack, { consumeScheduledSwitch: true });
     if (!nextTrack) return false;
 
     const transitionStarted = await tryStartAutoplayWithDspTransition(finishedTrack, nextTrack);

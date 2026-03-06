@@ -314,6 +314,7 @@ export const state = {
   queueNextChainAnchor: null,
   queueNextChainExpiresAt: 0,
   playNextInsertSession: null,
+  playNextScheduledSwitch: null,
   queueNextCountdownTimer: null,
   trackRelocationHighlights: new Map(),
   trackRelocationHighlightTimer: null,

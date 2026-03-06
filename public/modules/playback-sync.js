@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -20,7 +20,7 @@ import { setLiveSeekEnabled, syncHostNowPlayingPanel, syncNowPlayingPanel } from
 import { setStatus } from './ui/status.js';
 import { setShowVolumePresetsEnabled, updateVolumePresetsUi } from './ui/volume.js';
 import { trackKey } from './utils.js';
-import { createHostPlaybackControllerAdapter } from './playback-controller-adapter.js';
+import { createPlaybackControllerAdapter } from './playback-controller-adapter.js';
 import { PlaybackCommandBus, canDispatchLivePlaybackCommand } from '/shared/playback/index.js';
 
 const _deps = {};
@@ -215,7 +215,7 @@ const incomingLiveCommandBus = new PlaybackCommandBus({
   execute: (payload) => executeHostPlaybackCommandLocally(payload),
 });
 
-const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
+const playbackControllerAdapter = createPlaybackControllerAdapter({
   getSnapshot: () => ({
     layout: _deps.ensurePlaylists(state.layout),
     playlistAutoplay: Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [],
@@ -233,6 +233,7 @@ const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
   isTransitionPlaybackActive: () => isDspTransitionPlaybackActive(),
   onStop: async (_command, { sourceTag = '' } = {}) => {
     clearPlayNextInsertSession();
+    clearPlayNextScheduledSwitch();
     stopAndClearLocalPlayback();
     requestHostPlaybackSync(true);
     setStatus(sourceTag ? `Live управление${sourceTag}: стоп.` : 'Воспроизведение остановлено.');
@@ -249,7 +250,7 @@ const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
       setStatus(`Live управление${sourceTag}: Play Next.`);
     }
   },
-  onPlayTrack: async (command, { sourceTag = '' } = {}) => {
+  onPlayTrack: async (command, { sourceTag = '', target = 'host' } = {}) => {
     const resolvedContext = resolvePlaylistTrackContextByIds({
       file: command.file,
       playlistId: command.playlistId,
@@ -264,7 +265,13 @@ const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
       command.basePath,
     );
     if (!button) {
-      setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
+      if (sourceTag) {
+        setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
+      } else if (target === 'self') {
+        setStatus(`Не удалось выполнить локальную команду: трек ${command.file} не найден.`);
+      } else {
+        setStatus(`Не удалось выполнить playback-команду: трек ${command.file} не найден.`);
+      }
       return;
     }
 
@@ -894,6 +901,26 @@ function clearPlayNextInsertSession() {
   state.playNextInsertSession = null;
 }
 
+function clearPlayNextScheduledSwitch() {
+  state.playNextScheduledSwitch = null;
+}
+
+function buildPlayNextScheduledSwitch(anchorContext, toPlaylistIndex) {
+  const anchorPlaylistIndex = normalizePlaylistTrackIndex(anchorContext && anchorContext.playlistIndex);
+  const anchorPlaylistPosition = normalizePlaylistTrackIndex(anchorContext && anchorContext.playlistPosition);
+  const normalizedTargetPlaylistIndex = normalizePlaylistTrackIndex(toPlaylistIndex);
+  if (anchorPlaylistIndex === null || anchorPlaylistPosition === null || normalizedTargetPlaylistIndex === null) {
+    return null;
+  }
+  return {
+    toPlaylistIndex: normalizedTargetPlaylistIndex,
+    afterPlaylistIndex: anchorPlaylistIndex,
+    afterPlaylistPosition: anchorPlaylistPosition,
+    afterTrackFile: typeof anchorContext?.file === 'string' ? anchorContext.file.trim() : '',
+    switchMode: 'autoplay',
+  };
+}
+
 function resolvePlayNextAnchorContext() {
   const normalizedLayout = _deps.ensurePlaylists(state.layout);
   if (!normalizedLayout.length) return null;
@@ -986,14 +1013,11 @@ async function applyPlayNextRequestLocally(command) {
   const strategy = command.strategy === 'create-new-playnext-playlist'
     ? 'create-new-playnext-playlist'
     : 'copy-into-active';
-  if (strategy !== 'copy-into-active') {
-    setStatus('Live Play Next: стратегия create-new-playnext-playlist пока не поддерживается на клиенте.');
-    return false;
-  }
 
   const anchorContext = resolvePlayNextAnchorContext();
   if (!anchorContext) {
     clearPlayNextInsertSession();
+    clearPlayNextScheduledSwitch();
     setStatus('Live Play Next недоступен: нет активного трека/якоря.');
     return false;
   }
@@ -1001,6 +1025,7 @@ async function applyPlayNextRequestLocally(command) {
   const anchorPlaylistIndex = normalizePlaylistTrackIndex(anchorContext.playlistIndex);
   if (anchorPlaylistIndex === null) {
     clearPlayNextInsertSession();
+    clearPlayNextScheduledSwitch();
     setStatus('Live Play Next недоступен: не определен активный плей-лист.');
     return false;
   }
@@ -1012,14 +1037,8 @@ async function applyPlayNextRequestLocally(command) {
     Boolean(state.playlistAutoplay[anchorPlaylistIndex]);
   if (!isAutoplayEnabled) {
     clearPlayNextInsertSession();
+    clearPlayNextScheduledSwitch();
     setStatus('Live Play Next доступен только в AutoPlay/DSP режиме.');
-    return false;
-  }
-
-  const insertIndex = resolvePlayNextInsertIndex(anchorContext, { fifoSession: Boolean(command.fifoSession) });
-  if (!Number.isInteger(insertIndex) || insertIndex < 0) {
-    clearPlayNextInsertSession();
-    setStatus('Live Play Next отклонен: не удалось определить позицию вставки.');
     return false;
   }
 
@@ -1029,15 +1048,130 @@ async function applyPlayNextRequestLocally(command) {
   const previousAutoplay = Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [];
   const previousDsp = Array.isArray(state.playlistDsp) ? state.playlistDsp.slice() : [];
   const previousDap = { ...(state.dapConfig || DEFAULT_DAP_CONFIG) };
+  const previousScheduledSwitch = state.playNextScheduledSwitch && typeof state.playNextScheduledSwitch === 'object'
+    ? { ...state.playNextScheduledSwitch }
+    : null;
+  const previousPlaylists = Array.isArray(state.playlists)
+    ? state.playlists.map((playlist) => (playlist && typeof playlist === 'object' ? { ...playlist } : playlist))
+    : [];
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
-  if (!Array.isArray(nextLayout[anchorPlaylistIndex])) {
+  let successMessage = '';
+
+  if (strategy === 'copy-into-active') {
+    const insertIndex = resolvePlayNextInsertIndex(anchorContext, { fifoSession: Boolean(command.fifoSession) });
+    if (!Number.isInteger(insertIndex) || insertIndex < 0) {
+      clearPlayNextInsertSession();
+      clearPlayNextScheduledSwitch();
+      setStatus('Live Play Next отклонен: не удалось определить позицию вставки.');
+      return false;
+    }
+    if (!Array.isArray(nextLayout[anchorPlaylistIndex])) {
+      clearPlayNextInsertSession();
+      clearPlayNextScheduledSwitch();
+      setStatus('Live Play Next отклонен: целевой плей-лист недоступен.');
+      return false;
+    }
+
+    const boundedInsertIndex = Math.max(0, Math.min(insertIndex, nextLayout[anchorPlaylistIndex].length));
+    nextLayout[anchorPlaylistIndex].splice(boundedInsertIndex, 0, requestedFile);
+    clearPlayNextScheduledSwitch();
+    successMessage = `Live Play Next: ${requestedFile} поставлен следующим.`;
+  } else {
     clearPlayNextInsertSession();
-    setStatus('Live Play Next отклонен: целевой плей-лист недоступен.');
-    return false;
+    const quickBuildPlaylistIndex = nextLayout.length;
+    nextLayout.push([requestedFile]);
+
+    const nextNames = _deps.normalizePlaylistNames(
+      [...previousNames, `Play Next ${quickBuildPlaylistIndex + 1}`],
+      nextLayout.length,
+    );
+    const nextMeta = _deps.normalizePlaylistMeta(
+      [...previousMeta, { type: PLAYLIST_TYPE_MANUAL }],
+      nextLayout.length,
+    );
+    const nextDap = _deps.normalizeDapConfig(previousDap, nextLayout.length, previousDap);
+    const nextAutoplay = _deps.normalizePlaylistAutoplayWithDap(
+      [...previousAutoplay, true],
+      nextDap,
+      nextLayout.length,
+    );
+    const nextDsp = _deps.normalizePlaylistDspFlags(
+      [...previousDsp, false],
+      nextAutoplay,
+      nextLayout.length,
+    );
+
+    const scheduledSwitch = buildPlayNextScheduledSwitch(anchorContext, quickBuildPlaylistIndex);
+    if (!scheduledSwitch) {
+      setStatus('Live Play Next отклонен: не удалось подготовить переключение плей-листа.');
+      return false;
+    }
+
+    state.layout = _deps.ensurePlaylists(nextLayout);
+    state.playlistNames = nextNames;
+    state.playlistMeta = nextMeta;
+    state.dapConfig = nextDap;
+    state.playlistAutoplay = nextAutoplay;
+    state.playlistDsp = nextDsp;
+    state.playNextScheduledSwitch = scheduledSwitch;
+    const nextPlaylists = previousPlaylists.map((playlist) => (
+      playlist && typeof playlist === 'object'
+        ? {
+            ...playlist,
+            tracks: Array.isArray(playlist.tracks) ? playlist.tracks.map((track) => ({ ...track })) : [],
+          }
+        : playlist
+    ));
+    while (nextPlaylists.length < nextLayout.length) {
+      nextPlaylists.push(null);
+    }
+    const existingQuickBuild = nextPlaylists[quickBuildPlaylistIndex];
+    const quickBuildId =
+      existingQuickBuild && typeof existingQuickBuild.id === 'string' && existingQuickBuild.id
+        ? existingQuickBuild.id
+        : `p-${quickBuildPlaylistIndex}`;
+    nextPlaylists[quickBuildPlaylistIndex] = {
+      id: quickBuildId,
+      name: state.playlistNames[quickBuildPlaylistIndex] || `Play Next ${quickBuildPlaylistIndex + 1}`,
+      type: PLAYLIST_TYPE_MANUAL,
+      tracks:
+        existingQuickBuild && Array.isArray(existingQuickBuild.tracks) && existingQuickBuild.tracks.length
+          ? existingQuickBuild.tracks.map((track) => ({ ...track }))
+          : [
+              {
+                id: `${quickBuildId}-t-0`,
+                src: `/audio/${encodeURIComponent(requestedFile)}`,
+                meta: { originalPath: requestedFile },
+              },
+            ],
+      settings: {
+        autoPlayEnabled: true,
+        dspEnabled: false,
+      },
+      uiState: 'quick_build_armed',
+    };
+    state.playlists = nextPlaylists;
+    _deps.renderZones();
+    try {
+      await pushSharedLayout();
+      setStatus(`Live Play Next: создан quick build плей-лист #${quickBuildPlaylistIndex + 1}.`);
+      return true;
+    } catch (err) {
+      console.error(err);
+      state.layout = previousLayout;
+      state.playlistNames = previousNames;
+      state.playlistMeta = previousMeta;
+      state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
+      state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+      state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+      state.playNextScheduledSwitch = previousScheduledSwitch;
+      state.playlists = previousPlaylists;
+      _deps.renderZones();
+      setStatus('Не удалось синхронизировать Live Play Next.');
+      return false;
+    }
   }
-  const boundedInsertIndex = Math.max(0, Math.min(insertIndex, nextLayout[anchorPlaylistIndex].length));
-  nextLayout[anchorPlaylistIndex].splice(boundedInsertIndex, 0, requestedFile);
 
   state.layout = _deps.ensurePlaylists(nextLayout);
   state.playlistNames = _deps.normalizePlaylistNames(previousNames, state.layout.length);
@@ -1049,7 +1183,7 @@ async function applyPlayNextRequestLocally(command) {
 
   try {
     await pushSharedLayout();
-    setStatus(`Live Play Next: ${requestedFile} поставлен следующим.`);
+    setStatus(successMessage || `Live Play Next: ${requestedFile} поставлен следующим.`);
     return true;
   } catch (err) {
     console.error(err);
@@ -1059,6 +1193,8 @@ async function applyPlayNextRequestLocally(command) {
     state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
     state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
     state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    state.playNextScheduledSwitch = previousScheduledSwitch;
+    state.playlists = previousPlaylists;
     _deps.renderZones();
     setStatus('Не удалось синхронизировать Live Play Next.');
     return false;
@@ -1079,70 +1215,43 @@ async function executeSelfPlaybackCommandLocally(command, commandContext = {}) {
     throw new Error('Локальная playback-команда должна иметь target=self.');
   }
 
+  try {
+    const handledByControllerAdapter = await playbackControllerAdapter.execute(command, {
+      sourceRole,
+      target,
+      sourceTag: '',
+    });
+    if (handledByControllerAdapter) {
+      return;
+    }
+  } catch (err) {
+    if (err && err.message === 'NOT_SUPPORTED_IN_LOCAL_CONTEXT') {
+      throw new Error('Slave может играть локально только в Simple режиме.');
+    }
+    throw err;
+  }
+
   if (command.type === PLAYBACK_COMMAND_STOP) {
-    clearPlayNextInsertSession();
-    stopAndClearLocalPlayback();
     setStatus('Локальное воспроизведение остановлено.');
     return;
   }
 
   if (command.type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
-    await toggleNowPlayingPlaybackLocally();
     return;
   }
 
-  if (command.type !== PLAYBACK_COMMAND_PLAY_TRACK) {
-    setStatus('Неизвестная локальная playback-команда.');
-    return;
-  }
-
-  const resolvedContext = resolvePlaylistTrackContextByIds({
-    file: command.file,
-    playlistId: command.playlistId,
-    trackId: command.trackId,
-    playlistIndex: command.playlistIndex,
-    playlistPosition: command.playlistPosition,
-  });
-  const resolvedPlaylistIndex = normalizePlaylistTrackIndex(resolvedContext.playlistIndex);
-  const autoplayEnabledForPlaylist =
-    resolvedPlaylistIndex !== null &&
-    Array.isArray(state.playlistAutoplay) &&
-    resolvedPlaylistIndex >= 0 &&
-    resolvedPlaylistIndex < state.playlistAutoplay.length &&
-    Boolean(state.playlistAutoplay[resolvedPlaylistIndex]);
-  if (sourceRole === ROLE_SLAVE && autoplayEnabledForPlaylist) {
-    throw new Error('Slave может играть локально только в Simple режиме.');
-  }
-
-  const button = _deps.getTrackButton(
-    command.file,
-    resolvedContext.playlistIndex,
-    resolvedContext.playlistPosition,
-    command.basePath,
-  );
-  if (!button) {
-    setStatus(`Не удалось выполнить локальную команду: трек ${command.file} не найден.`);
-    return;
-  }
-
-  await handlePlay(command.file, button, command.basePath, {
-    playlistId: resolvedContext.playlistId,
-    trackId: resolvedContext.trackId,
-    playlistIndex: resolvedContext.playlistIndex,
-    playlistPosition: resolvedContext.playlistPosition,
-    startAtSeconds: normalizePlaybackStartOffsetSeconds(command.startAtSeconds),
-    fromAutoplay: Boolean(command.fromAutoplay),
-    fromDspTransition: Boolean(command.fromDspTransition),
-    fromDapNoSilence: Boolean(command.fromDapNoSilence),
-    fromDapInterruptedResume: Boolean(command.fromDapInterruptedResume),
-  });
+  setStatus('Неизвестная локальная playback-команда.');
 }
 
 async function executeHostPlaybackCommandLocally(command) {
   const sourceTag = command.sourceUsername ? ` (co-host: ${command.sourceUsername})` : '';
 
   try {
-    const handledByControllerAdapter = await hostPlaybackControllerAdapter.execute(command, { sourceTag });
+    const handledByControllerAdapter = await playbackControllerAdapter.execute(command, {
+      sourceTag,
+      sourceRole: normalizeCommandSourceRole(command && command.sourceRole) || ROLE_HOST,
+      target: command && command.target === 'host' ? 'host' : 'self',
+    });
     if (handledByControllerAdapter) {
       return;
     }

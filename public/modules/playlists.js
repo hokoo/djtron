@@ -3124,7 +3124,72 @@ export function resolveSequentialNextTrack(track, { requireAutoplay = false } = 
   };
 }
 
-export function resolveAutoplayNextTrack(finishedTrack) {
+export function resolveAutoplayNextTrack(finishedTrack, { consumeScheduledSwitch = false } = {}) {
+  const scheduledSwitch = state.playNextScheduledSwitch && typeof state.playNextScheduledSwitch === 'object'
+    ? state.playNextScheduledSwitch
+    : null;
+  if (scheduledSwitch) {
+    const toPlaylistIndex = _deps.normalizePlaylistTrackIndex(scheduledSwitch.toPlaylistIndex);
+    const afterPlaylistIndex = _deps.normalizePlaylistTrackIndex(scheduledSwitch.afterPlaylistIndex);
+    const afterPlaylistPosition = _deps.normalizePlaylistTrackIndex(scheduledSwitch.afterPlaylistPosition);
+    const afterTrackFile = typeof scheduledSwitch.afterTrackFile === 'string' ? scheduledSwitch.afterTrackFile.trim() : '';
+    const finishedPlaylistIndex = _deps.normalizePlaylistTrackIndex(finishedTrack ? finishedTrack.playlistIndex : null);
+    const finishedPlaylistPosition = _deps.normalizePlaylistTrackIndex(finishedTrack ? finishedTrack.playlistPosition : null);
+    const finishedTrackFile =
+      finishedTrack && typeof finishedTrack.file === 'string' ? finishedTrack.file.trim() : '';
+
+    const isAnchorMatch =
+      toPlaylistIndex !== null &&
+      afterPlaylistIndex !== null &&
+      afterPlaylistPosition !== null &&
+      finishedPlaylistIndex === afterPlaylistIndex &&
+      finishedPlaylistPosition === afterPlaylistPosition &&
+      Boolean(finishedTrackFile) &&
+      finishedTrackFile === afterTrackFile;
+
+    if (isAnchorMatch) {
+      const targetPlaylist = Array.isArray(state.layout[toPlaylistIndex]) ? state.layout[toPlaylistIndex] : [];
+      const nextFile = targetPlaylist[0];
+      if (typeof nextFile === 'string' && nextFile.trim()) {
+        const playlistEntry = Array.isArray(state.playlists) ? state.playlists[toPlaylistIndex] : null;
+        const firstTrack =
+          playlistEntry && Array.isArray(playlistEntry.tracks) && playlistEntry.tracks[0]
+            ? playlistEntry.tracks[0]
+            : null;
+        if (consumeScheduledSwitch) {
+          state.playNextScheduledSwitch = null;
+        }
+        return {
+          file: nextFile,
+          basePath: '/audio',
+          playlistId: typeof playlistEntry?.id === 'string' ? playlistEntry.id : null,
+          trackId: typeof firstTrack?.id === 'string' ? firstTrack.id : null,
+          playlistIndex: toPlaylistIndex,
+          playlistPosition: 0,
+        };
+      }
+      state.playNextScheduledSwitch = null;
+    } else {
+      const isStillValidTarget =
+        toPlaylistIndex !== null &&
+        toPlaylistIndex >= 0 &&
+        toPlaylistIndex < state.layout.length &&
+        Array.isArray(state.layout[toPlaylistIndex]) &&
+        state.layout[toPlaylistIndex].length > 0;
+      const isStillValidAnchor =
+        afterPlaylistIndex !== null &&
+        afterPlaylistPosition !== null &&
+        afterPlaylistIndex >= 0 &&
+        afterPlaylistIndex < state.layout.length &&
+        Array.isArray(state.layout[afterPlaylistIndex]) &&
+        afterPlaylistPosition >= 0 &&
+        afterPlaylistPosition < state.layout[afterPlaylistIndex].length;
+      if (!isStillValidTarget || !isStillValidAnchor) {
+        state.playNextScheduledSwitch = null;
+      }
+    }
+  }
+
   const directNext = resolveSequentialNextTrack(finishedTrack, { requireAutoplay: true });
   if (directNext) return directNext;
 

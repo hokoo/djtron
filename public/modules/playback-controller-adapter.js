@@ -12,6 +12,17 @@ function sanitizeTrackFile(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizeSourceRole(value) {
+  if (value === 'host' || value === 'co-host' || value === 'slave') {
+    return value;
+  }
+  return 'host';
+}
+
+function normalizeTarget(value) {
+  return value === 'self' ? 'self' : 'host';
+}
+
 function toControllerPlaylistId(playlistIndex) {
   return `playlist-${playlistIndex}`;
 }
@@ -81,7 +92,7 @@ function buildControllerProjection({ layout = [], playlistAutoplay = [], playlis
   };
 }
 
-export function createHostPlaybackControllerAdapter(deps = {}) {
+export function createPlaybackControllerAdapter(deps = {}) {
   const {
     getSnapshot = () => ({}),
     resolvePlayTrackContext = () => null,
@@ -93,7 +104,7 @@ export function createHostPlaybackControllerAdapter(deps = {}) {
     onPlayTrack = async () => {},
   } = deps;
 
-  async function validatePlayTrackWithController(command) {
+  async function validatePlayTrackWithController(command, executionContext = {}) {
     const context = resolvePlayTrackContext(command);
     if (
       !context ||
@@ -113,8 +124,8 @@ export function createHostPlaybackControllerAdapter(deps = {}) {
       type: 'play-track',
       playlistId,
       trackId,
-      sourceRole: 'host',
-      target: 'self',
+      sourceRole: normalizeSourceRole(executionContext.sourceRole || command?.sourceRole),
+      target: normalizeTarget(executionContext.target || command?.target),
     });
   }
 
@@ -167,33 +178,54 @@ export function createHostPlaybackControllerAdapter(deps = {}) {
   }
 
   return {
-    async execute(command, { sourceTag = '' } = {}) {
+    async execute(command, executionContext = {}) {
+      const sourceTag = typeof executionContext.sourceTag === 'string' ? executionContext.sourceTag : '';
       if (!command || typeof command !== 'object') return false;
 
       if (command.type === 'stop') {
         validateStopWithController();
-        await onStop(command, { sourceTag });
+        await onStop(command, {
+          sourceTag,
+          sourceRole: normalizeSourceRole(executionContext.sourceRole || command.sourceRole),
+          target: normalizeTarget(executionContext.target || command.target),
+        });
         return true;
       }
 
       if (command.type === 'toggle-current') {
-        await onToggle(command, { sourceTag });
+        await onToggle(command, {
+          sourceTag,
+          sourceRole: normalizeSourceRole(executionContext.sourceRole || command.sourceRole),
+          target: normalizeTarget(executionContext.target || command.target),
+        });
         return true;
       }
 
       if (command.type === 'play-next-request') {
         await validatePlayNextWithController(command);
-        await onPlayNext(command, { sourceTag });
+        await onPlayNext(command, {
+          sourceTag,
+          sourceRole: normalizeSourceRole(executionContext.sourceRole || command.sourceRole),
+          target: normalizeTarget(executionContext.target || command.target),
+        });
         return true;
       }
 
       if (command.type === 'play-track') {
-        await validatePlayTrackWithController(command);
-        await onPlayTrack(command, { sourceTag });
+        await validatePlayTrackWithController(command, executionContext);
+        await onPlayTrack(command, {
+          sourceTag,
+          sourceRole: normalizeSourceRole(executionContext.sourceRole || command.sourceRole),
+          target: normalizeTarget(executionContext.target || command.target),
+        });
         return true;
       }
 
       return false;
     },
   };
+}
+
+export function createHostPlaybackControllerAdapter(deps = {}) {
+  return createPlaybackControllerAdapter(deps);
 }
