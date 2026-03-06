@@ -178,8 +178,13 @@ const outgoingLiveCommandBus = new PlaybackCommandBus({
       target,
     }),
   execute: async (payload) => {
+    const commandPayload = payload && typeof payload === 'object' ? { ...payload } : payload;
+    if (commandPayload && typeof commandPayload === 'object') {
+      // Keep sourceRole as backward-compatible inbound alias only.
+      delete commandPayload.sourceRole;
+    }
     const { ok, data } = await api.postPlaybackCommand({
-      ...payload,
+      ...commandPayload,
       clientId: _deps.clientId,
     });
     if (!ok) {
@@ -1899,19 +1904,6 @@ export async function initializeLayoutState() {
     !_deps.playlistDspEqual(incomingDsp, nextDsp, nextAutoplay, nextLayout.length) ||
     !_deps.dapConfigEqual(incomingDap, nextDap, nextLayout.length) ||
     !_deps.trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
-
-  if (isHostRole() && _deps.isServerLayoutEmpty(incomingLayout)) {
-    const legacyLayout = _deps.readLegacyLocalLayout(state.availableFiles);
-    if (legacyLayout && !_deps.layoutsEqual(legacyLayout, nextLayout)) {
-      nextLayout = legacyLayout;
-      nextNames = _deps.normalizePlaylistNames(nextNames, nextLayout.length);
-      nextMeta = _deps.normalizePlaylistMeta(nextMeta, nextLayout.length);
-      nextDap = _deps.normalizeDapConfig(nextDap, nextLayout.length, nextDap);
-      nextAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, nextDap, nextLayout.length);
-      nextDsp = _deps.normalizePlaylistDspFlags(nextDsp, nextAutoplay, nextLayout.length);
-      shouldPush = true;
-    }
-  }
 
   const withFolderCoverage = _deps.ensureFolderPlaylistsCoverage(nextLayout, nextNames, nextMeta);
   nextLayout = withFolderCoverage.layout;

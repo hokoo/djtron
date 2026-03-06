@@ -12,8 +12,8 @@
   model-converter.js (legacy↔M2A), bootstrap.js
 
 ### Phase 3C (3129ca7): Client Decomposition
-- `script.js` → 575 строк (bootstrap + wiring)
-- 25 модулей в `public/modules/` (12,627 строк):
+- `script.js` → ~620 строк (bootstrap + wiring)
+- модули в `public/modules/` (20+ файлов):
 
 **Core:**
 | Module | Lines | Purpose |
@@ -53,6 +53,8 @@
 - `/api/layout` и SSE `layout` теперь публикуют M2A payload (`playlists`, `dapConfig`, `trackTitleModesByTrack`)
 - Legacy payload для `POST /api/layout` более не принимается (новое приложение без backward compatibility)
 - DSP планирование переведено на snapshot из M2A (`layoutService.buildDspLayoutSnapshot()`)
+- Host init больше не использует fallback из legacy `localStorage` layout при пустом server-layout.
+- Канонический envelope playback-команд: `origin + actorRole + target`; `sourceRole` поддерживается как backward-compatible alias на входе.
 
 ## Статус фазы 3
 - 3A: выполнено

@@ -292,6 +292,11 @@ class UpdateService {
 
 > Если фактические пути другие — заменить на реальные. Важна сама карта: endpoint → auth policy → сервис.
 
+Implementation note (ветка `refactoring`, 2026-03-06):
+- `POST /api/playback/command` оставлен с `auth: session` (не `host`) по продуктовому решению.
+- Enforcement прав выполняется доменно через `RolePolicy`/`PlaybackCommandBus` в `PlaybackGateway`.
+- `GET /api/update/check` и `POST /api/update/apply` — `auth: host` (hardened parity).
+
 ---
 
 ## 7) Порядок миграции (этапы PR)

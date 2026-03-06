@@ -1,6 +1,6 @@
 // public/modules/playlists.js — playlist management, track cards, audio catalog
 
-import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
+import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, setLivePlaybackVolume } from './audio.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole, isSlaveRole } from './roles.js';
@@ -451,18 +451,6 @@ export function isServerLayoutEmpty(playlists) {
   const normalized = ensurePlaylists(playlists);
   if (normalized.length === 0) return true;
   return normalized.length === 1 && normalized[0].length === 0;
-}
-
-export function readLegacyLocalLayout(files) {
-  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw);
-    return normalizeLayoutForFiles(parsed, files);
-  } catch (err) {
-    return null;
-  }
 }
 
 export function syncLayoutFromDom() {
