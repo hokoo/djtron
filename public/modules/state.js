@@ -626,6 +626,10 @@ export function syncPlaylistsFromLegacyState() {
           id: previousPlaylist && typeof previousPlaylist.id === 'string' && previousPlaylist.id
             ? previousPlaylist.id
             : playlist.id,
+          uiState:
+            previousPlaylist && typeof previousPlaylist.uiState === 'string' && previousPlaylist.uiState
+              ? previousPlaylist.uiState
+              : (playlist.uiState || null),
           tracks: tracks.map((track, trackIndex) => {
             const previousTrack = previousTracks[trackIndex];
             return {
