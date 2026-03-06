@@ -327,6 +327,35 @@ export function resetTrackReferences() {
   state.hostHighlightedDescriptor = '';
 }
 
+function applyLegacyLayoutProjection({
+  layout,
+  playlistNames,
+  playlistMeta,
+  playlistAutoplay,
+  playlistDsp,
+  dapConfig,
+  playlists = null,
+  trackTitleModesByTrack = undefined,
+}) {
+  state.layout = _deps.ensurePlaylists(layout);
+  state.playlistNames = _deps.normalizePlaylistNames(playlistNames, state.layout.length);
+  state.playlistMeta = _deps.normalizePlaylistMeta(playlistMeta, state.layout.length);
+  state.dapConfig = _deps.normalizeDapConfig(dapConfig, state.layout.length, dapConfig);
+  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = _deps.normalizePlaylistDspFlags(playlistDsp, state.playlistAutoplay, state.layout.length);
+  if (trackTitleModesByTrack !== undefined) {
+    state.trackTitleModesByTrack = _deps.normalizeTrackTitleModesByTrackForFiles(
+      trackTitleModesByTrack,
+      state.availableFiles,
+      '/audio',
+    );
+  }
+  if (Array.isArray(playlists)) {
+    state.playlists = playlists;
+  }
+  syncPlaylistsFromLegacyState();
+}
+
 export function applyIncomingLayoutState(
   nextLayout,
   nextPlaylistNames,
@@ -383,10 +412,16 @@ export function applyIncomingLayoutState(
     !_deps.dapConfigEqual(state.dapConfig, normalizedDap, withFolderCoverage.layout.length) ||
     !_deps.trackTitleModesByTrackEqual(state.trackTitleModesByTrack, normalizedTrackTitleModes);
 
-  state.layout = withFolderCoverage.layout;
-  state.playlistNames = withFolderCoverage.playlistNames;
-  state.playlistMeta = withFolderCoverage.playlistMeta;
-  state.dapConfig = _deps.normalizeDapConfig(normalizedDap, state.layout.length, normalizedDap);
+  applyLegacyLayoutProjection({
+    layout: withFolderCoverage.layout,
+    playlistNames: withFolderCoverage.playlistNames,
+    playlistMeta: withFolderCoverage.playlistMeta,
+    playlistAutoplay: normalizedAutoplay,
+    playlistDsp: normalizedDsp,
+    dapConfig: normalizedDap,
+    playlists: nextPlaylists,
+    trackTitleModesByTrack: normalizedTrackTitleModes,
+  });
   if (!isDapEnabled(state.dapConfig)) {
     _deps.disarmDapNoSilence();
     _deps.clearDapInterruptedPlaybackSnapshot();
@@ -409,10 +444,6 @@ export function applyIncomingLayoutState(
       _deps.clearDapInterruptedPlaybackSnapshot();
     }
   }
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(normalizedAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(normalizedDsp, state.playlistAutoplay, state.layout.length);
-  state.trackTitleModesByTrack = normalizedTrackTitleModes;
-  state.playlists = nextPlaylists;
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? _deps.getDapPlaylistIndex(state.dapConfig) : null;
   const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
@@ -1171,13 +1202,6 @@ async function applyPlayNextRequestLocally(command) {
       return false;
     }
 
-    state.layout = _deps.ensurePlaylists(nextLayout);
-    state.playlistNames = nextNames;
-    state.playlistMeta = nextMeta;
-    state.dapConfig = nextDap;
-    state.playlistAutoplay = nextAutoplay;
-    state.playlistDsp = nextDsp;
-    state.playNextScheduledSwitch = scheduledSwitch;
     const nextPlaylists = previousPlaylists.map((playlist) => (
       playlist && typeof playlist === 'object'
         ? {
@@ -1214,7 +1238,16 @@ async function applyPlayNextRequestLocally(command) {
       },
       uiState: 'quick_build_armed',
     };
-    state.playlists = nextPlaylists;
+    applyLegacyLayoutProjection({
+      layout: nextLayout,
+      playlistNames: nextNames,
+      playlistMeta: nextMeta,
+      playlistAutoplay: nextAutoplay,
+      playlistDsp: nextDsp,
+      dapConfig: nextDap,
+      playlists: nextPlaylists,
+    });
+    state.playNextScheduledSwitch = scheduledSwitch;
     _deps.renderZones();
     try {
       await pushSharedLayout();
@@ -1222,26 +1255,31 @@ async function applyPlayNextRequestLocally(command) {
       return true;
     } catch (err) {
       console.error(err);
-      state.layout = previousLayout;
-      state.playlistNames = previousNames;
-      state.playlistMeta = previousMeta;
-      state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-      state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-      state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+      applyLegacyLayoutProjection({
+        layout: previousLayout,
+        playlistNames: previousNames,
+        playlistMeta: previousMeta,
+        playlistAutoplay: previousAutoplay,
+        playlistDsp: previousDsp,
+        dapConfig: previousDap,
+        playlists: previousPlaylists,
+      });
       state.playNextScheduledSwitch = previousScheduledSwitch;
-      state.playlists = previousPlaylists;
       _deps.renderZones();
       setStatus('Не удалось синхронизировать Live Play Next.');
       return false;
     }
   }
 
-  state.layout = _deps.ensurePlaylists(nextLayout);
-  state.playlistNames = _deps.normalizePlaylistNames(previousNames, state.layout.length);
-  state.playlistMeta = _deps.normalizePlaylistMeta(previousMeta, state.layout.length);
-  state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+  applyLegacyLayoutProjection({
+    layout: nextLayout,
+    playlistNames: previousNames,
+    playlistMeta: previousMeta,
+    playlistAutoplay: previousAutoplay,
+    playlistDsp: previousDsp,
+    dapConfig: previousDap,
+    playlists: previousPlaylists,
+  });
   _deps.renderZones();
 
   try {
@@ -1250,14 +1288,16 @@ async function applyPlayNextRequestLocally(command) {
     return true;
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = previousNames;
-    state.playlistMeta = previousMeta;
-    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    applyLegacyLayoutProjection({
+      layout: previousLayout,
+      playlistNames: previousNames,
+      playlistMeta: previousMeta,
+      playlistAutoplay: previousAutoplay,
+      playlistDsp: previousDsp,
+      dapConfig: previousDap,
+      playlists: previousPlaylists,
+    });
     state.playNextScheduledSwitch = previousScheduledSwitch;
-    state.playlists = previousPlaylists;
     _deps.renderZones();
     setStatus('Не удалось синхронизировать Live Play Next.');
     return false;
@@ -1669,13 +1709,16 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     payloadAutoplay,
     payloadState.layout.length,
   );
-  state.layout = payloadState.layout;
-  state.playlistNames = payloadState.playlistNames;
-  state.playlistMeta = payloadState.playlistMeta;
-  state.playlistAutoplay = payloadAutoplay;
-  state.playlistDsp = payloadDsp;
-  state.dapConfig = payloadDapConfig;
-  const payloadPlaylists = syncPlaylistsFromLegacyState();
+  applyLegacyLayoutProjection({
+    layout: payloadState.layout,
+    playlistNames: payloadState.playlistNames,
+    playlistMeta: payloadState.playlistMeta,
+    playlistAutoplay: payloadAutoplay,
+    playlistDsp: payloadDsp,
+    dapConfig: payloadDapConfig,
+    playlists: sourcePlaylists,
+  });
+  const payloadPlaylists = Array.isArray(state.playlists) ? state.playlists : [];
 
   const { ok, data } = await api.postLayout({
     playlists: payloadPlaylists,
@@ -1802,14 +1845,16 @@ export async function initializeLayoutState() {
     !_deps.dapConfigEqual(incomingDap, nextDap, nextLayout.length) ||
     !_deps.trackTitleModesByTrackEqual(incomingTrackTitleModes, nextTrackTitleModes);
 
-  state.layout = nextLayout;
-  state.playlistNames = nextNames;
-  state.playlistMeta = nextMeta;
-  state.dapConfig = _deps.normalizeDapConfig(nextDap, state.layout.length, nextDap);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
-  state.trackTitleModesByTrack = nextTrackTitleModes;
-  state.playlists = serverState.playlists;
+  applyLegacyLayoutProjection({
+    layout: nextLayout,
+    playlistNames: nextNames,
+    playlistMeta: nextMeta,
+    playlistAutoplay: nextAutoplay,
+    playlistDsp: nextDsp,
+    dapConfig: nextDap,
+    playlists: serverState.playlists,
+    trackTitleModesByTrack: nextTrackTitleModes,
+  });
   _deps.saveTrackTitleModesByTrackSetting();
   state.layoutVersion = serverState.version;
 
