@@ -369,8 +369,8 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
     !state.currentAudio.paused;
 
   if (!hasCurrentSourceTrack) {
-    // Source track already ended: skip source segment and continue from target side of transition.
-    return sourceSegmentSeconds;
+    // Source track already ended: keep full DSP fragment, do not jump into its middle.
+    return 0;
   }
 
   const sourceDuration = _deps.getDuration(state.currentAudio) || _deps.getKnownDurationSeconds(sourceTrack.key);
