@@ -333,6 +333,12 @@ export function triggerLiveDspTransitionForTrack(track) {
   if (!nextTrack) return;
   if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return;
 
+  console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack', {
+    fromTrackKey: track.key,
+    nextTrackFile: nextTrack.file,
+    token,
+  });
+
   queueLiveDspTransitionForTrack(track, nextTrack, token).catch((err) => {
     console.error('Не удалось подготовить DSP transition на старте трека', err);
   });
@@ -372,28 +378,46 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
   if (normalizedSlice <= 0) return 0;
   const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(normalizedSlice, transitionDetails);
 
-  if (!isCurrentSourceTrackActive(sourceTrack)) {
-    // Source track already ended: start transition fragment from its beginning.
-    return 0;
-  }
-  if (state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked === 'true') {
-    // Manual seek invalidates reliable source-tail alignment; prefer deterministic transition start.
+  const sourceActive = isCurrentSourceTrackActive(sourceTrack);
+  const userSeeked = state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked === 'true';
+
+  if (!sourceActive) {
+    console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (source inactive)', {
+      sourceTrackKey: sourceTrack && sourceTrack.key,
+      currentTrackKey: state.currentTrack && state.currentTrack.key,
+      currentAudioPaused: state.currentAudio && state.currentAudio.paused,
+      normalizedSlice, sourceSegmentSeconds,
+    });
     return 0;
   }
 
   const sourceDuration = _deps.getDuration(state.currentAudio) || _deps.getKnownDurationSeconds(sourceTrack.key);
   const sourceCurrentTime = Number.isFinite(state.currentAudio.currentTime) ? Math.max(0, state.currentAudio.currentTime) : null;
   if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || sourceCurrentTime === null) {
+    console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (no duration/time)', {
+      sourceDuration, sourceCurrentTime, userSeeked,
+    });
     return 0;
   }
 
   const remainingSeconds = Math.max(0, sourceDuration - sourceCurrentTime);
   if (remainingSeconds <= LATE_SOURCE_REMAINING_EPSILON_SECONDS) {
+    console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (late remaining)', {
+      remainingSeconds, LATE_SOURCE_REMAINING_EPSILON_SECONDS, userSeeked,
+    });
     return 0;
   }
+
   const offsetSeconds = normalizedSlice - remainingSeconds;
-  if (!Number.isFinite(offsetSeconds) || offsetSeconds <= 0) return 0;
-  return Math.max(0, Math.min(offsetSeconds, sourceSegmentSeconds));
+  const result = (!Number.isFinite(offsetSeconds) || offsetSeconds <= 0)
+    ? 0
+    : Math.max(0, Math.min(offsetSeconds, sourceSegmentSeconds));
+
+  console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds', {
+    normalizedSlice, sourceSegmentSeconds, sourceDuration, sourceCurrentTime,
+    remainingSeconds, offsetSeconds, result, userSeeked,
+  });
+  return result;
 }
 
 export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack) {
@@ -439,6 +463,23 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
   const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(sliceSeconds, details.transition);
   const sourceTrackActiveAtPlanning = isCurrentSourceTrackActive(sourceTrack);
   const transitionOffsetPlannedAt = performance.now();
+
+  console.warn('[DSP-DIAG] tryStartAutoplayWithDspTransition planning', {
+    fromTrack: sourceTrack.key,
+    toTrack: targetTrack.key,
+    sliceSeconds,
+    sourceSegmentSeconds,
+    transitionStartOffsetSeconds,
+    transitionWasPreArmed,
+    preArmedSliceWindowSeconds,
+    sourceTrackActiveAtPlanning,
+    userSeeked: state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked,
+    currentAudioCurrentTime: state.currentAudio && state.currentAudio.currentTime,
+    currentAudioDuration: state.currentAudio && state.currentAudio.duration,
+    currentAudioPaused: state.currentAudio && state.currentAudio.paused,
+    currentAudioEnded: state.currentAudio && state.currentAudio.ended,
+    outputUrl: details.outputUrl,
+  });
 
   if (_deps.isDspTransitionPlaybackActive()) {
     _deps.stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
@@ -489,7 +530,15 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
   };
 
   const resolveAdjustedTransitionStartOffsetSeconds = () => {
-    if (hasSourceTrackReachedEndBeforeTransitionStart()) {
+    const sourceEnded = hasSourceTrackReachedEndBeforeTransitionStart();
+    if (sourceEnded) {
+      console.warn('[DSP-DIAG] resolveAdjusted → 0 (source ended before start)', {
+        previousAudioEnded: previousAudio && previousAudio.ended,
+        previousAudioPaused: previousAudio && previousAudio.paused,
+        previousAudioCurrentTime: previousAudio && previousAudio.currentTime,
+        previousAudioDuration: previousAudio && _deps.getDuration(previousAudio),
+        sourceTrackActiveAtPlanning,
+      });
       return 0;
     }
 
@@ -507,8 +556,16 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
       (state.dspTransitionPlayback && Number.isFinite(state.dspTransitionPlayback.duration) && state.dspTransitionPlayback.duration > 0
         ? state.dspTransitionPlayback.duration
         : null);
-    if (!knownDuration) return clampedToSourceSegment;
-    return Math.max(0, Math.min(clampedToSourceSegment, Math.max(0, knownDuration - 0.02)));
+    const result = !knownDuration
+      ? clampedToSourceSegment
+      : Math.max(0, Math.min(clampedToSourceSegment, Math.max(0, knownDuration - 0.02)));
+
+    console.warn('[DSP-DIAG] resolveAdjusted', {
+      transitionStartOffsetSeconds, startupDelaySeconds, startupDelayContribution,
+      entryCompensation: state.liveDspEntryCompensationSeconds,
+      rawOffset, clampedToSourceSegment, knownDuration, result,
+    });
+    return result;
   };
 
   let handoffStarted = false;
@@ -582,6 +639,14 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     }
     handoffStarted = true;
 
+    console.warn('[DSP-DIAG] startNextTrackFromTransition', {
+      reason,
+      transitionAudioCurrentTime: transitionAudio.currentTime,
+      transitionAudioDuration: _deps.getDuration(transitionAudio),
+      transitionAudioEnded: transitionAudio.ended,
+      hasContinuationAudio: !!continuationAudio,
+    });
+
     let preparedAudio = continuationAudio;
     if (!preparedAudio) {
       try {
@@ -595,6 +660,13 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
       await fallbackToRegularNextTrackStart();
       return;
     }
+
+    console.warn('[DSP-DIAG] continuation audio ready', {
+      continuationCurrentTime: preparedAudio.currentTime,
+      continuationDuration: preparedAudio.duration,
+      continuationSrc: preparedAudio.src,
+      expectedSliceOffset: sliceSeconds,
+    });
 
     try {
       preparedAudio.volume = getEffectiveLiveVolume(targetTrack);
@@ -685,10 +757,21 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
 
   try {
     let adjustedTransitionStartOffsetSeconds = resolveAdjustedTransitionStartOffsetSeconds();
+    console.warn('[DSP-DIAG] PRE-SEEK', {
+      adjustedTransitionStartOffsetSeconds,
+      transitionAudioCurrentTime: transitionAudio.currentTime,
+      transitionAudioDuration: transitionAudio.duration,
+      transitionAudioSrc: transitionAudio.src,
+    });
     if (adjustedTransitionStartOffsetSeconds > 0) {
       await _deps.seekAudioToOffset(transitionAudio, adjustedTransitionStartOffsetSeconds);
     }
+    console.warn('[DSP-DIAG] POST-SEEK (before end-check)', {
+      adjustedTransitionStartOffsetSeconds,
+      transitionAudioCurrentTime: transitionAudio.currentTime,
+    });
     if (adjustedTransitionStartOffsetSeconds > 0 && hasSourceTrackReachedEndBeforeTransitionStart()) {
+      console.warn('[DSP-DIAG] RESET to 0 (source ended during seek)');
       adjustedTransitionStartOffsetSeconds = 0;
       try {
         transitionAudio.currentTime = 0;
@@ -706,6 +789,13 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
         // ignore pause errors while switching to DSP transition
       }
     }
+    console.warn('[DSP-DIAG] PRE-PLAY', {
+      finalOffset: adjustedTransitionStartOffsetSeconds,
+      transitionAudioCurrentTime: transitionAudio.currentTime,
+      previousAudioPaused: previousAudio && previousAudio.paused,
+      previousAudioEnded: previousAudio && previousAudio.ended,
+      previousAudioCurrentTime: previousAudio && previousAudio.currentTime,
+    });
     await transitionAudio.play();
     setStatus(`Переход: ${finishedTrack.file} -> ${nextTrack.file}`);
     return true;
@@ -723,6 +813,12 @@ export async function tryAutoplayNextTrack(finishedTrack) {
   try {
     const nextTrack = _deps.resolveAutoplayNextTrack(finishedTrack);
     if (!nextTrack) return false;
+
+    console.warn('[DSP-DIAG] tryAutoplayNextTrack', {
+      finishedTrackKey: finishedTrack && finishedTrack.key,
+      nextTrackFile: nextTrack.file,
+      dspEnabled: isPlaylistDspEnabled(nextTrack.playlistIndex),
+    });
 
     const transitionStarted = await tryStartAutoplayWithDspTransition(finishedTrack, nextTrack);
     if (transitionStarted) return true;
