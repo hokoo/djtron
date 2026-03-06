@@ -1,6 +1,6 @@
 // public/modules/dnd.js — desktop drag-and-drop
 
-import { DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX, DESKTOP_TRACK_DRAG_HOLD_MS, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, QUEUE_NEXT_CHAIN_WINDOW_MS, ROLE_HOST, state } from './state.js';
+import { DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX, DESKTOP_TRACK_DRAG_HOLD_MS, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, QUEUE_NEXT_CHAIN_WINDOW_MS, ROLE_HOST, state, syncPlaylistsFromLegacyState } from './state.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole } from './roles.js';
 import { setStatus } from './ui/status.js';
 import { PlaybackCommandBus } from '/shared/playback/index.js';
@@ -94,6 +94,23 @@ export function restorePlaylistBodyScrollTops(scrollTopsByPlaylist) {
     if (!(body instanceof HTMLElement)) return;
     body.scrollTop = scrollTop;
   });
+}
+
+function applyLegacyLayoutSnapshot({
+  layout,
+  playlistNames,
+  playlistMeta,
+  dapConfig,
+  playlistAutoplay,
+  playlistDsp,
+}) {
+  state.layout = _deps.ensurePlaylists(layout);
+  state.playlistNames = _deps.normalizePlaylistNames(playlistNames, state.layout.length);
+  state.playlistMeta = _deps.normalizePlaylistMeta(playlistMeta, state.layout.length);
+  state.dapConfig = _deps.normalizeDapConfig(dapConfig, state.layout.length, dapConfig);
+  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = _deps.normalizePlaylistDspFlags(playlistDsp, state.playlistAutoplay, state.layout.length);
+  syncPlaylistsFromLegacyState();
 }
 
 export function resolveRequestedCopyMode(event) {
@@ -949,12 +966,14 @@ async function handleDragDeleteFromContextLocally() {
   const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...state.dapConfig };
 
-  state.layout = _deps.ensurePlaylists(snapshotLayout);
-  state.playlistNames = _deps.normalizePlaylistNames(snapshotNames, state.layout.length);
-  state.playlistMeta = _deps.normalizePlaylistMeta(snapshotMeta, state.layout.length);
-  state.dapConfig = _deps.normalizeDapConfig(snapshotDap, state.layout.length, snapshotDap);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(snapshotAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(snapshotDsp, state.playlistAutoplay, state.layout.length);
+  applyLegacyLayoutSnapshot({
+    layout: snapshotLayout,
+    playlistNames: snapshotNames,
+    playlistMeta: snapshotMeta,
+    dapConfig: snapshotDap,
+    playlistAutoplay: snapshotAutoplay,
+    playlistDsp: snapshotDsp,
+  });
   state.dragDropHandled = true;
   clearDragModeBadge();
   clearDragPreviewCard();
@@ -967,12 +986,14 @@ async function handleDragDeleteFromContextLocally() {
     return true;
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = previousNames;
-    state.playlistMeta = previousMeta;
-    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    applyLegacyLayoutSnapshot({
+      layout: previousLayout,
+      playlistNames: previousNames,
+      playlistMeta: previousMeta,
+      dapConfig: previousDap,
+      playlistAutoplay: previousAutoplay,
+      playlistDsp: previousDsp,
+    });
     _deps.renderZones();
     setStatus('Не удалось синхронизировать удаление трека.');
     return false;
@@ -1103,12 +1124,14 @@ async function handleDragQueueNextFromContextLocally(event = null) {
     dapState: previousDap,
   });
 
-  state.layout = _deps.ensurePlaylists(snapshotLayout);
-  state.playlistNames = _deps.normalizePlaylistNames(snapshotNames, state.layout.length);
-  state.playlistMeta = _deps.normalizePlaylistMeta(snapshotMeta, state.layout.length);
-  state.dapConfig = _deps.normalizeDapConfig(snapshotDap, state.layout.length, snapshotDap);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(snapshotAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(snapshotDsp, state.playlistAutoplay, state.layout.length);
+  applyLegacyLayoutSnapshot({
+    layout: snapshotLayout,
+    playlistNames: snapshotNames,
+    playlistMeta: snapshotMeta,
+    dapConfig: snapshotDap,
+    playlistAutoplay: snapshotAutoplay,
+    playlistDsp: snapshotDsp,
+  });
   state.dragDropHandled = true;
   hideTrashDropzone();
   clearDragModeBadge();
@@ -1123,12 +1146,14 @@ async function handleDragQueueNextFromContextLocally(event = null) {
     return true;
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = previousNames;
-    state.playlistMeta = previousMeta;
-    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    applyLegacyLayoutSnapshot({
+      layout: previousLayout,
+      playlistNames: previousNames,
+      playlistMeta: previousMeta,
+      dapConfig: previousDap,
+      playlistAutoplay: previousAutoplay,
+      playlistDsp: previousDsp,
+    });
     _deps.renderZones();
     if (undoActionId) {
       _deps.clearTrackRelocationUndoAction(undoActionId);
@@ -1268,12 +1293,14 @@ async function handleDropLocally(event, targetZoneIndex) {
   hideTrashDropzone();
   clearDragModeBadge();
   clearDragPreviewCard();
-  state.layout = _deps.ensurePlaylists(nextLayout);
-  state.playlistNames = _deps.normalizePlaylistNames(previousNames, state.layout.length);
-  state.playlistMeta = _deps.normalizePlaylistMeta(previousMeta, state.layout.length);
-  state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+  applyLegacyLayoutSnapshot({
+    layout: nextLayout,
+    playlistNames: previousNames,
+    playlistMeta: previousMeta,
+    dapConfig: previousDap,
+    playlistAutoplay: previousAutoplay,
+    playlistDsp: previousDsp,
+  });
   _deps.renderZones();
   restorePlaylistBodyScrollTops(preservedScrollTops);
   const undoActionId = relocatedTrackContext
@@ -1284,12 +1311,14 @@ async function handleDropLocally(event, targetZoneIndex) {
     setStatus(isCopyDrop ? 'Трек продублирован и синхронизирован.' : 'Плей-листы обновлены и синхронизированы.');
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = _deps.normalizePlaylistNames(previousNames, state.layout.length);
-    state.playlistMeta = _deps.normalizePlaylistMeta(previousMeta, state.layout.length);
-    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    applyLegacyLayoutSnapshot({
+      layout: previousLayout,
+      playlistNames: previousNames,
+      playlistMeta: previousMeta,
+      dapConfig: previousDap,
+      playlistAutoplay: previousAutoplay,
+      playlistDsp: previousDsp,
+    });
     _deps.renderZones();
     restorePlaylistBodyScrollTops(preservedScrollTops);
     if (undoActionId) {

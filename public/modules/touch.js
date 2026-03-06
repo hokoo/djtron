@@ -1,6 +1,6 @@
 // public/modules/touch.js — touch interactions, zones pan, playlist reorder
 
-import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_HOST, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state } from './state.js';
+import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_HOST, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state, syncPlaylistsFromLegacyState } from './state.js';
 import { applyLiveVolumeToCurrentAudio } from './audio.js';
 import { isHostRole } from './roles.js';
 import { isDapTrackContext, updateDapSettingsUi } from './ui/dap.js';
@@ -1417,6 +1417,23 @@ export function remapCollapsedPlaylistIndicesAfterMove(fromIndex, toIndex, expec
   remapped.forEach((playlistIndex) => state.collapsedPlaylistIndices.add(playlistIndex));
 }
 
+function applyLegacyLayoutSnapshot({
+  layout,
+  playlistNames,
+  playlistMeta,
+  dapConfig,
+  playlistAutoplay,
+  playlistDsp,
+}) {
+  state.layout = _deps.ensurePlaylists(layout);
+  state.playlistNames = _deps.normalizePlaylistNames(playlistNames, state.layout.length);
+  state.playlistMeta = _deps.normalizePlaylistMeta(playlistMeta, state.layout.length);
+  state.dapConfig = _deps.normalizeDapConfig(dapConfig, state.layout.length, dapConfig);
+  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = _deps.normalizePlaylistDspFlags(playlistDsp, state.playlistAutoplay, state.layout.length);
+  syncPlaylistsFromLegacyState();
+}
+
 export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPlaylistIndex) {
   if (!isHostRole()) {
     setStatus('Порядок плей-листов может менять только хост.');
@@ -1484,12 +1501,14 @@ async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPl
       previousDapIndex === null ? null : remapPlaylistIndexAfterMove(previousDapIndex, sourceIndex, destinationIndex),
   };
 
-  state.layout = _deps.ensurePlaylists(nextLayout);
-  state.playlistNames = _deps.normalizePlaylistNames(nextNames, state.layout.length);
-  state.playlistMeta = _deps.normalizePlaylistMeta(nextMeta, state.layout.length);
-  state.dapConfig = _deps.normalizeDapConfig(nextDapRaw, state.layout.length, nextDapRaw);
-  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = _deps.normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
+  applyLegacyLayoutSnapshot({
+    layout: nextLayout,
+    playlistNames: nextNames,
+    playlistMeta: nextMeta,
+    dapConfig: nextDapRaw,
+    playlistAutoplay: nextAutoplay,
+    playlistDsp: nextDsp,
+  });
   remapCollapsedPlaylistIndicesAfterMove(sourceIndex, destinationIndex, state.layout.length);
 
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? _deps.getDapPlaylistIndex(state.dapConfig) : null;
@@ -1513,12 +1532,14 @@ async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPl
     setStatus(`Плей-лист "${movedTitle}" перемещен и синхронизирован.`);
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = previousNames;
-    state.playlistMeta = previousMeta;
-    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    applyLegacyLayoutSnapshot({
+      layout: previousLayout,
+      playlistNames: previousNames,
+      playlistMeta: previousMeta,
+      dapConfig: previousDap,
+      playlistAutoplay: previousAutoplay,
+      playlistDsp: previousDsp,
+    });
     state.collapsedPlaylistIndices.clear();
     previousCollapsedIndices.forEach((playlistIndex) => state.collapsedPlaylistIndices.add(playlistIndex));
     if (state.currentTrack && previousCurrentTrackContext) {
