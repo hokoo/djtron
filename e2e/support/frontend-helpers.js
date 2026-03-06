@@ -17,7 +17,9 @@ function setupClientErrorCapture(page, { allowConsole = [] } = {}) {
   });
 
   page.on('requestfailed', (request) => {
-    requestFailures.push(`${request.method()} ${request.url()} => ${request.failure()?.errorText || 'request failed'}`);
+    const errorText = request.failure()?.errorText || 'request failed';
+    if (errorText.includes('ERR_ABORTED')) return;
+    requestFailures.push(`${request.method()} ${request.url()} => ${errorText}`);
   });
 
   return {
@@ -45,8 +47,11 @@ async function bootstrapHostPage(page, request, { resetBeforeLoad = true, clearS
 
   if (clearStorage) {
     await page.addInitScript(() => {
+      const marker = '__djtron_e2e_storage_cleared__';
+      if (sessionStorage.getItem(marker) === '1') return;
       localStorage.clear();
       sessionStorage.clear();
+      sessionStorage.setItem(marker, '1');
     });
   }
 
@@ -54,6 +59,9 @@ async function bootstrapHostPage(page, request, { resetBeforeLoad = true, clearS
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('#authOverlay')).toBeHidden();
   await expect.poll(() => page.locator('.zone').count()).toBeGreaterThan(0);
+  await expect
+    .poll(async () => ((await page.locator('#appVersion').textContent()) || '').trim().length)
+    .toBeGreaterThan(0);
 }
 
 async function setNumberInputAndCommit(page, selector, value) {

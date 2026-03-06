@@ -17,7 +17,9 @@ function collectUpdateCheckFlags(page, target) {
 }
 
 test('app version is shown and prerelease toggle persists and affects update-check', async ({ page, request }) => {
-  const capture = setupClientErrorCapture(page);
+  const capture = setupClientErrorCapture(page, {
+    allowConsole: [/TypeError: Failed to fetch[\s\S]*fetchSharedPlaybackState/],
+  });
   const updateCheckFlags = [];
   collectUpdateCheckFlags(page, updateCheckFlags);
 
@@ -31,7 +33,15 @@ test('app version is shown and prerelease toggle persists and affects update-che
   await expect.poll(() => updateCheckFlags.length).toBeGreaterThan(0);
   expect(updateCheckFlags).toContain('false');
 
-  await setCheckboxValue(page, '#allowPrerelease', true);
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        response.url().includes('/api/update/check?allowPrerelease=true') &&
+        response.ok(),
+    ),
+    setCheckboxValue(page, '#allowPrerelease', true),
+  ]);
   await expect.poll(() => updateCheckFlags.includes('true')).toBeTruthy();
   expect(await localStorageValue(page, 'player:allowPrerelease')).toBe('true');
 

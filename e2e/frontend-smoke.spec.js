@@ -16,8 +16,9 @@ test('frontend bootstraps playlists from /audio and applies default settings', a
 
   await bootstrapHostPage(page, request, { resetBeforeLoad: true, clearStorage: true });
 
-  const zoneCount = await page.locator('.zone').count();
-  expect(zoneCount).toBeGreaterThanOrEqual(Math.max(1, folderCount + 1));
+  await expect
+    .poll(() => page.locator('.zone').count())
+    .toBeGreaterThanOrEqual(Math.max(1, folderCount + 1));
 
   if (fileCount > 0) {
     await expect.poll(() => page.locator('.track-card').count()).toBeGreaterThan(0);

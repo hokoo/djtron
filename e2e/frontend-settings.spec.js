@@ -9,6 +9,21 @@ const {
   setupClientErrorCapture,
 } = require('./support/frontend-helpers');
 
+async function setCheckboxAndWaitForPlaybackSync(page, selector, checked) {
+  const checkbox = page.locator(selector);
+  const current = await checkbox.isChecked();
+  if (current === checked) return;
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/playback') &&
+        response.request().method() === 'POST' &&
+        response.ok(),
+    ),
+    setCheckboxValue(page, selector, checked),
+  ]);
+}
+
 test('settings defaults are editable and persisted across reloads', async ({ page, request }) => {
   const capture = setupClientErrorCapture(page);
   await bootstrapHostPage(page, request, { resetBeforeLoad: true, clearStorage: true });
@@ -18,8 +33,8 @@ test('settings defaults are editable and persisted across reloads', async ({ pag
   await setSelectValueAndCommit(page, '#overlayCurve', 'ease-in-out');
   await setCheckboxValue(page, '#overlayEnabled', false);
   await setCheckboxValue(page, '#stopFadeEnabled', false);
-  await setCheckboxValue(page, '#showVolumePresets', true);
-  await setCheckboxValue(page, '#liveSeekEnabled', true);
+  await setCheckboxAndWaitForPlaybackSync(page, '#showVolumePresets', true);
+  await setCheckboxAndWaitForPlaybackSync(page, '#liveSeekEnabled', true);
 
   await expect(page.locator('#dapEnabled')).toBeEnabled();
   await Promise.all([

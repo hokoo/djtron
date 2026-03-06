@@ -211,6 +211,7 @@ function waitMs(ms) {
 }
 
 async function bootstrap() {
+  state.hostPlaybackSyncReady = false;
   applyRuntimeConfigFromSources(null);
 
   const authorized = await ensureAuthorizedUser();
@@ -231,6 +232,7 @@ async function bootstrap() {
   initDspSetupPanel();
   initPlaylistControls();
   initTouchFullscreenToggle();
+  state.hostPlaybackSyncReady = true;
   initNowPlayingControls();
   initZonesPanControls();
   startDapNoSilenceGuard();

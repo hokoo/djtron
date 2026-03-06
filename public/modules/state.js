@@ -214,6 +214,7 @@ export const state = {
   hostPlaybackSyncInFlight: false,
   hostPlaybackSyncQueued: false,
   hostPlaybackSyncQueuedForce: false,
+  hostPlaybackSyncReady: false,
   lastHostPlaybackSyncAt: 0,
   lastHostLiveSeekSyncAt: 0,
   hostProgressRaf: null,

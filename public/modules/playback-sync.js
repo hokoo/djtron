@@ -341,6 +341,10 @@ export function applyIncomingHostPlaybackState(nextState, sync = true) {
       ? trackKey(state.hostPlaybackState.dapPlayback.trackFile, '/audio')
       : null;
   const normalizedState = sanitizeIncomingHostPlaybackState(nextState);
+  if (isHostRole()) {
+    normalizedState.showVolumePresets = Boolean(state.showVolumePresetsEnabled);
+    normalizedState.allowLiveSeek = Boolean(state.liveSeekEnabled);
+  }
   const changed = serializeHostPlaybackState(state.hostPlaybackState) !== serializeHostPlaybackState(normalizedState);
   state.hostPlaybackState = normalizedState;
   const nextHostTrackKey =
@@ -901,6 +905,7 @@ export function requestHostLiveSeekSync({ finalize = false } = {}) {
 
 export function requestHostPlaybackSync(force = false) {
   if (!isHostRole()) return;
+  if (!state.hostPlaybackSyncReady) return;
 
   const now = Date.now();
   if (!force && now - state.lastHostPlaybackSyncAt < HOST_PLAYBACK_SYNC_INTERVAL_MS) {

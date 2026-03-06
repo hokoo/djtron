@@ -220,7 +220,9 @@ export function applyRoleUi(role) {
 
   if (isHost) {
     _deps.stopHostProgressLoop();
-    _deps.requestHostPlaybackSync(true);
+    if (state.hostPlaybackSyncReady) {
+      _deps.requestHostPlaybackSync(true);
+    }
   } else {
     _deps.stopHostProgressLoop();
     _deps.syncNowPlayingPanel();

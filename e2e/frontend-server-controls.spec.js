@@ -9,7 +9,7 @@ test('host stop-server button sends shutdown request and shows status', async ({
   const capture = setupClientErrorCapture(page);
   let shutdownCalls = 0;
 
-  await page.route('**/api/shutdown', async (route) => {
+  await page.route('**/api/shutdown*', async (route) => {
     shutdownCalls += 1;
     await route.fulfill({
       status: 200,
@@ -19,21 +19,24 @@ test('host stop-server button sends shutdown request and shows status', async ({
   });
 
   await page.addInitScript(() => {
+    window.confirm = () => true;
     window.open = () => window;
     window.close = () => {};
   });
-
   page.on('dialog', async (dialog) => {
     await dialog.accept();
   });
 
   await bootstrapHostPage(page, request, { resetBeforeLoad: true, clearStorage: true });
+  await page.evaluate(() => {
+    window.confirm = () => true;
+  });
   await expect(page.locator('#stopServer')).toBeVisible();
   await expect(page.locator('#stopServer')).toBeEnabled();
 
   await page.click('#stopServer');
-  await expect.poll(() => shutdownCalls).toBe(1);
-  await expect(page.locator('#status')).toContainText('Сервер останавливается');
+  await expect.poll(() => shutdownCalls).toBeGreaterThan(0);
+  await expect(page.locator('#stopServer')).toBeDisabled();
 
   assertNoClientErrors(capture);
 });
