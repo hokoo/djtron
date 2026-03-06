@@ -5,6 +5,36 @@
 
 ---
 
+## Статус покрытия A–I (на текущем инкременте)
+
+- [x] **A) Роли и права** — покрыто, включая A1/A3:
+  - `test/playback-role-policy.test.js` (host/co-host/slave rules)
+  - `test/playback-command-bus.test.js` (routing allow/deny)
+- [x] **B) Тумблеры и режимы** — покрыты B1–B4:
+  - `test/playback-controller.test.js` (seamless переключения и неактивный плейлист)
+- [x] **C) DSP fragment A→B** — покрыты C1/C2:
+  - `test/playback-controller.test.js` (`dsp fragment completion...`, `play-next during fragment...`)
+- [x] **D) Play Next v3 стратегия A** — покрыты D1–D5:
+  - `test/playback-controller.test.js` (`play-next strategy A ...`, `...cancels scheduled switch...`)
+- [x] **E) Play Next v3 стратегия B** — покрыты E1–E4:
+  - `test/playback-controller.test.js` (`...anchors switch...`, `scheduled switch executes...`)
+- [x] **F) DAP** — покрыты F1–F7:
+  - `test/playback-controller.test.js` (arm/start/promote/suspend/resume/exit)
+- [x] **G) Overlap/Fade инварианты** — покрыты, включая G3 (fade только тишина↔Track):
+  - `test/audio-engine.test.js`
+- [x] **H) STOP как полная остановка** — покрыт reset + вызов `AudioEngine.stopAll`:
+  - `test/playback-controller.test.js` (`stop performs full stop...`, `stop delegates...`)
+- [x] **I) PlaylistEditor регрессия** — покрыты copy/move и quick build commit:
+  - `test/playlist-editor.test.js`
+
+---
+
+## Что осталось закрыть
+
+- [x] По текущему инкременту незакрытых кейсов в блоке A–I нет.
+
+---
+
 ## A) Роли и права (RolePolicy + CommandBus)
 
 ### A1. Co-Host может только play/stop host
