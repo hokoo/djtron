@@ -12,6 +12,10 @@ import { trackKey } from './utils.js';
 const _deps = {};
 const LATE_SOURCE_REMAINING_EPSILON_SECONDS = 0.35;
 
+// Stores last known ready pair: "fromFile|toFile" → { nextTrack, sliceSeconds }
+// Survives DSP state resets so we can immediately re-arm on track replay.
+const _lastReadyTransitionPairCache = new Map();
+
 function waitMs(ms) {
   const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
   return new Promise((resolve) => {
@@ -289,6 +293,16 @@ export async function pollLiveDspTransitionUntilReady(fromTrack, nextTrack, toke
         primeLiveDspContinuationWarmup(nextTrack, details.sliceSeconds);
       }
       setLiveDspNextTrackReady(nextTrack, details);
+      // Cache this ready pair so replay can immediately re-arm without waiting for re-poll.
+      const cacheKey = `${fromTrack.file}|${nextTrack.file}`;
+      _lastReadyTransitionPairCache.set(cacheKey, {
+        nextTrack: Object.assign({}, nextTrack),
+        sliceSeconds: normalizeDspTransitionSliceSeconds(details && details.sliceSeconds),
+      });
+      if (_lastReadyTransitionPairCache.size > 10) {
+        const oldestKey = _lastReadyTransitionPairCache.keys().next().value;
+        _lastReadyTransitionPairCache.delete(oldestKey);
+      }
       return;
     }
     if (status === 'failed') {
@@ -329,28 +343,32 @@ export function triggerLiveDspTransitionForTrack(track) {
   if (!nextTrack) return;
   if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return;
 
-  // If the same transition pair is already ready, keep the cached state
-  // so the DSP slice trigger window stays active on track replay.
-  const existingSlice = resolveReadyDspSliceWindowSeconds(nextTrack);
-  if (Number.isFinite(existingSlice) && existingSlice > 0) {
-    console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack SKIP (already ready)', {
-      fromTrackKey: track.key,
-      nextTrackFile: nextTrack.file,
-      existingSlice,
-    });
-    return;
-  }
-
   const token = state.liveDspRenderToken + 1;
   state.liveDspRenderToken = token;
   setLiveDspNextTrackReady(null);
 
-  console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack', {
-    fromTrackKey: track.key,
-    nextTrackFile: nextTrack.file,
-    token,
-  });
+  // If we have a cached ready state for this pair, immediately re-arm the trigger window
+  // so the transition fires 15s early (not 1-2s late) even on track replay.
+  const cacheKey = `${track.file}|${nextTrack.file}`;
+  const cached = _lastReadyTransitionPairCache.get(cacheKey);
+  if (cached && cached.sliceSeconds > 0) {
+    setLiveDspNextTrackReady(cached.nextTrack, { sliceSeconds: cached.sliceSeconds });
+    primeLiveDspContinuationWarmup(cached.nextTrack, cached.sliceSeconds);
+    console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack REARM from cache', {
+      fromTrackKey: track.key,
+      nextTrackFile: nextTrack.file,
+      cachedSlice: cached.sliceSeconds,
+      token,
+    });
+  } else {
+    console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack polling', {
+      fromTrackKey: track.key,
+      nextTrackFile: nextTrack.file,
+      token,
+    });
+  }
 
+  // Always poll in background to ensure fresh details, but trigger window is already armed.
   queueLiveDspTransitionForTrack(track, nextTrack, token).catch((err) => {
     console.error('Не удалось подготовить DSP transition на старте трека', err);
   });
