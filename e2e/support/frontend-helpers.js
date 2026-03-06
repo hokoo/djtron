@@ -50,7 +50,8 @@ async function bootstrapHostPage(page, request, { resetBeforeLoad = true, clearS
     });
   }
 
-  await page.goto('/', { waitUntil: 'networkidle' });
+  // App keeps an open SSE stream (/api/layout/stream), so networkidle can hang forever.
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('#authOverlay')).toBeHidden();
   await expect.poll(() => page.locator('.zone').count()).toBeGreaterThan(0);
 }

@@ -41,7 +41,7 @@ test('settings defaults are editable and persisted across reloads', async ({ pag
   expect(await localStorageValue(page, 'player:showVolumePresets')).toBe('true');
   expect(await localStorageValue(page, 'player:liveSeekEnabled')).toBe('true');
 
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.locator('#overlayTime')).toHaveValue('1.2');
   await expect(page.locator('#stopFadeTime')).toHaveValue('0.8');
   await expect(page.locator('#overlayCurve')).toHaveValue('ease-in-out');

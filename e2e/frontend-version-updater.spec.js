@@ -36,7 +36,7 @@ test('app version is shown and prerelease toggle persists and affects update-che
   expect(await localStorageValue(page, 'player:allowPrerelease')).toBe('true');
 
   const checksBeforeReload = updateCheckFlags.length;
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.locator('#allowPrerelease')).toBeChecked();
   await expect.poll(() => updateCheckFlags.length).toBeGreaterThan(checksBeforeReload);
   expect(updateCheckFlags.slice(checksBeforeReload)).toContain('true');
