@@ -355,22 +355,25 @@ export function resolveDspSourceSegmentSeconds(sliceSeconds, transitionDetails =
   return Math.max(0.05, normalizedSlice - safeTailTrim);
 }
 
-export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds, transitionDetails = null) {
-  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
-  if (normalizedSlice <= 0) return 0;
-  const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(normalizedSlice, transitionDetails);
-
-  const hasCurrentSourceTrack =
+function isCurrentSourceTrackActive(sourceTrack) {
+  return Boolean(
     sourceTrack &&
     sourceTrack.key &&
     state.currentTrack &&
     state.currentTrack.key === sourceTrack.key &&
     state.currentAudio &&
-    !state.currentAudio.paused;
+    !state.currentAudio.paused,
+  );
+}
 
-  if (!hasCurrentSourceTrack) {
-    // Source track already ended: skip source segment and continue from target side of transition.
-    return sourceSegmentSeconds;
+export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds, transitionDetails = null) {
+  const normalizedSlice = normalizeDspTransitionSliceSeconds(sliceSeconds);
+  if (normalizedSlice <= 0) return 0;
+  const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(normalizedSlice, transitionDetails);
+
+  if (!isCurrentSourceTrackActive(sourceTrack)) {
+    // Source track already ended: start transition fragment from its beginning.
+    return 0;
   }
 
   const sourceDuration = _deps.getDuration(state.currentAudio) || _deps.getKnownDurationSeconds(sourceTrack.key);
@@ -423,6 +426,8 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     sliceSeconds,
     details.transition,
   );
+  const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(sliceSeconds, details.transition);
+  const sourceTrackActiveAtPlanning = isCurrentSourceTrackActive(sourceTrack);
   const transitionOffsetPlannedAt = performance.now();
 
   if (_deps.isDspTransitionPlaybackActive()) {
@@ -455,19 +460,38 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
   syncDspTransitionTrackHighlight();
   syncNowPlayingPanel();
 
+  const hasSourceTrackReachedEndBeforeTransitionStart = () => {
+    if (!sourceTrackActiveAtPlanning || !previousAudio) return true;
+    if (previousAudio.ended) return true;
+
+    const duration = _deps.getDuration(previousAudio);
+    const currentTime = Number.isFinite(previousAudio.currentTime) ? Math.max(0, previousAudio.currentTime) : null;
+    if (!Number.isFinite(duration) || duration <= 0 || currentTime === null) {
+      return Boolean(previousAudio.paused);
+    }
+
+    const remainingSeconds = duration - currentTime;
+    return Boolean(previousAudio.paused) || !Number.isFinite(remainingSeconds) || remainingSeconds <= 0.03;
+  };
+
   const resolveAdjustedTransitionStartOffsetSeconds = () => {
+    if (hasSourceTrackReachedEndBeforeTransitionStart()) {
+      return 0;
+    }
+
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
     const rawOffset = Math.max(
       0,
       transitionStartOffsetSeconds + startupDelaySeconds + state.liveDspEntryCompensationSeconds,
     );
+    const clampedToSourceSegment = Math.max(0, Math.min(rawOffset, sourceSegmentSeconds));
     const knownDuration =
       _deps.getDuration(transitionAudio) ||
       (state.dspTransitionPlayback && Number.isFinite(state.dspTransitionPlayback.duration) && state.dspTransitionPlayback.duration > 0
         ? state.dspTransitionPlayback.duration
         : null);
-    if (!knownDuration) return rawOffset;
-    return Math.max(0, Math.min(rawOffset, Math.max(0, knownDuration - 0.02)));
+    if (!knownDuration) return clampedToSourceSegment;
+    return Math.max(0, Math.min(clampedToSourceSegment, Math.max(0, knownDuration - 0.02)));
   };
 
   let handoffStarted = false;
@@ -643,9 +667,17 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
   prepareContinuationAudio().catch(() => {});
 
   try {
-    const adjustedTransitionStartOffsetSeconds = resolveAdjustedTransitionStartOffsetSeconds();
+    let adjustedTransitionStartOffsetSeconds = resolveAdjustedTransitionStartOffsetSeconds();
     if (adjustedTransitionStartOffsetSeconds > 0) {
       await _deps.seekAudioToOffset(transitionAudio, adjustedTransitionStartOffsetSeconds);
+    }
+    if (adjustedTransitionStartOffsetSeconds > 0 && hasSourceTrackReachedEndBeforeTransitionStart()) {
+      adjustedTransitionStartOffsetSeconds = 0;
+      try {
+        transitionAudio.currentTime = 0;
+      } catch (err) {
+        // ignore seek reset failures for unsupported formats/devices
+      }
     }
     if (state.dspTransitionPlayback && state.dspTransitionPlayback.audio === transitionAudio) {
       state.dspTransitionPlayback.startOffsetSeconds = adjustedTransitionStartOffsetSeconds;
