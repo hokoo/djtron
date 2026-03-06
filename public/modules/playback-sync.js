@@ -24,6 +24,7 @@ import { createPlaybackControllerAdapter } from './playback-controller-adapter.j
 import { PlaybackCommandBus, canDispatchLivePlaybackCommand } from '/shared/playback/index.js';
 
 const _deps = {};
+let hostLocalPlaybackCommandExecutionDepth = 0;
 
 function normalizeCommandSourceRole(rawRole) {
   if (rawRole === ROLE_HOST || rawRole === ROLE_COHOST || rawRole === ROLE_SLAVE) {
@@ -194,6 +195,19 @@ const outgoingLiveCommandBus = new PlaybackCommandBus({
   },
 });
 
+function isHostLocalPlaybackCommandExecutionActive() {
+  return hostLocalPlaybackCommandExecutionDepth > 0;
+}
+
+async function executeHostLocalPlaybackCommandWithReentryGuard(payload) {
+  hostLocalPlaybackCommandExecutionDepth += 1;
+  try {
+    await executeHostPlaybackCommandLocally(payload);
+  } finally {
+    hostLocalPlaybackCommandExecutionDepth = Math.max(0, hostLocalPlaybackCommandExecutionDepth - 1);
+  }
+}
+
 const hostLocalPlaybackCommandBus = new PlaybackCommandBus({
   authorize: ({ commandType, target }) =>
     canDispatchLivePlaybackCommand({
@@ -202,7 +216,7 @@ const hostLocalPlaybackCommandBus = new PlaybackCommandBus({
       isServer: false,
       target,
     }),
-  execute: (payload) => executeHostPlaybackCommandLocally(payload),
+  execute: (payload) => executeHostLocalPlaybackCommandWithReentryGuard(payload),
 });
 
 const localSelfPlaybackCommandBus = new PlaybackCommandBus({
@@ -805,12 +819,21 @@ export async function dispatchHostPlaybackCommand(command) {
   if (!normalizedCommand) {
     throw new Error('Некорректная playback-команда хоста');
   }
+  const commandContext = {
+    sourceRole: ROLE_HOST,
+    commandType: normalizedCommand.type,
+    target: 'self',
+  };
+  if (isHostLocalPlaybackCommandExecutionActive()) {
+    const decision = hostLocalPlaybackCommandBus.authorize(commandContext);
+    if (!decision || decision.allowed !== true) {
+      throw new Error((decision && decision.message) || 'Команда хоста отклонена политикой доступа.');
+    }
+    await hostLocalPlaybackCommandBus.execute(normalizedCommand, commandContext);
+    return normalizedCommand;
+  }
   const result = await hostLocalPlaybackCommandBus.dispatch(
-    {
-      sourceRole: ROLE_HOST,
-      commandType: normalizedCommand.type,
-      target: 'self',
-    },
+    commandContext,
     normalizedCommand,
   );
   if (!result.ok) {
