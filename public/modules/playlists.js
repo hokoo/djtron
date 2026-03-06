@@ -21,6 +21,54 @@ const PLAYLIST_COMMAND_RENAME = 'playlist-rename';
 const PLAYLIST_COMMAND_TOGGLE_AUTOPLAY = 'playlist-toggle-autoplay';
 const PLAYLIST_COMMAND_TOGGLE_DSP = 'playlist-toggle-dsp';
 const PLAYLIST_COMMAND_DELETE = 'playlist-delete';
+const TRACK_NAME_HINT_OVERFLOW_EPSILON_PX = 1;
+let trackNameHintRafId = null;
+const pendingTrackNameHintLabels = new Set();
+
+function syncTrackNameLabelHint(label) {
+  if (!(label instanceof HTMLElement)) return;
+  const fullName = typeof label.textContent === 'string' ? label.textContent.trim() : '';
+  if (!fullName) {
+    label.removeAttribute('title');
+    return;
+  }
+
+  const hasVerticalOverflow =
+    Number.isFinite(label.scrollHeight) &&
+    Number.isFinite(label.clientHeight) &&
+    label.scrollHeight - label.clientHeight > TRACK_NAME_HINT_OVERFLOW_EPSILON_PX;
+  const hasHorizontalOverflow =
+    Number.isFinite(label.scrollWidth) &&
+    Number.isFinite(label.clientWidth) &&
+    label.scrollWidth - label.clientWidth > TRACK_NAME_HINT_OVERFLOW_EPSILON_PX;
+
+  if (hasVerticalOverflow || hasHorizontalOverflow) {
+    label.title = fullName;
+    return;
+  }
+
+  label.removeAttribute('title');
+}
+
+function queueTrackNameLabelHintSync(label) {
+  if (!(label instanceof HTMLElement)) return;
+  pendingTrackNameHintLabels.add(label);
+
+  if (trackNameHintRafId !== null) return;
+  if (typeof requestAnimationFrame !== 'function') {
+    const labels = Array.from(pendingTrackNameHintLabels);
+    pendingTrackNameHintLabels.clear();
+    labels.forEach((candidate) => syncTrackNameLabelHint(candidate));
+    return;
+  }
+
+  trackNameHintRafId = requestAnimationFrame(() => {
+    trackNameHintRafId = null;
+    const labels = Array.from(pendingTrackNameHintLabels);
+    pendingTrackNameHintLabels.clear();
+    labels.forEach((candidate) => syncTrackNameLabelHint(candidate));
+  });
+}
 
 function normalizePlaylistMutationCommand(rawCommand) {
   if (!rawCommand || typeof rawCommand !== 'object') return null;
@@ -1652,7 +1700,10 @@ export function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 
     const fragment = document.createDocumentFragment();
     for (let index = start; index < end; index += 1) {
-      fragment.appendChild(playlistCards[index]);
+      const card = playlistCards[index];
+      fragment.appendChild(card);
+      const trackNameLabel = card.querySelector('.track-name');
+      queueTrackNameLabelHintSync(trackNameLabel);
     }
     zoneBody.replaceChildren(fragment);
     syncVirtualizedRenderedTrackState();
@@ -2352,6 +2403,7 @@ export function refreshTrackNameLabelsByKey(fileKey) {
     const file = typeof label.dataset.file === 'string' ? label.dataset.file : '';
     const basePath = typeof label.dataset.basePath === 'string' ? label.dataset.basePath : '/audio';
     label.textContent = getTrackDisplayNameForMode(file, basePath, { triggerLoad: true });
+    queueTrackNameLabelHintSync(label);
   }
 }
 
@@ -3238,6 +3290,7 @@ export function buildTrackCard(
   name.dataset.file = file;
   name.dataset.basePath = basePath;
   name.textContent = trackDisplayName(file, basePath);
+  queueTrackNameLabelHintSync(name);
   addToMultiMap(state.trackNameLabelsByFile, key, name);
 
   const durationLabel = document.createElement('span');

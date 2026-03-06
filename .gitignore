@@ -23,3 +23,6 @@ extra.conf
 # Local DSP runtime logs
 dsp.log
 dsp.log.prev
+
+# Dependencies
+node_modules/
