@@ -76,3 +76,25 @@ test('live command bus allows co-host to route play-track and stop to host', asy
   assert.equal(stop.ok, true);
   assert.deepEqual(seen, ['play-track', 'stop']);
 });
+
+test('live command bus allows slave local play-track/stop only on self', async () => {
+  const seen = [];
+  const bus = createLivePlaybackCommandBus({
+    sourceRole: 'slave',
+    isServer: false,
+    controller: {
+      handleCommand: (payload) => {
+        seen.push(payload.type);
+      },
+    },
+  });
+
+  const playSelf = await bus.dispatch({ commandType: 'play-track', target: 'self' }, { type: 'play-track' });
+  const stopSelf = await bus.dispatch({ commandType: 'stop', target: 'self' }, { type: 'stop' });
+  const playHost = await bus.dispatch({ commandType: 'play-track', target: 'host' }, { type: 'play-track' });
+
+  assert.equal(playSelf.ok, true);
+  assert.equal(stopSelf.ok, true);
+  assert.equal(playHost.ok, false);
+  assert.deepEqual(seen, ['play-track', 'stop']);
+});

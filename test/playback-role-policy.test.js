@@ -33,6 +33,15 @@ test('co-host can send play-track and stop only', () => {
   assert.equal(
     canDispatchLivePlaybackCommand({
       sourceRole: 'co-host',
+      commandType: 'play-track',
+      target: 'self',
+      isServer: false,
+    }).allowed,
+    false,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'co-host',
       commandType: 'set-live-seek-enabled',
       isServer: false,
     }).allowed,
@@ -55,6 +64,33 @@ test('slave can send play-next-request to host only', () => {
       sourceRole: 'slave',
       commandType: 'play-next-request',
       target: 'self',
+      isServer: false,
+    }).allowed,
+    false,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'slave',
+      commandType: 'play-track',
+      target: 'self',
+      isServer: false,
+    }).allowed,
+    true,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'slave',
+      commandType: 'stop',
+      target: 'self',
+      isServer: false,
+    }).allowed,
+    true,
+  );
+  assert.equal(
+    canDispatchLivePlaybackCommand({
+      sourceRole: 'slave',
+      commandType: 'stop',
+      target: 'host',
       isServer: false,
     }).allowed,
     false,

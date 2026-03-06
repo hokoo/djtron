@@ -107,6 +107,16 @@ class PlaybackGateway {
     const target = targetRaw === 'self' ? 'self' : 'host';
     const normalizeIdentity = (value, maxLength) =>
       typeof value === 'string' && value.trim() ? value.trim().slice(0, maxLength) : null;
+    const normalizeTrackIndex = (value) => {
+      const numeric = Number.parseInt(value, 10);
+      if (!Number.isInteger(numeric) || numeric < 0) return null;
+      return numeric;
+    };
+    const normalizeStartOffset = (value) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric < 0) return null;
+      return numeric;
+    };
     const normalizePlayNextTrackFile = () => {
       const directFile = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
       if (directFile) return directFile;
@@ -207,6 +217,9 @@ class PlaybackGateway {
     if (!file) return null;
     const playlistId = normalizeIdentity(rawCommand.playlistId, 64);
     const trackId = normalizeIdentity(rawCommand.trackId, 80);
+    const playlistIndex = normalizeTrackIndex(rawCommand.playlistIndex);
+    const playlistPosition = normalizeTrackIndex(rawCommand.playlistPosition);
+    const startAtSeconds = normalizeStartOffset(rawCommand.startAtSeconds);
 
     return {
       type: 'play-track',
@@ -214,6 +227,13 @@ class PlaybackGateway {
       basePath: '/audio',
       playlistId: playlistId || null,
       trackId: trackId || null,
+      playlistIndex,
+      playlistPosition,
+      startAtSeconds,
+      fromAutoplay: Boolean(rawCommand.fromAutoplay),
+      fromDspTransition: Boolean(rawCommand.fromDspTransition),
+      fromDapNoSilence: Boolean(rawCommand.fromDapNoSilence),
+      fromDapInterruptedResume: Boolean(rawCommand.fromDapInterruptedResume),
       target,
     };
   }

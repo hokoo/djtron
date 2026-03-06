@@ -2,7 +2,7 @@
 
 import { LIVE_DSP_CONTINUATION_WARMUP_MAX_TRACKED, LIVE_DSP_HANDOFF_LEAD_SECONDS, LIVE_DSP_POLL_INTERVAL_MS, LIVE_DSP_POLL_TIMEOUT_MS, LIVE_DSP_RENDER_SOURCE, LIVE_DSP_WARMUP_MAX_TRACKED, LIVE_DSP_WARMUP_TIMEOUT_MS, state } from './state.js';
 import * as api from './api.js';
-import { createAudio, getEffectiveLiveVolume, handlePlay, resetFadeState } from './audio.js';
+import { createAudio, getEffectiveLiveVolume, resetFadeState } from './audio.js';
 import { isHostRole } from './roles.js';
 import { syncDspTransitionTrackHighlight, syncLiveDspNextTrackHighlight } from './ui/dsp.js';
 import { syncNowPlayingPanel } from './ui/nowplaying.js';
@@ -244,6 +244,21 @@ export function toPlaybackTrackDescriptor(track, fallbackBasePath = '/audio') {
     playlistIndex: _deps.normalizePlaylistTrackIndex(track ? track.playlistIndex : null),
     playlistPosition: _deps.normalizePlaylistTrackIndex(track ? track.playlistPosition : null),
   };
+}
+
+async function requestHostTrackPlayback(nextTrack, playbackContext = {}) {
+  if (typeof _deps.requestHostPlayTrack !== 'function') {
+    throw new Error('requestHostPlayTrack dependency is not configured');
+  }
+  await _deps.requestHostPlayTrack(nextTrack.file, nextTrack.basePath || '/audio', {
+    playlistId: nextTrack.playlistId,
+    trackId: nextTrack.trackId,
+    playlistIndex: nextTrack.playlistIndex,
+    playlistPosition: nextTrack.playlistPosition,
+    startAtSeconds: playbackContext.startAtSeconds,
+    fromAutoplay: Boolean(playbackContext.fromAutoplay),
+    fromDspTransition: Boolean(playbackContext.fromDspTransition),
+  });
 }
 
 export async function fetchDspTransitionPairDetails(fromFile, toFile) {
@@ -523,11 +538,7 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
       return;
     }
 
-    await handlePlay(nextTrack.file, refreshedButton, nextTrack.basePath || '/audio', {
-      playlistId: nextTrack.playlistId,
-      trackId: nextTrack.trackId,
-      playlistIndex: nextTrack.playlistIndex,
-      playlistPosition: nextTrack.playlistPosition,
+    await requestHostTrackPlayback(nextTrack, {
       fromAutoplay: true,
       fromDspTransition: true,
       startAtSeconds: sliceSeconds,
@@ -629,11 +640,7 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     if (!state.dspTransitionPlayback || state.dspTransitionPlayback.audio !== transitionAudio) return;
     _deps.stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
     setStatus('Ошибка воспроизведения DSP перехода. Переходим к следующему треку.');
-    handlePlay(nextTrack.file, targetButton, nextTrack.basePath || '/audio', {
-      playlistId: nextTrack.playlistId,
-      trackId: nextTrack.trackId,
-      playlistIndex: nextTrack.playlistIndex,
-      playlistPosition: nextTrack.playlistPosition,
+    requestHostTrackPlayback(nextTrack, {
       fromAutoplay: true,
     }).catch((err) => {
       console.error('Не удалось запустить следующий трек после ошибки DSP transition', err);
@@ -681,11 +688,7 @@ export async function tryAutoplayNextTrack(finishedTrack) {
     const button = _deps.getTrackButton(nextTrack.file, nextTrack.playlistIndex, nextTrack.playlistPosition, nextTrack.basePath);
     if (!button) return false;
 
-    await handlePlay(nextTrack.file, button, nextTrack.basePath, {
-      playlistId: nextTrack.playlistId,
-      trackId: nextTrack.trackId,
-      playlistIndex: nextTrack.playlistIndex,
-      playlistPosition: nextTrack.playlistPosition,
+    await requestHostTrackPlayback(nextTrack, {
       fromAutoplay: true,
     });
     const expectedKey = trackKey(nextTrack.file, nextTrack.basePath || '/audio');

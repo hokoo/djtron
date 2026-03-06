@@ -172,4 +172,39 @@ describe('PlaybackGateway', () => {
     );
     assert.equal(command, null);
   });
+
+  it('sanitizePlaybackCommand normalizes play-track context fields', () => {
+    const command = PlaybackGateway.sanitizePlaybackCommand(
+      {
+        type: 'play-track',
+        file: ' Track.mp3 ',
+        playlistId: '  p-1  ',
+        trackId: '  t-2  ',
+        playlistIndex: '3',
+        playlistPosition: 5,
+        startAtSeconds: '12.5',
+        fromAutoplay: 1,
+        fromDspTransition: 0,
+        fromDapNoSilence: true,
+        fromDapInterruptedResume: false,
+        target: 'self',
+      },
+      { normalizeLiveVolumePreset: () => null },
+    );
+    assert.deepEqual(command, {
+      type: 'play-track',
+      file: 'Track.mp3',
+      basePath: '/audio',
+      playlistId: 'p-1',
+      trackId: 't-2',
+      playlistIndex: 3,
+      playlistPosition: 5,
+      startAtSeconds: 12.5,
+      fromAutoplay: true,
+      fromDspTransition: false,
+      fromDapNoSilence: true,
+      fromDapInterruptedResume: false,
+      target: 'self',
+    });
+  });
 });

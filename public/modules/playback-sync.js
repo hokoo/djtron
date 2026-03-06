@@ -39,6 +39,12 @@ function normalizePlaybackIdentity(value, maxLength = 64) {
   return normalized.slice(0, Math.max(1, maxLength));
 }
 
+function normalizePlaybackStartOffsetSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+  return numeric;
+}
+
 function resolvePlaylistTrackContextByIds({
   file = '',
   playlistId = null,
@@ -187,6 +193,17 @@ const hostLocalPlaybackCommandBus = new PlaybackCommandBus({
   execute: (payload) => executeHostPlaybackCommandLocally(payload),
 });
 
+const localSelfPlaybackCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole, commandType, target }) =>
+    canDispatchLivePlaybackCommand({
+      sourceRole: normalizeCommandSourceRole(sourceRole) || state.currentRole || ROLE_SLAVE,
+      commandType,
+      isServer: false,
+      target: target === 'self' ? 'self' : 'host',
+    }),
+  execute: (payload, context) => executeSelfPlaybackCommandLocally(payload, context),
+});
+
 const incomingLiveCommandBus = new PlaybackCommandBus({
   authorize: ({ sourceRole, commandType, target }) =>
     canDispatchLivePlaybackCommand({
@@ -256,6 +273,11 @@ const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
       trackId: resolvedContext.trackId,
       playlistIndex: resolvedContext.playlistIndex,
       playlistPosition: resolvedContext.playlistPosition,
+      startAtSeconds: normalizePlaybackStartOffsetSeconds(command.startAtSeconds),
+      fromAutoplay: Boolean(command.fromAutoplay),
+      fromDspTransition: Boolean(command.fromDspTransition),
+      fromDapNoSilence: Boolean(command.fromDapNoSilence),
+      fromDapInterruptedResume: Boolean(command.fromDapInterruptedResume),
     });
 
     if (sourceTag) {
@@ -634,6 +656,9 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
 
   const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
   if (!file) return null;
+  const playlistIndex = normalizePlaylistTrackIndex(rawCommand.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(rawCommand.playlistPosition);
+  const startAtSeconds = normalizePlaybackStartOffsetSeconds(rawCommand.startAtSeconds);
 
   return {
     type: PLAYBACK_COMMAND_PLAY_TRACK,
@@ -641,6 +666,13 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
     basePath: '/audio',
     playlistId: normalizePlaybackIdentity(rawCommand.playlistId, 64),
     trackId: normalizePlaybackIdentity(rawCommand.trackId, 80),
+    playlistIndex,
+    playlistPosition,
+    startAtSeconds,
+    fromAutoplay: Boolean(rawCommand.fromAutoplay),
+    fromDspTransition: Boolean(rawCommand.fromDspTransition),
+    fromDapNoSilence: Boolean(rawCommand.fromDapNoSilence),
+    fromDapInterruptedResume: Boolean(rawCommand.fromDapInterruptedResume),
     sourceRole,
     sourceClientId,
     sourceUsername,
@@ -693,6 +725,31 @@ export async function dispatchHostPlaybackCommand(command) {
   return normalizedCommand;
 }
 
+export async function dispatchLocalPlaybackCommand(command) {
+  const sourceRole = normalizeCommandSourceRole(state.currentRole) || ROLE_SLAVE;
+  const normalizedCommand = normalizeIncomingPlaybackCommand({
+    ...command,
+    sourceRole,
+    target: 'self',
+  });
+  if (!normalizedCommand) {
+    throw new Error('Некорректная локальная playback-команда');
+  }
+
+  const result = await localSelfPlaybackCommandBus.dispatch(
+    {
+      sourceRole,
+      commandType: normalizedCommand.type,
+      target: 'self',
+    },
+    normalizedCommand,
+  );
+  if (!result.ok) {
+    throw new Error(result.message || 'Локальная playback-команда отклонена политикой доступа.');
+  }
+  return normalizedCommand;
+}
+
 export async function requestHostPlayTrack(file, basePath = '/audio', playbackContext = {}) {
   if (!isHostRole()) return false;
   const resolvedContext = resolvePlaylistTrackContextByIds({
@@ -708,9 +765,61 @@ export async function requestHostPlayTrack(file, basePath = '/audio', playbackCo
     basePath,
     playlistId: resolvedContext.playlistId,
     trackId: resolvedContext.trackId,
+    playlistIndex: resolvedContext.playlistIndex,
+    playlistPosition: resolvedContext.playlistPosition,
+    startAtSeconds: normalizePlaybackStartOffsetSeconds(playbackContext.startAtSeconds),
+    fromAutoplay: Boolean(playbackContext.fromAutoplay),
+    fromDspTransition: Boolean(playbackContext.fromDspTransition),
+    fromDapNoSilence: Boolean(playbackContext.fromDapNoSilence),
+    fromDapInterruptedResume: Boolean(playbackContext.fromDapInterruptedResume),
   };
   await dispatchHostPlaybackCommand(command);
   return true;
+}
+
+export async function requestLocalPlayTrack(file, basePath = '/audio', playbackContext = {}) {
+  if (isHostRole()) {
+    return requestHostPlayTrack(file, basePath, playbackContext);
+  }
+  if (isCoHostRole()) {
+    throw new Error('Co-host не может запускать локальное воспроизведение.');
+  }
+
+  const resolvedContext = resolvePlaylistTrackContextByIds({
+    file,
+    playlistId: playbackContext.playlistId,
+    trackId: playbackContext.trackId,
+    playlistIndex: playbackContext.playlistIndex,
+    playlistPosition: playbackContext.playlistPosition,
+  });
+
+  const command = {
+    type: PLAYBACK_COMMAND_PLAY_TRACK,
+    file,
+    basePath,
+    playlistId: resolvedContext.playlistId,
+    trackId: resolvedContext.trackId,
+    playlistIndex: resolvedContext.playlistIndex,
+    playlistPosition: resolvedContext.playlistPosition,
+    startAtSeconds: normalizePlaybackStartOffsetSeconds(playbackContext.startAtSeconds),
+    fromAutoplay: Boolean(playbackContext.fromAutoplay),
+    fromDspTransition: Boolean(playbackContext.fromDspTransition),
+    fromDapNoSilence: Boolean(playbackContext.fromDapNoSilence),
+    fromDapInterruptedResume: Boolean(playbackContext.fromDapInterruptedResume),
+  };
+
+  await dispatchLocalPlaybackCommand(command);
+  return true;
+}
+
+export async function requestTrackPlaybackForCurrentRole(file, basePath = '/audio', playbackContext = {}) {
+  if (isHostRole()) {
+    return requestHostPlayTrack(file, basePath, playbackContext);
+  }
+  if (isCoHostRole()) {
+    return requestCoHostPlayTrack(file, basePath, playbackContext);
+  }
+  return requestLocalPlayTrack(file, basePath, playbackContext);
 }
 
 export async function requestPlayNextOnHost(
@@ -956,6 +1065,79 @@ async function applyPlayNextRequestLocally(command) {
   }
 }
 
+async function executeSelfPlaybackCommandLocally(command, commandContext = {}) {
+  const sourceRole = normalizeCommandSourceRole(commandContext.sourceRole)
+    || normalizeCommandSourceRole(command && command.sourceRole)
+    || state.currentRole
+    || ROLE_SLAVE;
+  const target = commandContext.target === 'self' || (command && command.target === 'self') ? 'self' : 'host';
+  if (sourceRole === ROLE_HOST) {
+    await executeHostPlaybackCommandLocally(command);
+    return;
+  }
+  if (target !== 'self') {
+    throw new Error('Локальная playback-команда должна иметь target=self.');
+  }
+
+  if (command.type === PLAYBACK_COMMAND_STOP) {
+    clearPlayNextInsertSession();
+    stopAndClearLocalPlayback();
+    setStatus('Локальное воспроизведение остановлено.');
+    return;
+  }
+
+  if (command.type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
+    await toggleNowPlayingPlaybackLocally();
+    return;
+  }
+
+  if (command.type !== PLAYBACK_COMMAND_PLAY_TRACK) {
+    setStatus('Неизвестная локальная playback-команда.');
+    return;
+  }
+
+  const resolvedContext = resolvePlaylistTrackContextByIds({
+    file: command.file,
+    playlistId: command.playlistId,
+    trackId: command.trackId,
+    playlistIndex: command.playlistIndex,
+    playlistPosition: command.playlistPosition,
+  });
+  const resolvedPlaylistIndex = normalizePlaylistTrackIndex(resolvedContext.playlistIndex);
+  const autoplayEnabledForPlaylist =
+    resolvedPlaylistIndex !== null &&
+    Array.isArray(state.playlistAutoplay) &&
+    resolvedPlaylistIndex >= 0 &&
+    resolvedPlaylistIndex < state.playlistAutoplay.length &&
+    Boolean(state.playlistAutoplay[resolvedPlaylistIndex]);
+  if (sourceRole === ROLE_SLAVE && autoplayEnabledForPlaylist) {
+    throw new Error('Slave может играть локально только в Simple режиме.');
+  }
+
+  const button = _deps.getTrackButton(
+    command.file,
+    resolvedContext.playlistIndex,
+    resolvedContext.playlistPosition,
+    command.basePath,
+  );
+  if (!button) {
+    setStatus(`Не удалось выполнить локальную команду: трек ${command.file} не найден.`);
+    return;
+  }
+
+  await handlePlay(command.file, button, command.basePath, {
+    playlistId: resolvedContext.playlistId,
+    trackId: resolvedContext.trackId,
+    playlistIndex: resolvedContext.playlistIndex,
+    playlistPosition: resolvedContext.playlistPosition,
+    startAtSeconds: normalizePlaybackStartOffsetSeconds(command.startAtSeconds),
+    fromAutoplay: Boolean(command.fromAutoplay),
+    fromDspTransition: Boolean(command.fromDspTransition),
+    fromDapNoSilence: Boolean(command.fromDapNoSilence),
+    fromDapInterruptedResume: Boolean(command.fromDapInterruptedResume),
+  });
+}
+
 async function executeHostPlaybackCommandLocally(command) {
   const sourceTag = command.sourceUsername ? ` (co-host: ${command.sourceUsername})` : '';
 
@@ -1052,6 +1234,8 @@ export async function requestCoHostPlayTrack(file, basePath = '/audio', playback
     basePath,
     playlistId: resolvedContext.playlistId,
     trackId: resolvedContext.trackId,
+    playlistIndex: resolvedContext.playlistIndex,
+    playlistPosition: resolvedContext.playlistPosition,
   };
   await sendLivePlaybackCommand(command);
   return true;
@@ -1060,6 +1244,19 @@ export async function requestCoHostPlayTrack(file, basePath = '/audio', playback
 export async function requestCoHostStopPlayback() {
   if (!isCoHostRole()) return false;
   await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_STOP });
+  return true;
+}
+
+export async function requestStopPlaybackForCurrentRole() {
+  if (isHostRole()) {
+    await dispatchHostPlaybackCommand({ type: PLAYBACK_COMMAND_STOP });
+    return true;
+  }
+  if (isCoHostRole()) {
+    await requestCoHostStopPlayback();
+    return true;
+  }
+  await dispatchLocalPlaybackCommand({ type: PLAYBACK_COMMAND_STOP });
   return true;
 }
 

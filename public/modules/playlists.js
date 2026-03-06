@@ -2,7 +2,7 @@
 
 import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
-import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, handlePlay, setLivePlaybackVolume } from './audio.js';
+import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, setLivePlaybackVolume } from './audio.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole, isSlaveRole } from './roles.js';
 import { closeLayoutStream } from './sse.js';
 import { isDapEnabled, isDapTrackContext, updateDapSettingsUi } from './ui/dap.js';
@@ -790,7 +790,10 @@ export async function ensureDapNoSilencePlayback({ reason = 'guard' } = {}) {
 
   state.dapAutoStartInFlight = true;
   try {
-    await handlePlay(targetTrack.file, targetButton, targetTrack.basePath || '/audio', {
+    if (typeof _deps.requestHostPlayTrack !== 'function') {
+      return false;
+    }
+    await _deps.requestHostPlayTrack(targetTrack.file, targetTrack.basePath || '/audio', {
       playlistIndex: targetTrack.playlistIndex,
       playlistPosition: targetTrack.playlistPosition,
       startAtSeconds: targetTrack.startAtSeconds,
@@ -3039,26 +3042,18 @@ export function buildTrackCard(
   playButton.title = 'Воспроизвести';
   playButton.setAttribute('aria-label', 'Воспроизвести');
   playButton.addEventListener('click', async () => {
-    if (isHostRole() && typeof _deps.requestHostPlayTrack === 'function') {
-      try {
-        await _deps.requestHostPlayTrack(file, basePath, {
-          playlistId,
-          trackId,
-          playlistIndex,
-          playlistPosition,
-        });
-      } catch (err) {
-        console.error(err);
-        setStatus(err && err.message ? err.message : 'Не удалось выполнить playback-команду хоста.');
-      }
-      return;
+    if (typeof _deps.requestTrackPlaybackForCurrentRole !== 'function') return;
+    try {
+      await _deps.requestTrackPlaybackForCurrentRole(file, basePath, {
+        playlistId,
+        trackId,
+        playlistIndex,
+        playlistPosition,
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось выполнить playback-команду.');
     }
-    handlePlay(file, playButton, basePath, {
-      playlistId,
-      trackId,
-      playlistIndex,
-      playlistPosition,
-    });
   });
   addToMultiMap(state.buttonsByFile, key, playButton);
 
