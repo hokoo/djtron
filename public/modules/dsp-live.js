@@ -325,13 +325,25 @@ export function triggerLiveDspTransitionForTrack(track) {
   if (!track || typeof track.file !== 'string') return;
   if ((track.basePath || '/audio') !== '/audio') return;
 
-  const token = state.liveDspRenderToken + 1;
-  state.liveDspRenderToken = token;
-  setLiveDspNextTrackReady(null);
-
   const nextTrack = _deps.resolveAutoplayNextTrack(track);
   if (!nextTrack) return;
   if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return;
+
+  // If the same transition pair is already ready, keep the cached state
+  // so the DSP slice trigger window stays active on track replay.
+  const existingSlice = resolveReadyDspSliceWindowSeconds(nextTrack);
+  if (Number.isFinite(existingSlice) && existingSlice > 0) {
+    console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack SKIP (already ready)', {
+      fromTrackKey: track.key,
+      nextTrackFile: nextTrack.file,
+      existingSlice,
+    });
+    return;
+  }
+
+  const token = state.liveDspRenderToken + 1;
+  state.liveDspRenderToken = token;
+  setLiveDspNextTrackReady(null);
 
   console.warn('[DSP-DIAG] triggerLiveDspTransitionForTrack', {
     fromTrackKey: track.key,
