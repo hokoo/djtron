@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -20,6 +20,7 @@ import { setLiveSeekEnabled, syncHostNowPlayingPanel, syncNowPlayingPanel } from
 import { setStatus } from './ui/status.js';
 import { setShowVolumePresetsEnabled, updateVolumePresetsUi } from './ui/volume.js';
 import { trackKey } from './utils.js';
+import { createHostPlaybackControllerAdapter } from './playback-controller-adapter.js';
 import { PlaybackCommandBus, canDispatchLivePlaybackCommand } from '/shared/playback/index.js';
 
 const _deps = {};
@@ -195,6 +196,72 @@ const incomingLiveCommandBus = new PlaybackCommandBus({
       target,
     }),
   execute: (payload) => executeHostPlaybackCommandLocally(payload),
+});
+
+const hostPlaybackControllerAdapter = createHostPlaybackControllerAdapter({
+  getSnapshot: () => ({
+    layout: _deps.ensurePlaylists(state.layout),
+    playlistAutoplay: Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [],
+    playlistDsp: Array.isArray(state.playlistDsp) ? state.playlistDsp.slice() : [],
+  }),
+  resolvePlayTrackContext: (command) =>
+    resolvePlaylistTrackContextByIds({
+      file: command && command.file,
+      playlistId: command && command.playlistId,
+      trackId: command && command.trackId,
+      playlistIndex: command && command.playlistIndex,
+      playlistPosition: command && command.playlistPosition,
+    }),
+  resolvePlayNextAnchorContext: () => resolvePlayNextAnchorContext(),
+  isTransitionPlaybackActive: () => isDspTransitionPlaybackActive(),
+  onStop: async (_command, { sourceTag = '' } = {}) => {
+    clearPlayNextInsertSession();
+    stopAndClearLocalPlayback();
+    requestHostPlaybackSync(true);
+    setStatus(sourceTag ? `Live управление${sourceTag}: стоп.` : 'Воспроизведение остановлено.');
+  },
+  onToggle: async (_command, { sourceTag = '' } = {}) => {
+    await toggleNowPlayingPlaybackLocally();
+    if (sourceTag) {
+      setStatus(`Live управление${sourceTag}.`);
+    }
+  },
+  onPlayNext: async (command, { sourceTag = '' } = {}) => {
+    await applyPlayNextRequestLocally(command);
+    if (sourceTag) {
+      setStatus(`Live управление${sourceTag}: Play Next.`);
+    }
+  },
+  onPlayTrack: async (command, { sourceTag = '' } = {}) => {
+    const resolvedContext = resolvePlaylistTrackContextByIds({
+      file: command.file,
+      playlistId: command.playlistId,
+      trackId: command.trackId,
+      playlistIndex: command.playlistIndex,
+      playlistPosition: command.playlistPosition,
+    });
+    const button = _deps.getTrackButton(
+      command.file,
+      resolvedContext.playlistIndex,
+      resolvedContext.playlistPosition,
+      command.basePath,
+    );
+    if (!button) {
+      setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
+      return;
+    }
+
+    await handlePlay(command.file, button, command.basePath, {
+      playlistId: resolvedContext.playlistId,
+      trackId: resolvedContext.trackId,
+      playlistIndex: resolvedContext.playlistIndex,
+      playlistPosition: resolvedContext.playlistPosition,
+    });
+
+    if (sourceTag) {
+      setStatus(`Live управление${sourceTag}.`);
+    }
+  },
 });
 
 export function setPlaybackSyncDeps(d) {
@@ -443,6 +510,25 @@ export async function pushSharedPlaybackState(snapshot) {
   applyIncomingHostPlaybackState(data, true);
 }
 
+function normalizePlayNextTrackFile(rawCommand) {
+  const directFile = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
+  if (directFile) return directFile;
+
+  const rawTrackRef =
+    rawCommand.trackRef && typeof rawCommand.trackRef === 'object'
+      ? rawCommand.trackRef
+      : (rawCommand.track && typeof rawCommand.track === 'object' ? rawCommand.track : null);
+  if (!rawTrackRef) return '';
+
+  const fileFromRef = typeof rawTrackRef.file === 'string' ? rawTrackRef.file.trim() : '';
+  if (fileFromRef) return fileFromRef;
+
+  const srcFromRef = typeof rawTrackRef.src === 'string' ? rawTrackRef.src.trim() : '';
+  if (!srcFromRef) return '';
+
+  return toLegacyFilePathFromTrack({ src: srcFromRef });
+}
+
 export function normalizeIncomingPlaybackCommand(rawCommand) {
   if (!rawCommand || typeof rawCommand !== 'object') return null;
 
@@ -451,6 +537,16 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
   const sourceClientId = typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null;
   const sourceUsername = typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null;
   const target = typeof rawCommand.target === 'string' && rawCommand.target.trim() ? rawCommand.target.trim() : 'host';
+  if (type === PLAYBACK_COMMAND_STOP) {
+    return {
+      type: PLAYBACK_COMMAND_STOP,
+      sourceRole,
+      sourceClientId,
+      sourceUsername,
+      target,
+    };
+  }
+
   if (type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
     return {
       type: PLAYBACK_COMMAND_TOGGLE_CURRENT,
@@ -506,6 +602,25 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
       type: PLAYBACK_COMMAND_SEEK_CURRENT,
       positionRatio,
       finalize: Boolean(rawCommand.finalize),
+      sourceRole,
+      sourceClientId,
+      sourceUsername,
+      target,
+    };
+  }
+
+  if (type === PLAYBACK_COMMAND_PLAY_NEXT_REQUEST) {
+    const file = normalizePlayNextTrackFile(rawCommand);
+    if (!file) return null;
+
+    const strategy = rawCommand.strategy === 'create-new-playnext-playlist'
+      ? 'create-new-playnext-playlist'
+      : 'copy-into-active';
+    return {
+      type: PLAYBACK_COMMAND_PLAY_NEXT_REQUEST,
+      file,
+      strategy,
+      fifoSession: Boolean(rawCommand.fifoSession),
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -598,6 +713,29 @@ export async function requestHostPlayTrack(file, basePath = '/audio', playbackCo
   return true;
 }
 
+export async function requestPlayNextOnHost(
+  file,
+  { strategy = 'copy-into-active', fifoSession = false } = {},
+) {
+  const normalizedFile = typeof file === 'string' ? file.trim() : '';
+  if (!normalizedFile) return false;
+
+  const command = {
+    type: PLAYBACK_COMMAND_PLAY_NEXT_REQUEST,
+    file: normalizedFile,
+    strategy: strategy === 'create-new-playnext-playlist' ? 'create-new-playnext-playlist' : 'copy-into-active',
+    fifoSession: Boolean(fifoSession),
+  };
+
+  if (isHostRole()) {
+    await dispatchHostPlaybackCommand({ ...command, target: 'self' });
+    return true;
+  }
+
+  await sendLivePlaybackCommand(command);
+  return true;
+}
+
 export async function requestHostSetLiveVolume(volume, { announce = false } = {}) {
   if (!isHostRole()) return false;
   const normalized = normalizeLiveVolumePreset(volume, null);
@@ -643,15 +781,187 @@ export async function executeIncomingPlaybackCommand(commandPayload) {
   }
 }
 
+function clearPlayNextInsertSession() {
+  state.playNextInsertSession = null;
+}
+
+function resolvePlayNextAnchorContext() {
+  const normalizedLayout = _deps.ensurePlaylists(state.layout);
+  if (!normalizedLayout.length) return null;
+
+  if (isDspTransitionPlaybackActive()) {
+    const transitionTargetTrack = state.dspTransitionPlayback && state.dspTransitionPlayback.toTrack
+      ? state.dspTransitionPlayback.toTrack
+      : null;
+    if (transitionTargetTrack && typeof transitionTargetTrack.file === 'string' && transitionTargetTrack.file.trim()) {
+      const resolvedTransitionContext = resolveTrackContextInLayoutByFile(transitionTargetTrack.file, {
+        preferredPlaylistIndex: normalizePlaylistTrackIndex(transitionTargetTrack.playlistIndex),
+        preferredPlaylistPosition: normalizePlaylistTrackIndex(transitionTargetTrack.playlistPosition),
+      });
+      if (resolvedTransitionContext) {
+        return {
+          ...resolvedTransitionContext,
+          file: transitionTargetTrack.file.trim(),
+        };
+      }
+    }
+  }
+
+  if (!state.currentTrack || typeof state.currentTrack.file !== 'string' || !state.currentTrack.file.trim()) {
+    return null;
+  }
+
+  const resolvedCurrentContext = resolveTrackContextInLayoutByFile(state.currentTrack.file, {
+    preferredPlaylistIndex: normalizePlaylistTrackIndex(state.currentTrack.playlistIndex),
+    preferredPlaylistPosition: normalizePlaylistTrackIndex(state.currentTrack.playlistPosition),
+  });
+  if (!resolvedCurrentContext) return null;
+
+  return {
+    ...resolvedCurrentContext,
+    file: state.currentTrack.file.trim(),
+  };
+}
+
+function resolvePlayNextInsertIndex(anchorContext, { fifoSession = false } = {}) {
+  const playlistIndex = normalizePlaylistTrackIndex(anchorContext && anchorContext.playlistIndex);
+  const playlistPosition = normalizePlaylistTrackIndex(anchorContext && anchorContext.playlistPosition);
+  if (playlistIndex === null || playlistPosition === null) return null;
+
+  const normalizedLayout = _deps.ensurePlaylists(state.layout);
+  const playlist = Array.isArray(normalizedLayout[playlistIndex]) ? normalizedLayout[playlistIndex] : null;
+  if (!playlist) return null;
+
+  const baseInsertIndex = Math.max(0, Math.min(playlistPosition + 1, playlist.length));
+  const anchorSignature = `${playlistIndex}:${playlistPosition}:${anchorContext && anchorContext.file ? anchorContext.file : ''}`;
+
+  if (!fifoSession) {
+    clearPlayNextInsertSession();
+    return baseInsertIndex;
+  }
+
+  if (
+    !state.playNextInsertSession ||
+    state.playNextInsertSession.playlistIndex !== playlistIndex ||
+    state.playNextInsertSession.anchorSignature !== anchorSignature
+  ) {
+    state.playNextInsertSession = {
+      playlistIndex,
+      anchorSignature,
+      baseInsertIndex,
+      insertedCount: 0,
+    };
+  }
+
+  const session = state.playNextInsertSession;
+  const insertIndex = Math.max(
+    0,
+    Math.min(
+      session.baseInsertIndex + session.insertedCount,
+      Array.isArray(normalizedLayout[playlistIndex]) ? normalizedLayout[playlistIndex].length : 0,
+    ),
+  );
+  session.insertedCount += 1;
+  return insertIndex;
+}
+
+async function applyPlayNextRequestLocally(command) {
+  if (!command || command.type !== PLAYBACK_COMMAND_PLAY_NEXT_REQUEST) return false;
+
+  const requestedFile = typeof command.file === 'string' ? command.file.trim() : '';
+  if (!requestedFile) {
+    setStatus('Live Play Next отклонен: не указан трек.');
+    return false;
+  }
+
+  const strategy = command.strategy === 'create-new-playnext-playlist'
+    ? 'create-new-playnext-playlist'
+    : 'copy-into-active';
+  if (strategy !== 'copy-into-active') {
+    setStatus('Live Play Next: стратегия create-new-playnext-playlist пока не поддерживается на клиенте.');
+    return false;
+  }
+
+  const anchorContext = resolvePlayNextAnchorContext();
+  if (!anchorContext) {
+    clearPlayNextInsertSession();
+    setStatus('Live Play Next недоступен: нет активного трека/якоря.');
+    return false;
+  }
+
+  const anchorPlaylistIndex = normalizePlaylistTrackIndex(anchorContext.playlistIndex);
+  if (anchorPlaylistIndex === null) {
+    clearPlayNextInsertSession();
+    setStatus('Live Play Next недоступен: не определен активный плей-лист.');
+    return false;
+  }
+
+  const isAutoplayEnabled =
+    Array.isArray(state.playlistAutoplay) &&
+    anchorPlaylistIndex >= 0 &&
+    anchorPlaylistIndex < state.playlistAutoplay.length &&
+    Boolean(state.playlistAutoplay[anchorPlaylistIndex]);
+  if (!isAutoplayEnabled) {
+    clearPlayNextInsertSession();
+    setStatus('Live Play Next доступен только в AutoPlay/DSP режиме.');
+    return false;
+  }
+
+  const insertIndex = resolvePlayNextInsertIndex(anchorContext, { fifoSession: Boolean(command.fifoSession) });
+  if (!Number.isInteger(insertIndex) || insertIndex < 0) {
+    clearPlayNextInsertSession();
+    setStatus('Live Play Next отклонен: не удалось определить позицию вставки.');
+    return false;
+  }
+
+  const previousLayout = _deps.ensurePlaylists(state.layout).map((playlist) => playlist.slice());
+  const previousNames = Array.isArray(state.playlistNames) ? state.playlistNames.slice() : [];
+  const previousMeta = _deps.normalizePlaylistMeta(state.playlistMeta, previousLayout.length).map((entry) => ({ ...entry }));
+  const previousAutoplay = Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [];
+  const previousDsp = Array.isArray(state.playlistDsp) ? state.playlistDsp.slice() : [];
+  const previousDap = { ...(state.dapConfig || DEFAULT_DAP_CONFIG) };
+
+  const nextLayout = previousLayout.map((playlist) => playlist.slice());
+  if (!Array.isArray(nextLayout[anchorPlaylistIndex])) {
+    clearPlayNextInsertSession();
+    setStatus('Live Play Next отклонен: целевой плей-лист недоступен.');
+    return false;
+  }
+  const boundedInsertIndex = Math.max(0, Math.min(insertIndex, nextLayout[anchorPlaylistIndex].length));
+  nextLayout[anchorPlaylistIndex].splice(boundedInsertIndex, 0, requestedFile);
+
+  state.layout = _deps.ensurePlaylists(nextLayout);
+  state.playlistNames = _deps.normalizePlaylistNames(previousNames, state.layout.length);
+  state.playlistMeta = _deps.normalizePlaylistMeta(previousMeta, state.layout.length);
+  state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
+  state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+  _deps.renderZones();
+
+  try {
+    await pushSharedLayout();
+    setStatus(`Live Play Next: ${requestedFile} поставлен следующим.`);
+    return true;
+  } catch (err) {
+    console.error(err);
+    state.layout = previousLayout;
+    state.playlistNames = previousNames;
+    state.playlistMeta = previousMeta;
+    state.dapConfig = _deps.normalizeDapConfig(previousDap, state.layout.length, previousDap);
+    state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
+    state.playlistDsp = _deps.normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    _deps.renderZones();
+    setStatus('Не удалось синхронизировать Live Play Next.');
+    return false;
+  }
+}
+
 async function executeHostPlaybackCommandLocally(command) {
   const sourceTag = command.sourceUsername ? ` (co-host: ${command.sourceUsername})` : '';
 
   try {
-    if (command.type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
-      await toggleNowPlayingPlaybackLocally();
-      if (sourceTag) {
-        setStatus(`Live управление${sourceTag}.`);
-      }
+    const handledByControllerAdapter = await hostPlaybackControllerAdapter.execute(command, { sourceTag });
+    if (handledByControllerAdapter) {
       return;
     }
 
@@ -719,34 +1029,7 @@ async function executeHostPlaybackCommandLocally(command) {
       return;
     }
 
-    const resolvedContext = resolvePlaylistTrackContextByIds({
-      file: command.file,
-      playlistId: command.playlistId,
-      trackId: command.trackId,
-      playlistIndex: command.playlistIndex,
-      playlistPosition: command.playlistPosition,
-    });
-    const button = _deps.getTrackButton(
-      command.file,
-      resolvedContext.playlistIndex,
-      resolvedContext.playlistPosition,
-      command.basePath,
-    );
-    if (!button) {
-      setStatus(`Не удалось выполнить live-команду: трек ${command.file} не найден.`);
-      return;
-    }
-
-    await handlePlay(command.file, button, command.basePath, {
-      playlistId: resolvedContext.playlistId,
-      trackId: resolvedContext.trackId,
-      playlistIndex: resolvedContext.playlistIndex,
-      playlistPosition: resolvedContext.playlistPosition,
-    });
-
-    if (sourceTag) {
-      setStatus(`Live управление${sourceTag}.`);
-    }
+    setStatus('Неизвестная live-команда воспроизведения.');
   } catch (err) {
     console.error('Не удалось выполнить live-команду', err);
     setStatus('Не удалось выполнить live-команду co-host.');
@@ -774,9 +1057,9 @@ export async function requestCoHostPlayTrack(file, basePath = '/audio', playback
   return true;
 }
 
-export async function requestCoHostToggleCurrentPlayback() {
+export async function requestCoHostStopPlayback() {
   if (!isCoHostRole()) return false;
-  await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_TOGGLE_CURRENT });
+  await sendLivePlaybackCommand({ type: PLAYBACK_COMMAND_STOP });
   return true;
 }
 
@@ -2271,7 +2554,23 @@ async function toggleNowPlayingPlaybackLocally() {
 export async function toggleNowPlayingPlayback() {
   if (isCoHostRole()) {
     try {
-      await requestCoHostToggleCurrentPlayback();
+      const hostTrackFile =
+        state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string'
+          ? state.hostPlaybackState.trackFile.trim()
+          : '';
+      if (!hostTrackFile) {
+        setStatus('Нет активного live-трека для управления.');
+        return;
+      }
+
+      if (state.hostPlaybackState.paused) {
+        await requestCoHostPlayTrack(hostTrackFile, '/audio', {
+          playlistId: state.hostPlaybackState.playlistId,
+          trackId: state.hostPlaybackState.trackId,
+        });
+      } else {
+        await requestCoHostStopPlayback();
+      }
     } catch (err) {
       console.error(err);
       setStatus(err && err.message ? err.message : 'Не удалось отправить live-команду.');

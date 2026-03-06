@@ -378,7 +378,7 @@ describe('route registration parity', () => {
     router.register('POST', '/api/layout', (req, res) => { res.writeHead(200); res.end('layout-post'); }, { auth: 'session' });
     router.register('GET', '/api/playback', (req, res) => { res.writeHead(200); res.end('playback-get'); }, { auth: 'session' });
     router.register('POST', '/api/playback', (req, res) => { res.writeHead(200); res.end('playback-post'); }, { auth: 'host' });
-    router.register('POST', '/api/playback/command', (req, res) => { res.writeHead(200); res.end('command'); }, { auth: 'host|cohost' });
+    router.register('POST', '/api/playback/command', (req, res) => { res.writeHead(200); res.end('command'); }, { auth: 'session' });
     router.register('POST', '/api/shutdown', (req, res) => { res.writeHead(200); res.end('shutdown'); }, { auth: 'host' });
     router.register('GET', '/api/audio', (req, res) => { res.writeHead(200); res.end('audio'); }, { auth: 'session' });
     router.register('GET', '/api/audio/attributes', (req, res) => { res.writeHead(200); res.end('attrs'); }, { auth: 'session' });
@@ -421,12 +421,12 @@ describe('route registration parity', () => {
     assert.equal(res2.body, 'auth-clients');
   });
 
-  it('POST /api/playback/command requires host|cohost', () => {
+  it('POST /api/playback/command requires session', () => {
     const router = createFullRouter();
 
     const res1 = mockRes();
     router.dispatch(mockReq('POST', '/api/playback/command', AUTH_SESSION), res1);
-    assert.equal(res1.statusCode, 403);
+    assert.equal(res1.body, 'command');
 
     const res2 = mockRes();
     router.dispatch(mockReq('POST', '/api/playback/command', AUTH_HOST), res2);
@@ -435,6 +435,10 @@ describe('route registration parity', () => {
     const res3 = mockRes();
     router.dispatch(mockReq('POST', '/api/playback/command', AUTH_COHOST), res3);
     assert.equal(res3.body, 'command');
+
+    const res4 = mockRes();
+    router.dispatch(mockReq('POST', '/api/playback/command', AUTH_NONE), res4);
+    assert.equal(res4.statusCode, 401);
   });
 
   it('DELETE /api/auth/session returns 405', () => {

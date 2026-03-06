@@ -105,6 +105,23 @@ describe('PlaybackGateway', () => {
     assert.equal(dispatched.ctx.isServer, true);
   });
 
+  it('dispatchCommand forwards command target to command bus context', async () => {
+    let dispatched = null;
+    const { gateway } = createTestGateway({
+      sanitizeCommand: () => ({ type: 'play-next-request', file: 'x.mp3', target: 'host' }),
+      commandBus: {
+        dispatch: async (ctx, payload) => { dispatched = { ctx, payload }; return { ok: true }; },
+      },
+    });
+
+    const auth = { isServer: false, role: 'slave', username: 'listener' };
+    const result = await gateway.dispatchCommand({ type: 'play-next-request' }, auth);
+    assert.equal(result.ok, true);
+    assert.ok(dispatched);
+    assert.equal(dispatched.ctx.target, 'host');
+    assert.equal(dispatched.payload.target, 'host');
+  });
+
   it('dispatchCommand uses sanitizeSessionRole for non-server auth', async () => {
     const { gateway } = createTestGateway({
       sanitizeSessionRole: () => 'co-host',
@@ -114,5 +131,45 @@ describe('PlaybackGateway', () => {
     const auth = { isServer: false, role: 'co-host', username: 'dj' };
     const result = await gateway.dispatchCommand({ type: 'toggle-current' }, auth);
     assert.equal(result.payload.command.sourceRole, 'co-host');
+  });
+
+  it('sanitizePlaybackCommand normalizes stop command with target', () => {
+    const command = PlaybackGateway.sanitizePlaybackCommand(
+      { type: 'stop', target: 'self' },
+      { normalizeLiveVolumePreset: () => null },
+    );
+    assert.deepEqual(command, { type: 'stop', target: 'self' });
+  });
+
+  it('sanitizePlaybackCommand normalizes play-next-request trackRef/src payload', () => {
+    const command = PlaybackGateway.sanitizePlaybackCommand(
+      {
+        type: 'play-next-request',
+        trackRef: { src: '/audio/folder/Track%20Name.mp3' },
+        strategy: 'create-new-playnext-playlist',
+        fifoSession: 1,
+        playlistId: '  playlist-1  ',
+        trackId: '  track-9  ',
+        target: 'host',
+      },
+      { normalizeLiveVolumePreset: () => null },
+    );
+    assert.deepEqual(command, {
+      type: 'play-next-request',
+      file: 'folder/Track Name.mp3',
+      strategy: 'create-new-playnext-playlist',
+      fifoSession: true,
+      playlistId: 'playlist-1',
+      trackId: 'track-9',
+      target: 'host',
+    });
+  });
+
+  it('sanitizePlaybackCommand rejects play-next-request without track', () => {
+    const command = PlaybackGateway.sanitizePlaybackCommand(
+      { type: 'play-next-request', target: 'host' },
+      { normalizeLiveVolumePreset: () => null },
+    );
+    assert.equal(command, null);
   });
 });

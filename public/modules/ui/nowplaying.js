@@ -353,9 +353,7 @@ export function updateLiveSeekUi() {
   }
 
   if (_deps.nowPlayingControlBtn) {
-    const canTouchSeek =
-      isSlaveRole() ||
-      ((isHostRole() || isCoHostRole()) && state.liveSeekEnabled);
+    const canTouchSeek = isSlaveRole() || (isHostRole() && state.liveSeekEnabled);
     _deps.nowPlayingControlBtn.dataset.liveSeekEnabled = canTouchSeek ? 'true' : 'false';
   }
 }
@@ -375,18 +373,6 @@ function canSeekNowPlaying() {
     }
     if (!state.currentTrack || !state.currentAudio) return false;
     const duration = _deps.getCurrentTrackDurationSeconds();
-    return Boolean(Number.isFinite(duration) && duration > 0);
-  }
-
-  if (isCoHostRole()) {
-    if (!state.liveSeekEnabled) return false;
-    const hasHostTrack = Boolean(
-      state.hostPlaybackState &&
-        typeof state.hostPlaybackState.trackFile === 'string' &&
-        state.hostPlaybackState.trackFile.trim(),
-    );
-    if (!hasHostTrack) return false;
-    const duration = _deps.getHostPlaybackDurationSeconds();
     return Boolean(Number.isFinite(duration) && duration > 0);
   }
 
@@ -448,21 +434,6 @@ function applyNowPlayingSeekFromClientX(clientX, { finalize = false } = {}) {
   if (!canSeekNowPlaying()) return false;
   const ratio = resolveNowPlayingSeekRatioFromClientX(clientX);
   if (ratio === null) return false;
-
-  if (isCoHostRole()) {
-    const duration = _deps.getHostPlaybackDurationSeconds();
-    if (!Number.isFinite(duration) || duration <= 0) return false;
-    const nextTime = Math.max(0, Math.min(duration, ratio * duration));
-
-    state.hostPlaybackState = {
-      ...state.hostPlaybackState,
-      currentTime: nextTime,
-      updatedAt: Date.now(),
-    };
-    syncNowPlayingPanel();
-    _deps.queueCoHostSeekCurrentPlayback(ratio, { immediate: Boolean(finalize), finalize: Boolean(finalize) });
-    return true;
-  }
 
   if (isHostRole() && typeof _deps.requestHostSeekCurrentPlayback === 'function') {
     void _deps.requestHostSeekCurrentPlayback(ratio, { finalize: Boolean(finalize) }).catch((err) => {

@@ -1588,6 +1588,7 @@ export function renderZones() {
     autoplayButton.setAttribute('aria-label', 'Автовоспроизведение плей-листа');
     const isAutoplayEnabled = Boolean(state.playlistAutoplay[playlistIndex]);
     const isDspEnabled = Boolean(state.playlistDsp[playlistIndex]);
+    const hideModeTogglesOnCoHost = isCoHostRole();
     const hideInactiveIndicatorsOnSlave = isSlaveRole();
     const canManageAutoplay = isHostRole() && !isDapPlaylist;
     const canManageDsp = isHostRole() && isAutoplayEnabled;
@@ -1599,7 +1600,7 @@ export function renderZones() {
         ? `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'}`
         : `Автовоспроизведение: ${isAutoplayEnabled ? 'вкл' : 'выкл'} (только хост)`;
     autoplayButton.classList.toggle('is-on', isAutoplayEnabled);
-    autoplayButton.hidden = isDapPlaylist || (hideInactiveIndicatorsOnSlave && !isAutoplayEnabled);
+    autoplayButton.hidden = hideModeTogglesOnCoHost || isDapPlaylist || (hideInactiveIndicatorsOnSlave && !isAutoplayEnabled);
     autoplayButton.disabled = !canManageAutoplay;
     autoplayButton.addEventListener('click', (event) => {
       event.preventDefault();
@@ -1628,7 +1629,7 @@ export function renderZones() {
     dspButton.dataset.state = isDspEnabled ? 'on' : 'off';
     dspButton.setAttribute('aria-pressed', isDspEnabled ? 'true' : 'false');
     dspButton.classList.toggle('is-on', isDspEnabled);
-    dspButton.hidden = hideInactiveIndicatorsOnSlave && !isDspEnabled;
+    dspButton.hidden = hideModeTogglesOnCoHost || (hideInactiveIndicatorsOnSlave && !isDspEnabled);
     dspButton.disabled = !canManageDsp;
     if (!isAutoplayEnabled) {
       dspButton.title = canManageAutoplay

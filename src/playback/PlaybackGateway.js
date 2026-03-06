@@ -60,7 +60,7 @@ class PlaybackGateway {
   }
 
   /**
-   * Dispatch a playback command (host|cohost, enforced by router auth).
+   * Dispatch a playback command (session auth; role policy is enforced by command bus).
    * @returns {{ ok: boolean, status: number, payload?: object, error?: string }}
    */
   async dispatchCommand(body, auth) {
@@ -82,6 +82,7 @@ class PlaybackGateway {
         sourceRole: payload.sourceRole,
         commandType: payload.type,
         isServer: auth.isServer,
+        target: payload.target || 'host',
       },
       payload,
     );
@@ -102,20 +103,61 @@ class PlaybackGateway {
     if (!rawCommand || typeof rawCommand !== 'object') return null;
 
     const commandType = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
+    const targetRaw = typeof rawCommand.target === 'string' ? rawCommand.target.trim() : '';
+    const target = targetRaw === 'self' ? 'self' : 'host';
+    const normalizeIdentity = (value, maxLength) =>
+      typeof value === 'string' && value.trim() ? value.trim().slice(0, maxLength) : null;
+    const normalizePlayNextTrackFile = () => {
+      const directFile = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
+      if (directFile) return directFile;
+
+      const rawTrackRef =
+        rawCommand.trackRef && typeof rawCommand.trackRef === 'object'
+          ? rawCommand.trackRef
+          : (rawCommand.track && typeof rawCommand.track === 'object' ? rawCommand.track : null);
+      if (!rawTrackRef) return '';
+
+      const fileFromRef = typeof rawTrackRef.file === 'string' ? rawTrackRef.file.trim() : '';
+      if (fileFromRef) return fileFromRef;
+
+      const srcFromRef = typeof rawTrackRef.src === 'string' ? rawTrackRef.src.trim() : '';
+      if (!srcFromRef) return '';
+
+      let normalizedSrc = srcFromRef;
+      if (normalizedSrc.startsWith('/audio/')) {
+        normalizedSrc = normalizedSrc.slice('/audio/'.length);
+      } else if (normalizedSrc.startsWith('audio/')) {
+        normalizedSrc = normalizedSrc.slice('audio/'.length);
+      }
+
+      try {
+        normalizedSrc = decodeURIComponent(normalizedSrc);
+      } catch (_) {
+        // Keep undecoded value if payload contains malformed percent-encoding.
+      }
+
+      return normalizedSrc.replace(/^\/+/, '').trim();
+    };
+
+    if (commandType === 'stop') {
+      return { type: 'stop', target };
+    }
+
     if (commandType === 'toggle-current') {
-      return { type: 'toggle-current' };
+      return { type: 'toggle-current', target };
     }
 
     if (commandType === 'set-volume') {
       const volume = layoutService.normalizeLiveVolumePreset(rawCommand.volume, null);
       if (volume === null) return null;
-      return { type: 'set-volume', volume };
+      return { type: 'set-volume', volume, target };
     }
 
     if (commandType === 'set-volume-presets-visible') {
       return {
         type: 'set-volume-presets-visible',
         showVolumePresets: Boolean(rawCommand.showVolumePresets),
+        target,
       };
     }
 
@@ -123,6 +165,7 @@ class PlaybackGateway {
       return {
         type: 'set-live-seek-enabled',
         allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
+        target,
       };
     }
 
@@ -134,6 +177,25 @@ class PlaybackGateway {
         type: 'seek-current',
         positionRatio,
         finalize: Boolean(rawCommand.finalize),
+        target,
+      };
+    }
+
+    if (commandType === 'play-next-request') {
+      const file = normalizePlayNextTrackFile();
+      if (!file) return null;
+      const strategy = rawCommand.strategy === 'create-new-playnext-playlist'
+        ? 'create-new-playnext-playlist'
+        : 'copy-into-active';
+
+      return {
+        type: 'play-next-request',
+        file,
+        strategy,
+        fifoSession: Boolean(rawCommand.fifoSession),
+        playlistId: normalizeIdentity(rawCommand.playlistId, 64),
+        trackId: normalizeIdentity(rawCommand.trackId, 80),
+        target,
       };
     }
 
@@ -143,8 +205,8 @@ class PlaybackGateway {
 
     const file = typeof rawCommand.file === 'string' ? rawCommand.file.trim() : '';
     if (!file) return null;
-    const playlistId = typeof rawCommand.playlistId === 'string' ? rawCommand.playlistId.trim().slice(0, 64) : null;
-    const trackId = typeof rawCommand.trackId === 'string' ? rawCommand.trackId.trim().slice(0, 80) : null;
+    const playlistId = normalizeIdentity(rawCommand.playlistId, 64);
+    const trackId = normalizeIdentity(rawCommand.trackId, 80);
 
     return {
       type: 'play-track',
@@ -152,6 +214,7 @@ class PlaybackGateway {
       basePath: '/audio',
       playlistId: playlistId || null,
       trackId: trackId || null,
+      target,
     };
   }
 }

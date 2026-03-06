@@ -1,7 +1,7 @@
 // public/modules/ui/volume.js — volume presets UI
 
 import { state, SETTINGS_KEYS, DEFAULT_LIVE_VOLUME_PRESET_VALUES, DEFAULT_LIVE_VOLUME } from '../state.js';
-import { isHostRole, isCoHostRole } from '../roles.js';
+import { isHostRole } from '../roles.js';
 import {
   normalizeLiveVolumePreset, isVolumePresetMatch, getActiveVolumePresetValue,
   getDapVolumePresetValue, isDapVolumePresetPlaybackActive, formatVolumePresetLabel,
@@ -30,7 +30,7 @@ export function updateVolumePresetsUi() {
   const localVolumePresetsEl = _deps.localVolumePresetsEl;
   if (!localVolumePresetsEl) return;
 
-  const canManagePresets = isHostRole() || isCoHostRole();
+  const canManagePresets = isHostRole();
   if (_deps.showVolumePresetsToggleRow) {
     _deps.showVolumePresetsToggleRow.style.display = canManagePresets ? 'flex' : 'none';
   }
@@ -152,19 +152,7 @@ export async function onVolumePresetButtonClick(event) {
     return;
   }
 
-  if (!isCoHostRole()) return;
-
-  const previousVolume = _deps.getEffectiveLiveVolume();
-  setLivePlaybackVolume(targetVolume, { sync: false, announce: false });
-  try {
-    await _deps.requestCoHostSetLiveVolume(targetVolume);
-    _deps.setStatus(`Live громкость: ${formatVolumePresetLabel(targetVolume)}.`);
-  } catch (err) {
-    console.error(err);
-    const fallbackVolume = normalizeLiveVolumePreset(state.hostPlaybackState.volume, previousVolume);
-    setLivePlaybackVolume(fallbackVolume, { sync: false, announce: false });
-    _deps.setStatus(err && err.message ? err.message : 'Не удалось изменить live-громкость.');
-  }
+  _deps.setStatus('Только хост может менять live-громкость.');
 }
 
 export function setShowVolumePresetsEnabled(
@@ -225,21 +213,8 @@ export function initVolumePresetControls() {
         return;
       }
 
-      if (!isCoHostRole()) {
-        setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
-        return;
-      }
-
-      const previousEnabled = state.showVolumePresetsEnabled;
-      setShowVolumePresetsEnabled(nextEnabled, { persist: false, sync: false });
-      try {
-        await _deps.requestCoHostSetVolumePresetsVisibility(nextEnabled);
-        _deps.setStatus(`Пресеты громкости ${nextEnabled ? 'включены' : 'выключены'} на live.`);
-      } catch (err) {
-        console.error(err);
-        setShowVolumePresetsEnabled(previousEnabled, { persist: false, sync: false });
-        _deps.setStatus(err && err.message ? err.message : 'Не удалось изменить режим пресетов громкости.');
-      }
+      setShowVolumePresetsEnabled(state.hostPlaybackState.showVolumePresets, { persist: false, sync: false });
+      _deps.setStatus('Только хост может менять режим пресетов громкости.');
     });
   }
 

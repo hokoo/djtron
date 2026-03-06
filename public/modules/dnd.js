@@ -1,7 +1,7 @@
 // public/modules/dnd.js — desktop drag-and-drop
 
 import { DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX, DESKTOP_TRACK_DRAG_HOLD_MS, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, QUEUE_NEXT_CHAIN_WINDOW_MS, ROLE_HOST, state } from './state.js';
-import { isHostRole, isRemoteLiveMirrorRole } from './roles.js';
+import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole } from './roles.js';
 import { setStatus } from './ui/status.js';
 import { PlaybackCommandBus } from '/shared/playback/index.js';
 
@@ -506,7 +506,7 @@ export function syncQueueNextDropzoneVisibility() {
   const dragActive = Boolean(state.draggingCard && state.dragContext);
   if (!dragActive && !state.queueNextDropzoneEl) return;
   const dropzone = ensureQueueNextDropzone();
-  const shouldShow = dragActive && Boolean(resolveQueueNextInsertTarget(state.layout));
+  const shouldShow = !isCoHostRole() && dragActive && Boolean(resolveQueueNextInsertTarget(state.layout));
   if (shouldShow) {
     dropzone.classList.add('is-visible');
     updateQueueNextDropzoneCountdownUi();
@@ -980,6 +980,11 @@ async function handleDragDeleteFromContextLocally() {
 }
 
 export async function handleDragQueueNextFromContext(event = null) {
+  if (isCoHostRole()) {
+    setStatus('Co-host не может использовать Live Play Next.');
+    return false;
+  }
+
   if (isHostRole()) {
     try {
       return await dispatchHostTrackMutationCommand(
@@ -992,6 +997,23 @@ export async function handleDragQueueNextFromContext(event = null) {
       return false;
     }
   }
+
+  if (typeof _deps.requestPlayNextOnHost === 'function') {
+    if (!state.dragContext || typeof state.dragContext.file !== 'string' || !state.dragContext.file.trim()) {
+      setStatus('Не удалось определить трек для Play Next.');
+      return false;
+    }
+    try {
+      await _deps.requestPlayNextOnHost(state.dragContext.file, { strategy: 'copy-into-active', fifoSession: true });
+      setStatus('Live Play Next команда отправлена хосту.');
+      return true;
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось отправить Live Play Next команду.');
+      return false;
+    }
+  }
+
   return handleDragQueueNextFromContextLocally(event);
 }
 

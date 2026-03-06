@@ -88,11 +88,12 @@ const layoutService = new LayoutStateService({
 });
 
 const livePlaybackCommandBus = new PlaybackCommandBus({
-  authorize: ({ sourceRole, commandType, isServer }) =>
+  authorize: ({ sourceRole, commandType, isServer, target }) =>
     canDispatchLivePlaybackCommand({
       sourceRole,
       commandType,
       isServer,
+      target,
     }),
   execute: (payload) => {
     layoutService.broadcastPlaybackCommand(payload);
@@ -706,7 +707,7 @@ router.register('GET', '/api/layout', handleApiLayoutGet, { auth: 'session' });
 router.register('POST', '/api/layout', handleApiLayoutUpdate, { auth: 'session' });
 router.register('GET', '/api/playback', handleApiPlaybackGet, { auth: 'session' });
 router.register('POST', '/api/playback', handleApiPlaybackUpdate, { auth: 'host' });
-router.register('POST', '/api/playback/command', handleApiPlaybackCommand, { auth: 'host|cohost' });
+router.register('POST', '/api/playback/command', handleApiPlaybackCommand, { auth: 'session' });
 router.register('POST', '/api/shutdown', handleShutdown, { auth: 'host' });
 
 // Catalog/DSP/config/update endpoints

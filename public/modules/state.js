@@ -93,11 +93,13 @@ export const DEFAULT_DAP_CONFIG = Object.freeze({
   volumePercent: DAP_DEFAULT_VOLUME_PERCENT,
 });
 export const PLAYBACK_COMMAND_PLAY_TRACK = 'play-track';
+export const PLAYBACK_COMMAND_STOP = 'stop';
 export const PLAYBACK_COMMAND_TOGGLE_CURRENT = 'toggle-current';
 export const PLAYBACK_COMMAND_SET_VOLUME = 'set-volume';
 export const PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE = 'set-volume-presets-visible';
 export const PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED = 'set-live-seek-enabled';
 export const PLAYBACK_COMMAND_SEEK_CURRENT = 'seek-current';
+export const PLAYBACK_COMMAND_PLAY_NEXT_REQUEST = 'play-next-request';
 export const DEFAULT_LIVE_VOLUME_PRESET_VALUES = Object.freeze([0.1, 0.3, 0.5]);
 export const DEFAULT_DSP_WINGET_COMMAND = 'winget install "FFmpeg (Essentials Build)"';
 export const LIVE_DSP_POLL_INTERVAL_MS = 1100;
@@ -311,6 +313,7 @@ export const state = {
   queueNextDropzoneEl: null,
   queueNextChainAnchor: null,
   queueNextChainExpiresAt: 0,
+  playNextInsertSession: null,
   queueNextCountdownTimer: null,
   trackRelocationHighlights: new Map(),
   trackRelocationHighlightTimer: null,

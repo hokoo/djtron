@@ -2,7 +2,7 @@
 
 import { state, SETTINGS_KEYS, DAP_NO_SILENCE_GUARD_INTERVAL_MS,
   DAP_DEFAULT_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT } from '../state.js';
-import { isHostRole, isCoHostRole, updateDapNowPlayingVisibility } from '../roles.js';
+import { isHostRole, updateDapNowPlayingVisibility } from '../roles.js';
 
 let _deps = {};
 
@@ -12,14 +12,13 @@ export function setDapDeps(d) {
 
 export function updateDapSettingsUi(role = state.currentRole) {
   const isHost = isHostRole(role);
-  const isHostOrCoHost = isHost || isCoHostRole(role);
   const normalizedLayout = _deps.ensurePlaylists(state.layout);
   const normalizedDap = _deps.normalizeDapConfig(state.dapConfig, normalizedLayout.length, state.dapConfig);
   state.dapConfig = normalizedDap;
   updateDapNowPlayingVisibility(role);
 
   if (_deps.dapSettingsPanelEl) {
-    _deps.dapSettingsPanelEl.hidden = !isHostOrCoHost;
+    _deps.dapSettingsPanelEl.hidden = !isHost;
   }
 
   if (_deps.dapPlaylistSelect) {
