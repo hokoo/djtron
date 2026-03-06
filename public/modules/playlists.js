@@ -1194,22 +1194,22 @@ export async function syncDapConfig(nextDapConfig, { successMessage = 'DAP об�
     return false;
   }
 
-  const normalizedNextDap = normalizeDapConfig(nextDapConfig, state.layout.length, state.dapConfig);
-  const nextAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, normalizedNextDap, state.layout.length);
-  const nextDsp = normalizePlaylistDspFlags(state.playlistDsp, nextAutoplay, state.layout.length);
+  const previousPlaylists = ensurePlaylistsForMutation();
+  const playlistsLength = previousPlaylists.length;
+  const normalizedNextDap = normalizeDapConfig(nextDapConfig, playlistsLength, state.dapConfig);
+  const nextAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, normalizedNextDap, playlistsLength);
+  const nextDsp = normalizePlaylistDspFlags(state.playlistDsp, nextAutoplay, playlistsLength);
 
   if (
-    dapConfigEqual(state.dapConfig, normalizedNextDap, state.layout.length) &&
-    playlistAutoplayEqual(state.playlistAutoplay, nextAutoplay, state.layout.length) &&
-    playlistDspEqual(state.playlistDsp, nextDsp, nextAutoplay, state.layout.length)
+    dapConfigEqual(state.dapConfig, normalizedNextDap, playlistsLength) &&
+    playlistAutoplayEqual(state.playlistAutoplay, nextAutoplay, playlistsLength) &&
+    playlistDspEqual(state.playlistDsp, nextDsp, nextAutoplay, playlistsLength)
   ) {
     updateDapSettingsUi(state.currentRole);
     return false;
   }
 
   const previousDap = { ...state.dapConfig };
-  const previousAutoplay = state.playlistAutoplay.slice();
-  const previousDsp = state.playlistDsp.slice();
   const previousDapInterruptedPlaybackSnapshot = state.dapInterruptedPlaybackSnapshot
     ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
@@ -1228,9 +1228,21 @@ export async function syncDapConfig(nextDapConfig, { successMessage = 'DAP об�
         (isDapTrackContext(state.dspTransitionPlayback.fromTrack, previousDap) ||
           isDapTrackContext(state.dspTransitionPlayback.toTrack, previousDap))));
 
-  state.dapConfig = normalizedNextDap;
-  state.playlistAutoplay = nextAutoplay;
-  state.playlistDsp = nextDsp;
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  nextPlaylists.forEach((playlist, index) => {
+    const settings = playlist && playlist.settings && typeof playlist.settings === 'object'
+      ? playlist.settings
+      : {};
+    nextPlaylists[index] = {
+      ...playlist,
+      settings: {
+        ...settings,
+        autoPlayEnabled: Boolean(nextAutoplay[index]),
+        dspEnabled: Boolean(nextDsp[index]),
+      },
+    };
+  });
+  syncPlaylistsStateForMutation(nextPlaylists, { dapConfig: normalizedNextDap });
   if (shouldResetNoSilenceArm) {
     disarmDapNoSilence();
     clearDapInterruptedPlaybackSnapshot();
@@ -1258,9 +1270,7 @@ export async function syncDapConfig(nextDapConfig, { successMessage = 'DAP об�
     return true;
   } catch (err) {
     console.error(err);
-    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    syncPlaylistsStateForMutation(previousPlaylists, { dapConfig: previousDap });
     state.dapInterruptedPlaybackSnapshot = previousDapInterruptedPlaybackSnapshot;
     updateDapSettingsUi(state.currentRole);
     renderZones();
@@ -2033,6 +2043,7 @@ export async function loadTracks({ reason = 'manual', audioResult = null } = {})
     state.dapConfig = normalizeDapConfig(DEFAULT_DAP_CONFIG, state.layout.length, DEFAULT_DAP_CONFIG);
     state.playlistAutoplay = normalizePlaylistAutoplayWithDap([], state.dapConfig, state.layout.length);
     state.playlistDsp = normalizePlaylistDspFlags([], state.playlistAutoplay, state.layout.length);
+    syncPlaylistsFromLegacyState();
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }
 
@@ -2626,6 +2637,7 @@ export function applyTrackRelocationUndoSnapshot(snapshot) {
   state.dapConfig = normalizeDapConfig(snapshot.dapConfig, state.layout.length, snapshot.dapConfig);
   state.playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshot.playlistAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = normalizePlaylistDspFlags(snapshot.playlistDsp, state.playlistAutoplay, state.layout.length);
+  syncPlaylistsFromLegacyState();
 }
 
 export function renderTrackRelocationUndoButton(card, action) {
