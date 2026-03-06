@@ -10,6 +10,7 @@ import { setStatus } from './ui/status.js';
 import { trackKey } from './utils.js';
 
 const _deps = {};
+const LATE_SOURCE_REMAINING_EPSILON_SECONDS = 0.35;
 
 function waitMs(ms) {
   const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
@@ -383,6 +384,9 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
   }
 
   const remainingSeconds = Math.max(0, sourceDuration - sourceCurrentTime);
+  if (remainingSeconds <= LATE_SOURCE_REMAINING_EPSILON_SECONDS) {
+    return 0;
+  }
   const offsetSeconds = normalizedSlice - remainingSeconds;
   if (!Number.isFinite(offsetSeconds) || offsetSeconds <= 0) return 0;
   return Math.max(0, Math.min(offsetSeconds, sourceSegmentSeconds));
@@ -426,6 +430,8 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     sliceSeconds,
     details.transition,
   );
+  const preArmedSliceWindowSeconds = resolveReadyDspSliceWindowSeconds(nextTrack);
+  const transitionWasPreArmed = Number.isFinite(preArmedSliceWindowSeconds) && preArmedSliceWindowSeconds > 0;
   const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(sliceSeconds, details.transition);
   const sourceTrackActiveAtPlanning = isCurrentSourceTrackActive(sourceTrack);
   const transitionOffsetPlannedAt = performance.now();
@@ -471,7 +477,11 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     }
 
     const remainingSeconds = duration - currentTime;
-    return Boolean(previousAudio.paused) || !Number.isFinite(remainingSeconds) || remainingSeconds <= 0.03;
+    return (
+      Boolean(previousAudio.paused) ||
+      !Number.isFinite(remainingSeconds) ||
+      remainingSeconds <= LATE_SOURCE_REMAINING_EPSILON_SECONDS
+    );
   };
 
   const resolveAdjustedTransitionStartOffsetSeconds = () => {
@@ -480,9 +490,12 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     }
 
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
+    const startupDelayContribution = transitionWasPreArmed
+      ? Math.min(startupDelaySeconds, LATE_SOURCE_REMAINING_EPSILON_SECONDS)
+      : 0;
     const rawOffset = Math.max(
       0,
-      transitionStartOffsetSeconds + startupDelaySeconds + state.liveDspEntryCompensationSeconds,
+      transitionStartOffsetSeconds + startupDelayContribution + state.liveDspEntryCompensationSeconds,
     );
     const clampedToSourceSegment = Math.max(0, Math.min(rawOffset, sourceSegmentSeconds));
     const knownDuration =
