@@ -5,6 +5,31 @@ const { buildDspTransitionDescriptor } = require('./descriptor');
 const { appendDspLog } = require('./log');
 const { toDspErrorMessage, queueDspTransition, scheduleDspWorker, markDspTransitionFailed, trimDspHistory } = require('./queue');
 
+function buildBinaryProbeCandidates(binaryName) {
+  const normalized = typeof binaryName === 'string' ? binaryName.trim() : '';
+  if (!normalized) return [];
+  if (/\.exe$/i.test(normalized)) return [normalized];
+  return [normalized, `${normalized}.exe`];
+}
+
+async function probeBinaryVersion(binaryName, deps) {
+  let lastError = null;
+  const candidates = buildBinaryProbeCandidates(binaryName);
+  for (const candidate of candidates) {
+    try {
+      await deps.execFileAsync(candidate, ['-version'], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 512 * 1024,
+      });
+      return { ok: true, binary: candidate, error: null };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  return { ok: false, binary: null, error: lastError };
+}
+
 async function ensureFfmpegAvailable(state, cfg, deps) {
   if (!cfg.DSP_ENABLED) {
     state.dspProbeState.available = false;
@@ -21,12 +46,13 @@ async function ensureFfmpegAvailable(state, cfg, deps) {
   const previousAvailable = state.dspProbeState.available;
   const previousError = state.dspProbeState.error;
 
-  try {
-    await deps.execFileAsync(cfg.DSP_FFMPEG_BINARY, ['-version'], {
-      windowsHide: true,
-      timeout: 5000,
-      maxBuffer: 512 * 1024,
-    });
+  const ffmpegProbe = await probeBinaryVersion(cfg.DSP_FFMPEG_BINARY, deps);
+  if (ffmpegProbe.ok) {
+    cfg.DSP_FFMPEG_BINARY = ffmpegProbe.binary;
+    const ffprobeProbe = await probeBinaryVersion(cfg.DSP_FFPROBE_BINARY, deps);
+    if (ffprobeProbe.ok) {
+      cfg.DSP_FFPROBE_BINARY = ffprobeProbe.binary;
+    }
     state.dspProbeState.checkedAt = now;
     state.dspProbeState.available = true;
     state.dspProbeState.error = null;
@@ -36,18 +62,19 @@ async function ensureFfmpegAvailable(state, cfg, deps) {
       }, state, cfg, deps);
     }
     return true;
-  } catch (err) {
-    state.dspProbeState.checkedAt = now;
-    state.dspProbeState.available = false;
-    state.dspProbeState.error = toDspErrorMessage(err, `Не удалось запустить ${cfg.DSP_FFMPEG_BINARY}.`);
-    if (previousAvailable !== false || previousError !== state.dspProbeState.error) {
-      appendDspLog('ffmpeg.error', {
-        binary: cfg.DSP_FFMPEG_BINARY,
-        error: state.dspProbeState.error,
-      }, state, cfg, deps);
-    }
-    return false;
   }
+
+  const probeTargetLabel = buildBinaryProbeCandidates(cfg.DSP_FFMPEG_BINARY)[0] || cfg.DSP_FFMPEG_BINARY || 'ffmpeg';
+  state.dspProbeState.checkedAt = now;
+  state.dspProbeState.available = false;
+  state.dspProbeState.error = toDspErrorMessage(ffmpegProbe.error, `Не удалось запустить ${probeTargetLabel}.`);
+  if (previousAvailable !== false || previousError !== state.dspProbeState.error) {
+    appendDspLog('ffmpeg.error', {
+      binary: probeTargetLabel,
+      error: state.dspProbeState.error,
+    }, state, cfg, deps);
+  }
+  return false;
 }
 
 function enqueueDspTransition(fromFile, toFile, options, state, cfg, deps) {

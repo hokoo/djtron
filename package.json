@@ -6,6 +6,12 @@
   "scripts": {
     "sync:playback-lib": "node scripts/sync-playback-lib.js",
     "start": "npm run --silent sync:playback-lib && node server.js",
-    "test": "npm run --silent sync:playback-lib && node --test"
+    "lint:frontend": "eslint public/**/*.js --no-config-lookup --config eslint.frontend.config.mjs",
+    "test": "npm run --silent sync:playback-lib && npm run --silent lint:frontend && node --test",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "eslint": "^9.22.0"
   }
 }

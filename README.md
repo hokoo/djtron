@@ -27,6 +27,31 @@ npm start
 
 По умолчанию приложение доступно на `http://localhost:3000`.
 
+## E2E регрессии фронта (Playwright)
+
+Набор e2e тестов в `e2e/` покрывает критичные регрессии UI:
+- `frontend-smoke.spec.js` — bootstrap без runtime ошибок, рендер плей-листов из `/audio`, дефолты overlay/stop fade;
+- `frontend-settings.spec.js` — изменение и сохранение настроек (`overlay`, `stop fade`, `curve`, `Presets`, `Seek`, DAP);
+- `frontend-version-updater.spec.js` — отображение версии и сохранение `allowPrerelease` с влиянием на update-check;
+- `frontend-server-controls.spec.js` — кнопка «Остановить сервер» отправляет `POST /api/shutdown` и обновляет статус;
+- `frontend-dsp-status.spec.js` — поведение предупреждения FFmpeg в зависимости от DSP статуса.
+
+Также добавлен быстрый frontend-гейт на unresolved symbols:
+
+```bash
+npm run lint:frontend
+```
+
+Запуск:
+
+```bash
+npm install
+npx playwright install chromium
+# Для Linux может потребоваться:
+# npx playwright install-deps chromium
+npm run test:e2e
+```
+
 ## Конфиг `extra.conf` и `localStorage`
 
 В корне проекта можно создать текстовый файл `extra.conf`.

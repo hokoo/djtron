@@ -11,6 +11,13 @@ import { trackKey } from './utils.js';
 
 const _deps = {};
 
+function waitMs(ms) {
+  const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  return new Promise((resolve) => {
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
 export function setDspLiveDeps(d) {
   Object.assign(_deps, d);
 }

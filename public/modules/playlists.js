@@ -466,6 +466,8 @@ export function readLegacyLocalLayout(files) {
 }
 
 export function syncLayoutFromDom() {
+  const zonesContainer = _deps.zonesContainer;
+  if (!zonesContainer) return;
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
   const nextLayout = ensurePlaylists(state.layout).map(() => []);
 
@@ -577,7 +579,7 @@ export function disarmDapNoSilence() {
 export function clearDapInterruptedPlaybackSnapshot() {
   const previousSnapshot =
     state.dapInterruptedPlaybackSnapshot && typeof state.dapInterruptedPlaybackSnapshot === 'object'
-      ? { ...dapInterruptedPlaybackSnapshot }
+      ? { ...state.dapInterruptedPlaybackSnapshot }
       : null;
   state.dapInterruptedPlaybackSnapshot = null;
 
@@ -845,11 +847,11 @@ export async function addPlaylist() {
 async function addPlaylistLocally() {
   state.layout = ensurePlaylists(state.layout);
   state.layout.push([]);
-  state.playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], state.layout.length);
+  state.playlistNames = normalizePlaylistNames([...state.playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta([...state.playlistMeta, defaultPlaylistMeta()], state.layout.length);
   state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...playlistAutoplay, false], state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], state.playlistAutoplay, state.layout.length);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...state.playlistAutoplay, false], state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags([...state.playlistDsp, false], state.playlistAutoplay, state.layout.length);
   renderZones();
 
   try {
@@ -1025,11 +1027,11 @@ export async function syncDapConfig(nextDapConfig, { successMessage = 'DAP об�
     return false;
   }
 
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
   const previousDapInterruptedPlaybackSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
   const previousDapEnabled = Boolean(previousDap.enabled);
   const previousDapIndex = _deps.normalizePlaylistTrackIndex(previousDap.playlistIndex);
@@ -1149,6 +1151,7 @@ export function getLiveLockedPlaylistIndex() {
 }
 
 export function syncPlaylistHeaderActiveState() {
+  const zonesContainer = _deps.zonesContainer;
   if (!zonesContainer) return;
 
   const dapPlaylistIndex = getDapPlaylistIndex(state.dapConfig);
@@ -1292,7 +1295,7 @@ async function deletePlaylistLocally(playlistIndex) {
   const previousMeta = clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
     state.currentTrack && typeof state.currentTrack === 'object'
@@ -1302,7 +1305,7 @@ async function deletePlaylistLocally(playlistIndex) {
         }
       : null;
   const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
@@ -1460,6 +1463,7 @@ export function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 }
 
 export function renderZones() {
+  const zonesContainer = _deps.zonesContainer;
   if (!zonesContainer) return;
   state.zoneBodiesCache = [];
   hideCollapsedPlaylistsOverlay();
@@ -1803,16 +1807,16 @@ export function buildAudioCatalogSignature(files, folders) {
 }
 
 export function setPlaylistControlsLoading(isLoading) {
-  if (refreshPlaylistsBtn) {
-    refreshPlaylistsBtn.disabled = isLoading;
-    refreshPlaylistsBtn.dataset.loading = isLoading ? 'true' : 'false';
-    refreshPlaylistsBtn.textContent = isLoading ? 'Обновление...' : 'Обновить';
+  if (_deps.refreshPlaylistsBtn) {
+    _deps.refreshPlaylistsBtn.disabled = isLoading;
+    _deps.refreshPlaylistsBtn.dataset.loading = isLoading ? 'true' : 'false';
+    _deps.refreshPlaylistsBtn.textContent = isLoading ? 'Обновление...' : 'Обновить';
   }
-  if (addPlaylistBtn) {
-    addPlaylistBtn.disabled = isLoading;
+  if (_deps.addPlaylistBtn) {
+    _deps.addPlaylistBtn.disabled = isLoading;
   }
-  if (resetPlaylistsBtn) {
-    resetPlaylistsBtn.disabled = isLoading;
+  if (_deps.resetPlaylistsBtn) {
+    _deps.resetPlaylistsBtn.disabled = isLoading;
   }
 }
 
@@ -1945,19 +1949,19 @@ export function stopAudioCatalogAutoRefresh() {
 }
 
 export function initPlaylistControls() {
-  if (addPlaylistBtn) {
-    addPlaylistBtn.addEventListener('click', addPlaylist);
+  if (_deps.addPlaylistBtn) {
+    _deps.addPlaylistBtn.addEventListener('click', addPlaylist);
   }
 
-  if (refreshPlaylistsBtn) {
-    refreshPlaylistsBtn.addEventListener('click', () => {
+  if (_deps.refreshPlaylistsBtn) {
+    _deps.refreshPlaylistsBtn.addEventListener('click', () => {
       setStatus('Обновляем список файлов и плей-листов...');
       requestTracksReload({ reason: 'manual' });
     });
   }
 
-  if (resetPlaylistsBtn) {
-    resetPlaylistsBtn.addEventListener('click', resetPlaylists);
+  if (_deps.resetPlaylistsBtn) {
+    _deps.resetPlaylistsBtn.addEventListener('click', resetPlaylists);
   }
 
   setPlaylistControlsLoading(false);
@@ -2041,11 +2045,17 @@ export function serializeTrackTitleModesByTrack(trackModesState = state.trackTit
 
 export function saveTrackTitleModesByTrackSetting() {
   const serialized = serializeTrackTitleModesByTrack();
-  saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
+  if (typeof _deps.saveSetting === 'function') {
+    _deps.saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
+  }
 }
 
 export function loadTrackTitleModesByTrackSetting() {
-  state.trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
+  const rawValue =
+    typeof _deps.loadSetting === 'function'
+      ? _deps.loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}')
+      : '{}';
+  state.trackTitleModesByTrack = parseTrackTitleModesByTrack(rawValue);
 }
 
 export function trackTitleModesByTrackEqual(leftState, rightState) {
@@ -2326,7 +2336,10 @@ export function stripExtension(filename) {
 }
 
 export function renderEmpty() {
-  zonesContainer.innerHTML = '<div class="empty-state">В папке /audio не найдено аудиофайлов (mp3, wav, ogg, m4a, flac).</div>';
+  if (_deps.zonesContainer) {
+    _deps.zonesContainer.innerHTML =
+      '<div class="empty-state">В папке /audio не найдено аудиофайлов (mp3, wav, ogg, m4a, flac).</div>';
+  }
 }
 
 export function resolveTrackUiContext(playbackContext = null) {

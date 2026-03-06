@@ -101,6 +101,27 @@ describe('DspJobManager', () => {
     assert.equal(manager.enabled, false);
   });
 
+  it('ensureReady falls back to .exe DSP binaries when needed', async () => {
+    const config = createTestConfig({ DSP_PROBE_CACHE_MS: 0 });
+    const deps = createTestDeps();
+    deps.execFileAsync = async (binary) => {
+      if (binary === 'ffmpeg' || binary === 'ffprobe') {
+        const err = new Error(`spawn ${binary} ENOENT`);
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const manager = new DspJobManager({ config, deps });
+
+    await manager.ensureReady();
+
+    const summary = manager.getQueueSummary();
+    assert.equal(summary.ffmpegAvailable, true);
+    assert.equal(summary.ffmpegBinary, 'ffmpeg.exe');
+    assert.equal(summary.ffprobeBinary, 'ffprobe.exe');
+  });
+
   it('getQueueSummary returns correct shape', () => {
     const { manager } = createTestManager();
     const summary = manager.getQueueSummary();

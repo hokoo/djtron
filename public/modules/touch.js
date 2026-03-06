@@ -10,6 +10,8 @@ import { hideCollapsedPlaylistsOverlay,
 import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+let zonesContainer = null;
+let touchFullscreenToggleBtn = null;
 const PLAYLIST_REORDER_COMMAND = 'playlist-reorder';
 
 const hostPlaylistReorderCommandBus = new PlaybackCommandBus({
@@ -47,6 +49,12 @@ async function dispatchHostPlaylistReorderCommand(run) {
 
 export function setTouchDeps(d) {
   Object.assign(_deps, d);
+  if (Object.prototype.hasOwnProperty.call(d, 'zonesContainer')) {
+    zonesContainer = d.zonesContainer;
+  }
+  if (Object.prototype.hasOwnProperty.call(d, 'touchFullscreenToggleBtn')) {
+    touchFullscreenToggleBtn = d.touchFullscreenToggleBtn;
+  }
 }
 
 export function isTouchPointerEvent(event) {
@@ -1290,7 +1298,7 @@ export function onZonesPanPointerMove(event) {
 export function onZonesPanPointerUp(event) {
   if (!state.zonesPanActive || event.pointerId !== state.zonesPanPointerId) return;
   const shouldUseMomentum = state.zonesPanMoved && state.zonesPanPointerType === 'touch';
-  const momentumVelocity = shouldUseMomentum ? -state.zonesPanVelocityX * zonesPanMoveGain : 0;
+  const momentumVelocity = shouldUseMomentum ? -state.zonesPanVelocityX * state.zonesPanMoveGain : 0;
   cleanupZonesPanInteraction();
   if (shouldUseMomentum) {
     startZonesPanMomentum(momentumVelocity);
@@ -1449,7 +1457,7 @@ async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPl
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousCollapsedIndices = new Set(state.collapsedPlaylistIndices);
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
@@ -1460,7 +1468,7 @@ async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPl
         }
       : null;
   const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
 
   const nextLayout = moveArrayItem(previousLayout, sourceIndex, destinationIndex);
@@ -1558,11 +1566,11 @@ export function getPlaylistReorderPointerContentX(clientX) {
 }
 
 export function resolvePlaylistReorderSlotFromPointer(clientX) {
-  const centers = Array.isArray(state.playlistReorderHoldCandidateCenters) ? playlistReorderHoldCandidateCenters : [];
+  const centers = Array.isArray(state.playlistReorderHoldCandidateCenters) ? state.playlistReorderHoldCandidateCenters : [];
   if (!centers.length) return 0;
   const pointerContentX = getPlaylistReorderPointerContentX(clientX);
   if (!Number.isFinite(pointerContentX)) {
-    return Number.isInteger(state.playlistReorderHoldCurrentSlot) ? playlistReorderHoldCurrentSlot : 0;
+    return Number.isInteger(state.playlistReorderHoldCurrentSlot) ? state.playlistReorderHoldCurrentSlot : 0;
   }
 
   let slot = 0;
@@ -1573,7 +1581,7 @@ export function resolvePlaylistReorderSlotFromPointer(clientX) {
 }
 
 export function getPlaylistReorderTargetPlaylistBySlot(slotIndex) {
-  const candidateOrder = Array.isArray(state.playlistReorderHoldCandidateOrder) ? playlistReorderHoldCandidateOrder : [];
+  const candidateOrder = Array.isArray(state.playlistReorderHoldCandidateOrder) ? state.playlistReorderHoldCandidateOrder : [];
   if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= candidateOrder.length) return null;
   return candidateOrder[slotIndex];
 }
@@ -1584,7 +1592,7 @@ export function applyPlaylistReorderPreviewOrder(slotIndex = state.playlistReord
   if (sourcePlaylistIndex === null) return;
 
   const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
-    ? playlistReorderHoldInitialVisibleOrder
+    ? state.playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length || !initialOrder.includes(sourcePlaylistIndex)) return;
 
@@ -1627,7 +1635,7 @@ export function applyPlaylistReorderPreviewOrder(slotIndex = state.playlistReord
 export function restorePlaylistReorderPreviewOrder() {
   if (!zonesContainer) return;
   const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
-    ? playlistReorderHoldInitialVisibleOrder
+    ? state.playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length) return;
   const initialSignature = initialOrder.join('|');

@@ -6,6 +6,7 @@ import { setStatus } from './ui/status.js';
 import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+let zonesContainer = null;
 const TRACK_MUTATION_DELETE_FROM_CONTEXT = 'track-delete-from-context';
 const TRACK_MUTATION_QUEUE_NEXT_FROM_CONTEXT = 'track-queue-next-from-context';
 const TRACK_MUTATION_DROP = 'track-drop';
@@ -45,6 +46,9 @@ async function dispatchHostTrackMutationCommand(commandType, run) {
 
 export function setDndDeps(d) {
   Object.assign(_deps, d);
+  if (Object.prototype.hasOwnProperty.call(d, 'zonesContainer')) {
+    zonesContainer = d.zonesContainer;
+  }
 }
 
 export function isCopyDragModifier(event) {
@@ -818,9 +822,9 @@ export function resolveDropInsertIndex(targetBody, targetZoneIndex, layoutState)
 
   const marker =
     state.dragPreviewCard && state.dragPreviewCard.parentElement === targetBody
-      ? dragPreviewCard
+      ? state.dragPreviewCard
       : state.draggingCard && state.draggingCard.parentElement === targetBody
-        ? draggingCard
+        ? state.draggingCard
         : null;
 
   if (!marker) {
@@ -943,7 +947,7 @@ async function handleDragDeleteFromContextLocally() {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
 
   state.layout = _deps.ensurePlaylists(snapshotLayout);
   state.playlistNames = _deps.normalizePlaylistNames(snapshotNames, state.layout.length);
@@ -1067,7 +1071,7 @@ async function handleDragQueueNextFromContextLocally(event = null) {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const undoSnapshot = _deps.createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
     namesState: previousNames,
@@ -1160,7 +1164,7 @@ async function handleDropLocally(event, targetZoneIndex) {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const undoSnapshot = _deps.createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
     namesState: previousNames,

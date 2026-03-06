@@ -166,7 +166,7 @@ const outgoingLiveCommandBus = new PlaybackCommandBus({
   execute: async (payload) => {
     const { ok, data } = await api.postPlaybackCommand({
       ...payload,
-      clientId,
+      clientId: _deps.clientId,
     });
     if (!ok) {
       const message = data && (data.error || data.message);
@@ -429,7 +429,7 @@ export async function fetchSharedPlaybackState() {
 }
 
 export async function pushSharedPlaybackState(snapshot) {
-  const { ok, data } = await api.postPlayback({ ...snapshot, clientId });
+  const { ok, data } = await api.postPlayback({ ...snapshot, clientId: _deps.clientId });
 
   if (!ok) {
     const message = data && (data.error || data.message);
@@ -623,7 +623,7 @@ export async function executeIncomingPlaybackCommand(commandPayload) {
 
   const command = normalizeIncomingPlaybackCommand(commandPayload);
   if (!command) return;
-  if (command.sourceClientId && command.sourceClientId === clientId) return;
+  if (command.sourceClientId && command.sourceClientId === _deps.clientId) return;
 
   const result = await incomingLiveCommandBus.dispatch(
     {
@@ -1168,7 +1168,7 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     playlists: payloadPlaylists,
     dapConfig: buildM2ADapConfigFromLegacy(payloadDapConfig, payloadPlaylists),
     trackTitleModesByTrack: payloadTrackTitleModes,
-    clientId,
+    clientId: _deps.clientId,
     version: state.layoutVersion,
   });
 
@@ -1907,11 +1907,11 @@ export function clearDspTransitionTrackHighlight() {
 
 export function setDspTransitionReelReverse(active) {
   const enabled = Boolean(active);
-  if (nowPlayingControlBtn) {
-    nowPlayingControlBtn.classList.toggle('is-dsp-transition-reverse', enabled);
+  if (_deps.nowPlayingControlBtn) {
+    _deps.nowPlayingControlBtn.classList.toggle('is-dsp-transition-reverse', enabled);
   }
-  if (hostNowPlayingControlEl) {
-    hostNowPlayingControlEl.classList.toggle('is-dsp-transition-reverse', enabled);
+  if (_deps.hostNowPlayingControlEl) {
+    _deps.hostNowPlayingControlEl.classList.toggle('is-dsp-transition-reverse', enabled);
   }
 }
 
@@ -2285,20 +2285,20 @@ export async function toggleNowPlayingPlayback() {
 }
 
 export function setNowPlayingProgress(percent) {
-  if (!nowPlayingProgressEl) return;
+  if (!_deps.nowPlayingProgressEl) return;
   const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-  nowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
+  _deps.nowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
 }
 
 export function setNowPlayingReelActive(active, paused = false) {
   const isActive = Boolean(active);
   const isPaused = Boolean(paused);
-  if (nowPlayingControlBtn) {
-    nowPlayingControlBtn.classList.toggle('has-active-track', isActive);
-    nowPlayingControlBtn.classList.toggle('is-paused', isActive && isPaused);
+  if (_deps.nowPlayingControlBtn) {
+    _deps.nowPlayingControlBtn.classList.toggle('has-active-track', isActive);
+    _deps.nowPlayingControlBtn.classList.toggle('is-paused', isActive && isPaused);
   }
-  if (nowPlayingReelEl) {
-    nowPlayingReelEl.hidden = !isActive;
+  if (_deps.nowPlayingReelEl) {
+    _deps.nowPlayingReelEl.hidden = !isActive;
   }
 }
 
@@ -2308,54 +2308,54 @@ export function formatNowPlayingTime(seconds, { useCeil = true } = {}) {
 }
 
 export function setNowPlayingTime(seconds, { useCeil = true } = {}) {
-  if (!nowPlayingTimeEl) return;
-  nowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
+  if (!_deps.nowPlayingTimeEl) return;
+  _deps.nowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
 }
 
 export function setHostNowPlayingProgress(percent) {
-  if (!hostNowPlayingProgressEl) return;
+  if (!_deps.hostNowPlayingProgressEl) return;
   const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-  hostNowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
+  _deps.hostNowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
 }
 
 export function setHostNowPlayingReelActive(active, paused = false) {
   const isActive = Boolean(active);
   const isPaused = Boolean(paused);
-  if (hostNowPlayingControlEl) {
-    hostNowPlayingControlEl.classList.toggle('has-active-track', isActive);
-    hostNowPlayingControlEl.classList.toggle('is-paused', isActive && isPaused);
+  if (_deps.hostNowPlayingControlEl) {
+    _deps.hostNowPlayingControlEl.classList.toggle('has-active-track', isActive);
+    _deps.hostNowPlayingControlEl.classList.toggle('is-paused', isActive && isPaused);
   }
-  if (hostNowPlayingReelEl) {
-    hostNowPlayingReelEl.hidden = !isActive;
+  if (_deps.hostNowPlayingReelEl) {
+    _deps.hostNowPlayingReelEl.hidden = !isActive;
   }
 }
 
 export function setHostNowPlayingTime(seconds, { useCeil = true } = {}) {
-  if (!hostNowPlayingTimeEl) return;
-  hostNowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
+  if (!_deps.hostNowPlayingTimeEl) return;
+  _deps.hostNowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
 }
 
 export function setDapNowPlayingProgress(percent) {
-  if (!dapNowPlayingProgressEl) return;
+  if (!_deps.dapNowPlayingProgressEl) return;
   const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-  dapNowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
+  _deps.dapNowPlayingProgressEl.style.setProperty('--progress-ratio', String(safePercent / 100));
 }
 
 export function setDapNowPlayingReelActive(active, paused = false) {
   const isActive = Boolean(active);
   const isPaused = Boolean(paused);
-  if (dapNowPlayingControlEl) {
-    dapNowPlayingControlEl.classList.toggle('has-active-track', isActive);
-    dapNowPlayingControlEl.classList.toggle('is-paused', isActive && isPaused);
+  if (_deps.dapNowPlayingControlEl) {
+    _deps.dapNowPlayingControlEl.classList.toggle('has-active-track', isActive);
+    _deps.dapNowPlayingControlEl.classList.toggle('is-paused', isActive && isPaused);
   }
-  if (dapNowPlayingReelEl) {
-    dapNowPlayingReelEl.hidden = !isActive;
+  if (_deps.dapNowPlayingReelEl) {
+    _deps.dapNowPlayingReelEl.hidden = !isActive;
   }
 }
 
 export function setDapNowPlayingTime(seconds, { useCeil = true } = {}) {
-  if (!dapNowPlayingTimeEl) return;
-  dapNowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
+  if (!_deps.dapNowPlayingTimeEl) return;
+  _deps.dapNowPlayingTimeEl.textContent = formatNowPlayingTime(seconds, { useCeil });
 }
 
 export function formatDuration(seconds, { useCeil = false } = {}) {
