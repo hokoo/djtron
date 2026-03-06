@@ -542,6 +542,17 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
       return 0;
     }
 
+    // When transition was NOT pre-armed, the trigger fired on the regular
+    // overlay window (small, e.g. 1-2s) rather than the full DSP slice window.
+    // The computed offset would skip most of the crossfade — play from
+    // the beginning instead to preserve the full transition experience.
+    if (!transitionWasPreArmed && transitionStartOffsetSeconds > LATE_SOURCE_REMAINING_EPSILON_SECONDS) {
+      console.warn('[DSP-DIAG] resolveAdjusted → 0 (not pre-armed, late trigger)', {
+        transitionStartOffsetSeconds, transitionWasPreArmed,
+      });
+      return 0;
+    }
+
     const startupDelaySeconds = Math.max(0, (performance.now() - transitionOffsetPlannedAt) / 1000);
     const startupDelayContribution = transitionWasPreArmed
       ? Math.min(startupDelaySeconds, LATE_SOURCE_REMAINING_EPSILON_SECONDS)
