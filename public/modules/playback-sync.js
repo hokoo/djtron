@@ -32,6 +32,13 @@ function normalizeCommandSourceRole(rawRole) {
   return null;
 }
 
+function normalizeCommandOrigin(rawOrigin, fallback = 'ui') {
+  if (rawOrigin === 'ui' || rawOrigin === 'api' || rawOrigin === 'system') {
+    return rawOrigin;
+  }
+  return fallback;
+}
+
 function normalizePlaybackIdentity(value, maxLength = 64) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
@@ -562,13 +569,18 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
   if (!rawCommand || typeof rawCommand !== 'object') return null;
 
   const type = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
-  const sourceRole = normalizeCommandSourceRole(rawCommand.sourceRole);
+  const sourceRole = normalizeCommandSourceRole(rawCommand.sourceRole)
+    || normalizeCommandSourceRole(rawCommand.actorRole);
+  const actorRole = normalizeCommandSourceRole(rawCommand.actorRole) || sourceRole;
+  const origin = normalizeCommandOrigin(rawCommand.origin, sourceRole ? 'api' : 'ui');
   const sourceClientId = typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null;
   const sourceUsername = typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null;
   const target = typeof rawCommand.target === 'string' && rawCommand.target.trim() ? rawCommand.target.trim() : 'host';
   if (type === PLAYBACK_COMMAND_STOP) {
     return {
       type: PLAYBACK_COMMAND_STOP,
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -579,6 +591,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
   if (type === PLAYBACK_COMMAND_TOGGLE_CURRENT) {
     return {
       type: PLAYBACK_COMMAND_TOGGLE_CURRENT,
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -594,6 +608,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
       type: PLAYBACK_COMMAND_SET_VOLUME,
       volume,
       announce: Boolean(rawCommand.announce),
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -605,6 +621,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
     return {
       type: PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE,
       showVolumePresets: Boolean(rawCommand.showVolumePresets),
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -616,6 +634,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
     return {
       type: PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED,
       allowLiveSeek: Boolean(rawCommand.allowLiveSeek),
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -631,6 +651,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
       type: PLAYBACK_COMMAND_SEEK_CURRENT,
       positionRatio,
       finalize: Boolean(rawCommand.finalize),
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -650,6 +672,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
       file,
       strategy,
       fifoSession: Boolean(rawCommand.fifoSession),
+      origin,
+      actorRole,
       sourceRole,
       sourceClientId,
       sourceUsername,
@@ -680,6 +704,8 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
     fromDspTransition: Boolean(rawCommand.fromDspTransition),
     fromDapNoSilence: Boolean(rawCommand.fromDapNoSilence),
     fromDapInterruptedResume: Boolean(rawCommand.fromDapInterruptedResume),
+    origin,
+    actorRole,
     sourceRole,
     sourceClientId,
     sourceUsername,
@@ -694,7 +720,7 @@ export async function sendLivePlaybackCommand(command) {
   }
   const result = await outgoingLiveCommandBus.dispatch(
     {
-      sourceRole: state.currentRole,
+      sourceRole: normalizedCommand.actorRole || normalizedCommand.sourceRole || state.currentRole,
       commandType: normalizedCommand.type,
       target: normalizedCommand.target || 'host',
     },
@@ -885,7 +911,7 @@ export async function executeIncomingPlaybackCommand(commandPayload) {
 
   const result = await incomingLiveCommandBus.dispatch(
     {
-      sourceRole: command.sourceRole || ROLE_COHOST,
+      sourceRole: command.sourceRole || command.actorRole || ROLE_COHOST,
       commandType: command.type,
       target: command.target || 'host',
     },

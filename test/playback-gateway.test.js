@@ -101,6 +101,8 @@ describe('PlaybackGateway', () => {
     assert.equal(result.status, 200);
     assert.equal(result.payload.command.type, 'toggle-current');
     assert.equal(result.payload.command.sourceRole, 'host');
+    assert.equal(result.payload.command.actorRole, 'host');
+    assert.equal(result.payload.command.origin, 'system');
     assert.ok(dispatched);
     assert.equal(dispatched.ctx.isServer, true);
   });

@@ -68,12 +68,23 @@ class PlaybackGateway {
     if (!command) {
       return { ok: false, status: 400, error: 'Некорректная команда воспроизведения' };
     }
+    const normalizeOrigin = (value, fallback = 'api') => {
+      if (value === 'ui' || value === 'api' || value === 'system') return value;
+      return fallback;
+    };
+    const sourceRole = auth.isServer ? this._ROLE_HOST : this._sanitizeSessionRole(auth.role);
+    const explicitActorRole = body && Object.prototype.hasOwnProperty.call(body, 'actorRole')
+      ? this._sanitizeSessionRole(body.actorRole)
+      : null;
+    const actorRole = explicitActorRole || sourceRole;
 
     const payload = {
       ...command,
+      origin: normalizeOrigin(body && body.origin, auth.isServer ? 'system' : 'api'),
+      actorRole,
       issuedAt: Date.now(),
       sourceClientId: this._sanitizeClientId(body.clientId),
-      sourceRole: auth.isServer ? this._ROLE_HOST : this._sanitizeSessionRole(auth.role),
+      sourceRole,
       sourceUsername: auth.username,
     };
 
