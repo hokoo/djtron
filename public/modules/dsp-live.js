@@ -376,6 +376,10 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
     // Source track already ended: start transition fragment from its beginning.
     return 0;
   }
+  if (state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked === 'true') {
+    // Manual seek invalidates reliable source-tail alignment; prefer deterministic transition start.
+    return 0;
+  }
 
   const sourceDuration = _deps.getDuration(state.currentAudio) || _deps.getKnownDurationSeconds(sourceTrack.key);
   const sourceCurrentTime = Number.isFinite(state.currentAudio.currentTime) ? Math.max(0, state.currentAudio.currentTime) : null;

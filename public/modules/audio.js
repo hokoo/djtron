@@ -360,10 +360,16 @@ export function seekCurrentPlaybackToSeconds(nextTimeSeconds) {
   syncBrowserAudioEngineSource(state.currentTrack, state.currentAudio);
   try {
     liveAudioEngine.seekTo(safeNextTime);
+    if (state.currentAudio && state.currentAudio.dataset) {
+      state.currentAudio.dataset.userSeeked = 'true';
+    }
     return true;
   } catch (err) {
     try {
       state.currentAudio.currentTime = safeNextTime;
+      if (state.currentAudio && state.currentAudio.dataset) {
+        state.currentAudio.dataset.userSeeked = 'true';
+      }
       return true;
     } catch (fallbackErr) {
       return false;
@@ -434,6 +440,7 @@ export function createAudio(track) {
   audio.preload = 'metadata';
   audio.load();
   audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_IDLE;
+  audio.dataset.userSeeked = 'false';
 
   audio.addEventListener('timeupdate', () => {
     maybeTriggerAutoplayOverlayTransition(audio, track);
