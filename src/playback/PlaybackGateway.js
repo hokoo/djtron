@@ -87,13 +87,12 @@ class PlaybackGateway {
       actorRole,
       issuedAt: Date.now(),
       sourceClientId: this._sanitizeClientId(body.clientId),
-      sourceRole,
       sourceUsername: auth.username,
     };
 
     const result = await this._commandBus.dispatch(
       {
-        sourceRole: payload.sourceRole,
+        sourceRole,
         commandType: payload.type,
         isServer: auth.isServer,
         target: payload.target || 'host',

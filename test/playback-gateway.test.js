@@ -100,11 +100,11 @@ describe('PlaybackGateway', () => {
     assert.equal(result.ok, true);
     assert.equal(result.status, 200);
     assert.equal(result.payload.command.type, 'toggle-current');
-    assert.equal(result.payload.command.sourceRole, 'host');
     assert.equal(result.payload.command.actorRole, 'host');
     assert.equal(result.payload.command.origin, 'system');
     assert.ok(dispatched);
     assert.equal(dispatched.ctx.isServer, true);
+    assert.equal(dispatched.ctx.sourceRole, 'host');
   });
 
   it('dispatchCommand forwards command target to command bus context', async () => {
@@ -132,7 +132,7 @@ describe('PlaybackGateway', () => {
 
     const auth = { isServer: false, role: 'co-host', username: 'dj' };
     const result = await gateway.dispatchCommand({ type: 'toggle-current' }, auth);
-    assert.equal(result.payload.command.sourceRole, 'co-host');
+    assert.equal(result.payload.command.actorRole, 'co-host');
   });
 
   it('dispatchCommand ignores empty actorRole and falls back to auth role', async () => {
@@ -148,8 +148,8 @@ describe('PlaybackGateway', () => {
     const result = await gateway.dispatchCommand({ type: 'toggle-current', actorRole: null }, auth);
     assert.equal(result.ok, true);
     assert.ok(dispatched);
-    assert.equal(dispatched.payload.sourceRole, 'co-host');
     assert.equal(dispatched.payload.actorRole, 'co-host');
+    assert.equal(dispatched.ctx.sourceRole, 'co-host');
   });
 
   it('sanitizePlaybackCommand normalizes stop command with target', () => {
