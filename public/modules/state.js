@@ -391,10 +391,16 @@ function legacyToPlaylists(stateSnapshot) {
     }));
 
     const metaEntry = meta[index] || {};
+    const isFolderPlaylist = metaEntry.type === PLAYLIST_TYPE_FOLDER;
     return {
       id: playlistId,
       name: names[index] || `Playlist ${index + 1}`,
-      type: metaEntry.type || 'manual',
+      type: isFolderPlaylist ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL,
+      folderKey: isFolderPlaylist && typeof metaEntry.folderKey === 'string' ? metaEntry.folderKey : undefined,
+      folderOriginalName:
+        isFolderPlaylist && typeof metaEntry.folderOriginalName === 'string'
+          ? metaEntry.folderOriginalName
+          : undefined,
       tracks,
       settings: {
         autoPlayEnabled: Boolean(autoplay[index]),

@@ -1646,6 +1646,62 @@ function toM2ADapConfigForPayload(dapConfig) {
   };
 }
 
+function toLayoutPayloadTrack(rawTrack, playlistIndex, trackIndex) {
+  const track = rawTrack && typeof rawTrack === 'object' ? rawTrack : {};
+  const filePath =
+    typeof rawTrack === 'string' && rawTrack.trim()
+      ? rawTrack.trim()
+      : toLegacyFilePathFromTrack(track);
+  if (!filePath) return null;
+
+  const normalizedTrackId = normalizePlaybackIdentity(track.id, 80) || `t-${playlistIndex}-${trackIndex}`;
+  return {
+    id: normalizedTrackId,
+    src: filePath,
+  };
+}
+
+function toLayoutPayloadPlaylist(rawPlaylist, playlistIndex) {
+  const playlist = rawPlaylist && typeof rawPlaylist === 'object' ? rawPlaylist : {};
+  const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+  const settings = playlist.settings && typeof playlist.settings === 'object' ? playlist.settings : {};
+  const playlistId = normalizePlaybackIdentity(playlist.id, 64) || `p-${playlistIndex}`;
+  const playlistName =
+    typeof playlist.name === 'string' && playlist.name.trim()
+      ? playlist.name.trim()
+      : `Плей-лист ${playlistIndex + 1}`;
+
+  const payloadPlaylist = {
+    id: playlistId,
+    name: playlistName,
+    type: playlist.type === PLAYLIST_TYPE_FOLDER ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL,
+    tracks: tracks
+      .map((track, trackIndex) => toLayoutPayloadTrack(track, playlistIndex, trackIndex))
+      .filter(Boolean),
+    settings: {
+      autoPlayEnabled: Boolean(settings.autoPlayEnabled),
+      dspEnabled: Boolean(settings.dspEnabled),
+    },
+    uiState: typeof playlist.uiState === 'string' && playlist.uiState.trim() ? playlist.uiState.trim() : null,
+  };
+
+  if (payloadPlaylist.type === PLAYLIST_TYPE_FOLDER) {
+    if (typeof playlist.folderKey === 'string' && playlist.folderKey.trim()) {
+      payloadPlaylist.folderKey = playlist.folderKey.trim();
+    }
+    if (typeof playlist.folderOriginalName === 'string' && playlist.folderOriginalName.trim()) {
+      payloadPlaylist.folderOriginalName = playlist.folderOriginalName.trim();
+    }
+  }
+
+  return payloadPlaylist;
+}
+
+function toLayoutPayloadPlaylists(playlists) {
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  return safePlaylists.map((playlist, playlistIndex) => toLayoutPayloadPlaylist(playlist, playlistIndex));
+}
+
 function normalizeServerLayoutPayload(data) {
   const payload = data && typeof data === 'object' ? data : {};
   if (!Array.isArray(payload.playlists)) {
@@ -1718,14 +1774,13 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     dapConfig: payloadDapConfig,
     playlists: sourcePlaylists,
   });
-  const payloadPlaylists = Array.isArray(state.playlists) ? state.playlists : [];
+  const payloadPlaylists = toLayoutPayloadPlaylists(sourcePlaylists);
 
   const { ok, data } = await api.postLayout({
     playlists: payloadPlaylists,
     dapConfig: toM2ADapConfigForPayload(payloadDapConfig),
     trackTitleModesByTrack: payloadTrackTitleModes,
     clientId: _deps.clientId,
-    version: state.layoutVersion,
   });
 
   if (!ok) {

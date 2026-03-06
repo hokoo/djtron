@@ -411,7 +411,11 @@ class ConfigManager {
       SESSION_COOKIE_NAME: 'chkg_session',
       SESSION_TTL_MS: 12 * 60 * 60 * 1000,
       AUTH_BODY_LIMIT_BYTES: 8 * 1024,
-      LAYOUT_BODY_LIMIT_BYTES: 512 * 1024,
+      LAYOUT_BODY_LIMIT_BYTES: int(
+        ['layout_body_limit_bytes', 'layout_payload_limit_bytes', 'api_layout_body_limit_bytes'],
+        8 * 1024 * 1024,
+        { min: 256 * 1024, max: 64 * 1024 * 1024 },
+      ),
       PLAYBACK_BODY_LIMIT_BYTES: 32 * 1024,
       PLAYBACK_COMMAND_BODY_LIMIT_BYTES: 16 * 1024,
       DSP_BODY_LIMIT_BYTES: 128 * 1024,

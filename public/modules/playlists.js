@@ -375,9 +375,9 @@ export function isFolderPlaylistIndex(playlistIndex) {
 
 export function normalizeAudioFolderTemplates(rawFolders, files) {
   const allowedFiles = new Set(Array.isArray(files) ? files : []);
-  const result = [];
+  const folderByKey = new Map();
 
-  if (!Array.isArray(rawFolders)) return result;
+  if (!Array.isArray(rawFolders)) return [];
 
   rawFolders.forEach((entry) => {
     if (!entry || typeof entry !== 'object') return;
@@ -394,9 +394,26 @@ export function normalizeAudioFolderTemplates(rawFolders, files) {
       : [];
 
     if (!folderFiles.length) return;
-    result.push({ key: folderKey, name: folderName || folderNameFallback, files: folderFiles });
+
+    const existing = folderByKey.get(folderKey);
+    if (!existing) {
+      folderByKey.set(folderKey, {
+        key: folderKey,
+        name: folderName || folderNameFallback,
+        files: folderFiles,
+      });
+      return;
+    }
+
+    const merged = new Set(existing.files);
+    folderFiles.forEach((file) => merged.add(file));
+    existing.files = Array.from(merged).sort((left, right) => left.localeCompare(right, 'ru'));
+    if (!existing.name && (folderName || folderNameFallback)) {
+      existing.name = folderName || folderNameFallback;
+    }
   });
 
+  const result = Array.from(folderByKey.values());
   result.sort((left, right) => left.key.localeCompare(right.key, 'ru'));
   return result;
 }
