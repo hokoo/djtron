@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, state, syncLegacyStateFromPlaylists } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, deriveLegacyStateFromPlaylists, state } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -343,16 +343,33 @@ export function applyIncomingLayoutState(
   const previousLayout = _deps.ensurePlaylists(state.layout);
   const previousMeta = _deps.normalizePlaylistMeta(state.playlistMeta, previousLayout.length);
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
-  const normalizedLayout = _deps.normalizeLayoutForFiles(nextLayout, state.availableFiles);
-  const normalizedNames = _deps.normalizePlaylistNames(nextPlaylistNames, normalizedLayout.length);
-  const normalizedMeta = _deps.normalizePlaylistMeta(nextPlaylistMeta, normalizedLayout.length);
-  const normalizedDap = _deps.normalizeDapConfig(nextDapConfig, normalizedLayout.length, state.dapConfig);
-  const normalizedAutoplay = _deps.normalizePlaylistAutoplayWithDap(nextPlaylistAutoplay, normalizedDap, normalizedLayout.length);
-  const normalizedDsp = _deps.normalizePlaylistDspFlags(nextPlaylistDsp, normalizedAutoplay, normalizedLayout.length);
+  if (!Array.isArray(nextPlaylists)) {
+    throw new Error('Неверный формат playlists в layout payload.');
+  }
+
+  const incomingLegacyState = deriveLegacyStateFromPlaylists(nextPlaylists, {
+    dapConfig: nextDapConfig,
+    trackTitleModesByTrack:
+      nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
+        ? nextTrackTitleModesByTrack
+        : state.trackTitleModesByTrack,
+  });
+  const normalizedLayout = _deps.normalizeLayoutForFiles(incomingLegacyState.layout, state.availableFiles);
+  const normalizedNames = _deps.normalizePlaylistNames(incomingLegacyState.playlistNames, normalizedLayout.length);
+  const normalizedMeta = _deps.normalizePlaylistMeta(incomingLegacyState.playlistMeta, normalizedLayout.length);
+  const normalizedDap = _deps.normalizeDapConfig(incomingLegacyState.dapConfig, normalizedLayout.length, state.dapConfig);
+  const normalizedAutoplay = _deps.normalizePlaylistAutoplayWithDap(
+    incomingLegacyState.playlistAutoplay,
+    normalizedDap,
+    normalizedLayout.length,
+  );
+  const normalizedDsp = _deps.normalizePlaylistDspFlags(
+    incomingLegacyState.playlistDsp,
+    normalizedAutoplay,
+    normalizedLayout.length,
+  );
   const normalizedTrackTitleModes = _deps.normalizeTrackTitleModesByTrackForFiles(
-    nextTrackTitleModesByTrack !== null && nextTrackTitleModesByTrack !== undefined
-      ? nextTrackTitleModesByTrack
-      : state.trackTitleModesByTrack,
+    incomingLegacyState.trackTitleModesByTrack,
     state.availableFiles,
     '/audio',
   );
@@ -395,9 +412,6 @@ export function applyIncomingLayoutState(
   state.playlistAutoplay = _deps.normalizePlaylistAutoplayWithDap(normalizedAutoplay, state.dapConfig, state.layout.length);
   state.playlistDsp = _deps.normalizePlaylistDspFlags(normalizedDsp, state.playlistAutoplay, state.layout.length);
   state.trackTitleModesByTrack = normalizedTrackTitleModes;
-  if (!Array.isArray(nextPlaylists)) {
-    throw new Error('Неверный формат playlists в layout payload.');
-  }
   state.playlists = nextPlaylists;
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? _deps.getDapPlaylistIndex(state.dapConfig) : null;
   const currentTrackContextChanged = reconcileTrackContextWithLayout(state.currentTrack, {
@@ -1907,7 +1921,7 @@ export async function initializePlaybackState() {
 
 export async function initializeLayoutState() {
   const serverState = await fetchSharedLayoutState();
-  const incomingLegacyState = syncLegacyStateFromPlaylists(serverState.playlists, {
+  const incomingLegacyState = deriveLegacyStateFromPlaylists(serverState.playlists, {
     dapConfig: serverState.dapConfig,
     trackTitleModesByTrack: serverState.trackTitleModesByTrack,
   });

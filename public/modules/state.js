@@ -535,8 +535,8 @@ function serializeTrackTitleModesByTrackValue(value) {
   return {};
 }
 
-export function syncLegacyStateFromPlaylists(
-  playlists = state.playlists,
+export function deriveLegacyStateFromPlaylists(
+  playlists,
   {
     dapConfig = state.dapConfig,
     trackTitleModesByTrack = state.trackTitleModesByTrack,
@@ -545,29 +545,54 @@ export function syncLegacyStateFromPlaylists(
   const safePlaylists = Array.isArray(playlists) ? playlists : [];
   const explicitTitleModes = serializeTrackTitleModesByTrackValue(trackTitleModesByTrack);
   const legacy = buildLegacyShapeFromPlaylists(safePlaylists, explicitTitleModes);
-
-  state.playlists = safePlaylists;
-  state.layout = Array.isArray(legacy.layout) && legacy.layout.length ? legacy.layout : [[]];
-  state.playlistNames =
-    Array.isArray(legacy.playlistNames) && legacy.playlistNames.length ? legacy.playlistNames : ['Плей-лист 1'];
-  state.playlistMeta =
-    Array.isArray(legacy.playlistMeta) && legacy.playlistMeta.length ? legacy.playlistMeta : [{ type: PLAYLIST_TYPE_MANUAL }];
-  state.playlistAutoplay =
-    Array.isArray(legacy.playlistAutoplay) && legacy.playlistAutoplay.length ? legacy.playlistAutoplay : [false];
-  state.playlistDsp =
-    Array.isArray(legacy.playlistDsp) && legacy.playlistDsp.length ? legacy.playlistDsp : [false];
-
   const normalizedM2ADap = legacyDapToM2A(dapConfig);
   const legacyDap = buildLegacyDapConfigFromM2A(normalizedM2ADap, safePlaylists);
+
+  return {
+    layout: Array.isArray(legacy.layout) && legacy.layout.length ? legacy.layout : [[]],
+    playlistNames:
+      Array.isArray(legacy.playlistNames) && legacy.playlistNames.length ? legacy.playlistNames : ['Плей-лист 1'],
+    playlistMeta:
+      Array.isArray(legacy.playlistMeta) && legacy.playlistMeta.length ? legacy.playlistMeta : [{ type: PLAYLIST_TYPE_MANUAL }],
+    playlistAutoplay:
+      Array.isArray(legacy.playlistAutoplay) && legacy.playlistAutoplay.length ? legacy.playlistAutoplay : [false],
+    playlistDsp:
+      Array.isArray(legacy.playlistDsp) && legacy.playlistDsp.length ? legacy.playlistDsp : [false],
+    dapConfig: {
+      ...(dapConfig && typeof dapConfig === 'object' ? dapConfig : {}),
+      enabled: Boolean(legacyDap.enabled),
+      playlistIndex: legacyDap.playlistIndex,
+      playlistId: legacyDap.playlistId,
+      volumePercent: Number.isFinite(Number(normalizedM2ADap.volumePercent))
+        ? Number(normalizedM2ADap.volumePercent)
+        : DAP_DEFAULT_VOLUME_PERCENT,
+    },
+    trackTitleModesByTrack: legacy.trackTitleModesByTrack,
+  };
+}
+
+export function syncLegacyStateFromPlaylists(
+  playlists = state.playlists,
+  {
+    dapConfig = state.dapConfig,
+    trackTitleModesByTrack = state.trackTitleModesByTrack,
+  } = {},
+) {
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  const legacyState = deriveLegacyStateFromPlaylists(safePlaylists, {
+    dapConfig,
+    trackTitleModesByTrack,
+  });
+
+  state.playlists = safePlaylists;
+  state.layout = legacyState.layout;
+  state.playlistNames = legacyState.playlistNames;
+  state.playlistMeta = legacyState.playlistMeta;
+  state.playlistAutoplay = legacyState.playlistAutoplay;
+  state.playlistDsp = legacyState.playlistDsp;
   state.dapConfig = {
     ...(state.dapConfig || {}),
-    ...(dapConfig && typeof dapConfig === 'object' ? dapConfig : {}),
-    enabled: Boolean(legacyDap.enabled),
-    playlistIndex: legacyDap.playlistIndex,
-    playlistId: legacyDap.playlistId,
-    volumePercent: Number.isFinite(Number(normalizedM2ADap.volumePercent))
-      ? Number(normalizedM2ADap.volumePercent)
-      : DAP_DEFAULT_VOLUME_PERCENT,
+    ...legacyState.dapConfig,
   };
 
   return {
@@ -577,7 +602,7 @@ export function syncLegacyStateFromPlaylists(
     playlistAutoplay: state.playlistAutoplay,
     playlistDsp: state.playlistDsp,
     dapConfig: state.dapConfig,
-    trackTitleModesByTrack: legacy.trackTitleModesByTrack,
+    trackTitleModesByTrack: legacyState.trackTitleModesByTrack,
   };
 }
 
