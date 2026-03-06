@@ -718,8 +718,8 @@ router.register('POST', '/api/dsp/transitions', handleApiDspTransitionsPost, { a
 router.register('GET|HEAD', '/api/dsp/transitions/file/:id', (req, res) => handleApiDspTransitionFile(req, res, req.pathname), { auth: 'session' });
 router.register('GET', '/api/config', handleApiConfig, { auth: 'session' });
 router.register('GET', '/api/version', handleApiVersion, { auth: 'session' });
-router.register('GET', '/api/update/check', handleUpdateCheck, { auth: 'session' });
-router.register('POST', '/api/update/apply', handleUpdateApply, { auth: 'session' });
+router.register('GET', '/api/update/check', handleUpdateCheck, { auth: 'host' });
+router.register('POST', '/api/update/apply', handleUpdateApply, { auth: 'host' });
 
 // Wildcard routes (catch-alls, order matters: more specific first)
 router.register('GET|HEAD', '/shared/*', (req, res) => handleSharedStatic(req, res, req.pathname.replace(/^\/shared/, '')), { auth: 'none' });

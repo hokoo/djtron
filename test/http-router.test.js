@@ -387,8 +387,8 @@ describe('route registration parity', () => {
     router.register('GET|HEAD', '/api/dsp/transitions/file/:id', (req, res) => { res.writeHead(200); res.end('dsp-file'); }, { auth: 'session' });
     router.register('GET', '/api/config', (req, res) => { res.writeHead(200); res.end('config'); }, { auth: 'session' });
     router.register('GET', '/api/version', (req, res) => { res.writeHead(200); res.end('version'); }, { auth: 'session' });
-    router.register('GET', '/api/update/check', (req, res) => { res.writeHead(200); res.end('check'); }, { auth: 'session' });
-    router.register('POST', '/api/update/apply', (req, res) => { res.writeHead(200); res.end('apply'); }, { auth: 'session' });
+    router.register('GET', '/api/update/check', (req, res) => { res.writeHead(200); res.end('check'); }, { auth: 'host' });
+    router.register('POST', '/api/update/apply', (req, res) => { res.writeHead(200); res.end('apply'); }, { auth: 'host' });
     // Wildcard routes
     router.register('GET|HEAD', '/api/*', (req, res) => { res.writeHead(200); res.end('api-fallback'); }, { auth: 'session' });
     router.register('GET|HEAD', '/audio/*', (req, res) => { res.writeHead(200); res.end('audio-file'); }, { auth: 'session', authResponseKind: 'text' });
@@ -540,5 +540,29 @@ describe('route registration parity', () => {
     const res2 = mockRes();
     router.dispatch(mockReq('POST', '/api/dsp/transitions', AUTH_HOST), res2);
     assert.equal(res2.body, 'dsp-post');
+  });
+
+  it('GET /api/update/check requires host', () => {
+    const router = createFullRouter();
+
+    const res1 = mockRes();
+    router.dispatch(mockReq('GET', '/api/update/check', AUTH_SESSION), res1);
+    assert.equal(res1.statusCode, 403);
+
+    const res2 = mockRes();
+    router.dispatch(mockReq('GET', '/api/update/check', AUTH_HOST), res2);
+    assert.equal(res2.body, 'check');
+  });
+
+  it('POST /api/update/apply requires host', () => {
+    const router = createFullRouter();
+
+    const res1 = mockRes();
+    router.dispatch(mockReq('POST', '/api/update/apply', AUTH_SESSION), res1);
+    assert.equal(res1.statusCode, 403);
+
+    const res2 = mockRes();
+    router.dispatch(mockReq('POST', '/api/update/apply', AUTH_HOST), res2);
+    assert.equal(res2.body, 'apply');
   });
 });
