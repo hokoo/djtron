@@ -412,6 +412,15 @@ export function maybeTriggerAutoplayOverlayTransition(audio, track) {
   if (!shouldTriggerAutoplayOverlayTransition(audio, track)) return;
   if (audio.dataset.autoplayOverlayState !== AUTOPLAY_OVERLAY_STATE_IDLE) return;
 
+  const remaining = audio.duration - audio.currentTime;
+  console.warn('[DSP-DIAG] maybeTriggerAutoplayOverlayTransition FIRED', {
+    trackKey: track && track.key,
+    remainingSeconds: remaining,
+    audioDuration: audio.duration,
+    audioCurrentTime: audio.currentTime,
+    audioEnded: audio.ended,
+  });
+
   audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_PENDING;
   _deps.tryAutoplayNextTrack(track)
     .then((started) => {
@@ -447,6 +456,14 @@ export function createAudio(track) {
     const overlayState = audio.dataset.autoplayOverlayState;
     const isAutoplayOverlayHandoff =
       overlayState === AUTOPLAY_OVERLAY_STATE_PENDING || overlayState === AUTOPLAY_OVERLAY_STATE_STARTED;
+
+    console.warn('[DSP-DIAG] audio ended event', {
+      trackKey: key,
+      overlayState,
+      isAutoplayOverlayHandoff,
+      audioCurrentTime: audio.currentTime,
+      audioDuration: audio.duration,
+    });
 
     if (!isAutoplayOverlayHandoff) {
       state.currentAudio = null;

@@ -997,6 +997,20 @@ async function togglePlaylistDspLocally(playlistIndex) {
   state.playlistDsp = normalizedDsp;
   renderZones();
 
+  const currentTrackPlaylistIndex =
+    state.currentTrack && typeof state.currentTrack === 'object'
+      ? _deps.normalizePlaylistTrackIndex(state.currentTrack.playlistIndex)
+      : null;
+  const isCurrentTrackOnToggledPlaylist =
+    currentTrackPlaylistIndex !== null &&
+    currentTrackPlaylistIndex === playlistIndex;
+  if (isCurrentTrackOnToggledPlaylist) {
+    _deps.resetLiveDspNextTrackPreview();
+    if (state.playlistDsp[playlistIndex] && state.currentAudio && !state.currentAudio.paused) {
+      _deps.triggerLiveDspTransitionForTrack(state.currentTrack);
+    }
+  }
+
   try {
     await _deps.pushSharedLayout();
     setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${state.playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
@@ -1004,6 +1018,12 @@ async function togglePlaylistDspLocally(playlistIndex) {
     console.error(err);
     state.playlistDsp = previousDsp;
     renderZones();
+    if (isCurrentTrackOnToggledPlaylist) {
+      _deps.resetLiveDspNextTrackPreview();
+      if (state.playlistDsp[playlistIndex] && state.currentAudio && !state.currentAudio.paused) {
+        _deps.triggerLiveDspTransitionForTrack(state.currentTrack);
+      }
+    }
     setStatus('Не удалось синхронизировать DSP плей-листа.');
   }
 }
