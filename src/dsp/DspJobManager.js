@@ -5,7 +5,13 @@ const { buildDspTransitionOutputUrl, resolveDspTransitionOutputPathById } = requ
 const { appendDspLog, initializeDspLogFile } = require('./log');
 const { loadDspTempoCache } = require('./tempo');
 const { buildDspQueueSummary, serializeDspTransition } = require('./queue');
-const { ensureFfmpegAvailable, enqueueDspTransition, scheduleDspTransitionsFromLayout, getDspTransitionByPair } = require('./enqueue');
+const {
+  ensureFfmpegAvailable,
+  enqueueDspTransition,
+  scheduleDspTransitionsFromLayout,
+  scheduleDspTransitionsFromPlaylists,
+  getDspTransitionByPair,
+} = require('./enqueue');
 
 /**
  * DspJobManager — owns the DSP processing pipeline.
@@ -149,7 +155,7 @@ class DspJobManager {
   /**
    * Enqueue batch of transitions from a POST request body.
    * @param {object} body - request body
-   * @param {object} layoutState - { layout, playlistDsp } for fromLayout mode
+   * @param {object} layoutState - { playlists } or legacy { layout, playlistDsp } for fromLayout mode
    * @returns {{ request, summary, queue, transitions }}
    */
   enqueueBatch(body, layoutState) {
@@ -178,7 +184,9 @@ class DspJobManager {
 
     const includeLayout = Boolean(body.fromLayout) || requestTransitions.length === 0;
     if (includeLayout && layoutState) {
-      const layoutTransitions = this._collectAdjacentTransitions(layoutState.layout, layoutState.playlistDsp);
+      const layoutTransitions = Array.isArray(layoutState.playlists)
+        ? this._collectAdjacentTransitionsFromPlaylists(layoutState.playlists)
+        : this._collectAdjacentTransitions(layoutState.layout, layoutState.playlistDsp);
       layoutTransitions.forEach((entry) => requestTransitions.push(entry));
     }
 
@@ -243,6 +251,13 @@ class DspJobManager {
   }
 
   /**
+   * Schedule transitions directly from M2A playlists.
+   */
+  scheduleFromPlaylists(playlists, options) {
+    return scheduleDspTransitionsFromPlaylists(playlists, options, this._state, this._cfg, this._deps);
+  }
+
+  /**
    * Resolve output file path for a transition by id.
    * @returns {string|null}
    */
@@ -287,6 +302,57 @@ class DspJobManager {
     });
 
     return transitions;
+  }
+
+  /** @private — collect adjacent transitions from M2A playlists. */
+  _collectAdjacentTransitionsFromPlaylists(playlists) {
+    if (!Array.isArray(playlists)) return [];
+    const seen = new Set();
+    const transitions = [];
+
+    playlists.forEach((playlist) => {
+      if (!playlist || typeof playlist !== 'object') return;
+      const settings = playlist.settings && typeof playlist.settings === 'object' ? playlist.settings : {};
+      if (!Boolean(settings.autoPlayEnabled) || !Boolean(settings.dspEnabled)) return;
+
+      const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+      if (tracks.length < 2) return;
+
+      for (let index = 0; index < tracks.length - 1; index += 1) {
+        const fromRaw = this._toRelativeTrackPath(tracks[index]);
+        const toRaw = this._toRelativeTrackPath(tracks[index + 1]);
+        if (!fromRaw || !toRaw) continue;
+
+        const dedupeKey = `${fromRaw}\n${toRaw}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        transitions.push({ fromFile: fromRaw, toFile: toRaw });
+      }
+    });
+
+    return transitions;
+  }
+
+  _toRelativeTrackPath(track) {
+    if (!track || typeof track !== 'object') return '';
+    const fromMeta = track.meta && typeof track.meta.originalPath === 'string' ? track.meta.originalPath.trim() : '';
+    if (fromMeta) {
+      return this._deps.normalizeAudioRelativePath(fromMeta);
+    }
+
+    const src = typeof track.src === 'string' ? track.src.trim() : '';
+    if (!src) return '';
+
+    let normalized = src.replace(/^https?:\/\/[^/]+/i, '');
+    const queryIndex = normalized.indexOf('?');
+    if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+    const hashIndex = normalized.indexOf('#');
+    if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+    if (normalized.startsWith('/audio/')) normalized = normalized.slice('/audio/'.length);
+    else if (normalized.startsWith('audio/')) normalized = normalized.slice('audio/'.length);
+    else normalized = normalized.replace(/^\/+/, '');
+
+    return this._deps.normalizeAudioRelativePath(normalized.trim());
   }
 }
 

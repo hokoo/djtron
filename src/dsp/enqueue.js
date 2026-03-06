@@ -5,6 +5,31 @@ const { buildDspTransitionDescriptor } = require('./descriptor');
 const { appendDspLog } = require('./log');
 const { toDspErrorMessage, queueDspTransition, scheduleDspWorker, markDspTransitionFailed, trimDspHistory } = require('./queue');
 
+function buildBinaryProbeCandidates(binaryName) {
+  const normalized = typeof binaryName === 'string' ? binaryName.trim() : '';
+  if (!normalized) return [];
+  if (/\.exe$/i.test(normalized)) return [normalized];
+  return [normalized, `${normalized}.exe`];
+}
+
+async function probeBinaryVersion(binaryName, deps) {
+  let lastError = null;
+  const candidates = buildBinaryProbeCandidates(binaryName);
+  for (const candidate of candidates) {
+    try {
+      await deps.execFileAsync(candidate, ['-version'], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 512 * 1024,
+      });
+      return { ok: true, binary: candidate, error: null };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  return { ok: false, binary: null, error: lastError };
+}
+
 async function ensureFfmpegAvailable(state, cfg, deps) {
   if (!cfg.DSP_ENABLED) {
     state.dspProbeState.available = false;
@@ -21,12 +46,13 @@ async function ensureFfmpegAvailable(state, cfg, deps) {
   const previousAvailable = state.dspProbeState.available;
   const previousError = state.dspProbeState.error;
 
-  try {
-    await deps.execFileAsync(cfg.DSP_FFMPEG_BINARY, ['-version'], {
-      windowsHide: true,
-      timeout: 5000,
-      maxBuffer: 512 * 1024,
-    });
+  const ffmpegProbe = await probeBinaryVersion(cfg.DSP_FFMPEG_BINARY, deps);
+  if (ffmpegProbe.ok) {
+    cfg.DSP_FFMPEG_BINARY = ffmpegProbe.binary;
+    const ffprobeProbe = await probeBinaryVersion(cfg.DSP_FFPROBE_BINARY, deps);
+    if (ffprobeProbe.ok) {
+      cfg.DSP_FFPROBE_BINARY = ffprobeProbe.binary;
+    }
     state.dspProbeState.checkedAt = now;
     state.dspProbeState.available = true;
     state.dspProbeState.error = null;
@@ -36,18 +62,19 @@ async function ensureFfmpegAvailable(state, cfg, deps) {
       }, state, cfg, deps);
     }
     return true;
-  } catch (err) {
-    state.dspProbeState.checkedAt = now;
-    state.dspProbeState.available = false;
-    state.dspProbeState.error = toDspErrorMessage(err, `Не удалось запустить ${cfg.DSP_FFMPEG_BINARY}.`);
-    if (previousAvailable !== false || previousError !== state.dspProbeState.error) {
-      appendDspLog('ffmpeg.error', {
-        binary: cfg.DSP_FFMPEG_BINARY,
-        error: state.dspProbeState.error,
-      }, state, cfg, deps);
-    }
-    return false;
   }
+
+  const probeTargetLabel = buildBinaryProbeCandidates(cfg.DSP_FFMPEG_BINARY)[0] || cfg.DSP_FFMPEG_BINARY || 'ffmpeg';
+  state.dspProbeState.checkedAt = now;
+  state.dspProbeState.available = false;
+  state.dspProbeState.error = toDspErrorMessage(ffmpegProbe.error, `Не удалось запустить ${probeTargetLabel}.`);
+  if (previousAvailable !== false || previousError !== state.dspProbeState.error) {
+    appendDspLog('ffmpeg.error', {
+      binary: probeTargetLabel,
+      error: state.dspProbeState.error,
+    }, state, cfg, deps);
+  }
+  return false;
 }
 
 function enqueueDspTransition(fromFile, toFile, options, state, cfg, deps) {
@@ -227,8 +254,97 @@ function collectAdjacentLayoutTransitions(layout, playlistDspFlags, deps) {
   return transitions;
 }
 
+function toRelativeAudioFileFromTrack(track, deps) {
+  if (!track || typeof track !== 'object') return '';
+  const fromMeta = track.meta && typeof track.meta.originalPath === 'string' ? track.meta.originalPath.trim() : '';
+  if (fromMeta) {
+    return deps.normalizeAudioRelativePath(fromMeta);
+  }
+
+  const src = typeof track.src === 'string' ? track.src.trim() : '';
+  if (!src) return '';
+
+  let normalized = src.replace(/^https?:\/\/[^/]+/i, '');
+  const queryIndex = normalized.indexOf('?');
+  if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+  const hashIndex = normalized.indexOf('#');
+  if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+  if (normalized.startsWith('/audio/')) normalized = normalized.slice('/audio/'.length);
+  else if (normalized.startsWith('audio/')) normalized = normalized.slice('audio/'.length);
+  else normalized = normalized.replace(/^\/+/, '');
+
+  return deps.normalizeAudioRelativePath(normalized.trim());
+}
+
+function collectAdjacentPlaylistTransitions(playlists, deps) {
+  if (!Array.isArray(playlists)) return [];
+
+  const seen = new Set();
+  const transitions = [];
+
+  playlists.forEach((playlist) => {
+    if (!playlist || typeof playlist !== 'object') return;
+    const settings = playlist.settings && typeof playlist.settings === 'object' ? playlist.settings : {};
+    const dspEnabled = Boolean(settings.autoPlayEnabled) && Boolean(settings.dspEnabled);
+    if (!dspEnabled) return;
+
+    const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+    if (tracks.length < 2) return;
+
+    for (let index = 0; index < tracks.length - 1; index += 1) {
+      const fromFile = toRelativeAudioFileFromTrack(tracks[index], deps);
+      const toFile = toRelativeAudioFileFromTrack(tracks[index + 1], deps);
+      if (!fromFile || !toFile) continue;
+
+      const dedupeKey = `${fromFile}\n${toFile}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      transitions.push({ fromFile, toFile });
+    }
+  });
+
+  return transitions;
+}
+
 function scheduleDspTransitionsFromLayout(layout, options, state, cfg, deps) {
   const transitions = collectAdjacentLayoutTransitions(layout, options.playlistDspFlags, deps);
+  if (!transitions.length) {
+    return { total: 0, accepted: 0, created: 0, enqueued: 0, failed: 0 };
+  }
+
+  let accepted = 0;
+  let created = 0;
+  let enqueued = 0;
+  let failed = 0;
+
+  transitions.forEach((entry) => {
+    const result = enqueueDspTransition(entry.fromFile, entry.toFile, {
+      transitionSeconds: options.transitionSeconds,
+      sliceSeconds: options.sliceSeconds,
+      force: Boolean(options.force),
+      source: options.source || 'layout',
+      priority: options.priority || 'normal',
+    }, state, cfg, deps);
+    if (!result.ok) {
+      failed += 1;
+      return;
+    }
+    accepted += 1;
+    if (result.created) created += 1;
+    if (result.enqueued) enqueued += 1;
+  });
+
+  return {
+    total: transitions.length,
+    accepted,
+    created,
+    enqueued,
+    failed,
+  };
+}
+
+function scheduleDspTransitionsFromPlaylists(playlists, options, state, cfg, deps) {
+  const transitions = collectAdjacentPlaylistTransitions(playlists, deps);
   if (!transitions.length) {
     return { total: 0, accepted: 0, created: 0, enqueued: 0, failed: 0 };
   }
@@ -282,6 +398,8 @@ module.exports = {
   ensureFfmpegAvailable,
   enqueueDspTransition,
   collectAdjacentLayoutTransitions,
+  collectAdjacentPlaylistTransitions,
   scheduleDspTransitionsFromLayout,
+  scheduleDspTransitionsFromPlaylists,
   getDspTransitionByPair,
 };

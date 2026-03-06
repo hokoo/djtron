@@ -139,7 +139,16 @@ export async function onVolumePresetButtonClick(event) {
   const targetVolume = shouldTurnOffPreset ? DEFAULT_LIVE_VOLUME : presetVolume;
 
   if (isHostRole()) {
-    setLivePlaybackVolume(targetVolume, { sync: true, announce: true });
+    if (typeof _deps.requestHostSetLiveVolume === 'function') {
+      try {
+        await _deps.requestHostSetLiveVolume(targetVolume, { announce: true });
+      } catch (err) {
+        console.error(err);
+        _deps.setStatus(err && err.message ? err.message : 'Не удалось изменить live-громкость.');
+      }
+    } else {
+      setLivePlaybackVolume(targetVolume, { sync: true, announce: true });
+    }
     return;
   }
 

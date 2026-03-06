@@ -11,6 +11,13 @@ import { trackKey } from './utils.js';
 
 const _deps = {};
 
+function waitMs(ms) {
+  const timeoutMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  return new Promise((resolve) => {
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
 export function setDspLiveDeps(d) {
   Object.assign(_deps, d);
 }
@@ -226,10 +233,14 @@ export function consumeLiveDspContinuationWarmup(nextTrack, sliceSeconds = 0) {
 export function toPlaybackTrackDescriptor(track, fallbackBasePath = '/audio') {
   const file = track && typeof track.file === 'string' ? track.file : '';
   const basePath = track && typeof track.basePath === 'string' && track.basePath ? track.basePath : fallbackBasePath;
+  const playlistId = track && typeof track.playlistId === 'string' && track.playlistId.trim() ? track.playlistId.trim() : null;
+  const trackId = track && typeof track.trackId === 'string' && track.trackId.trim() ? track.trackId.trim() : null;
   return {
     file,
     basePath,
     key: trackKey(file, basePath),
+    playlistId,
+    trackId,
     playlistIndex: _deps.normalizePlaylistTrackIndex(track ? track.playlistIndex : null),
     playlistPosition: _deps.normalizePlaylistTrackIndex(track ? track.playlistPosition : null),
   };
@@ -513,6 +524,8 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     }
 
     await handlePlay(nextTrack.file, refreshedButton, nextTrack.basePath || '/audio', {
+      playlistId: nextTrack.playlistId,
+      trackId: nextTrack.trackId,
       playlistIndex: nextTrack.playlistIndex,
       playlistPosition: nextTrack.playlistPosition,
       fromAutoplay: true,
@@ -617,6 +630,8 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     _deps.stopDspTransitionPlayback({ stopAudio: false, clearTrackState: true });
     setStatus('Ошибка воспроизведения DSP перехода. Переходим к следующему треку.');
     handlePlay(nextTrack.file, targetButton, nextTrack.basePath || '/audio', {
+      playlistId: nextTrack.playlistId,
+      trackId: nextTrack.trackId,
       playlistIndex: nextTrack.playlistIndex,
       playlistPosition: nextTrack.playlistPosition,
       fromAutoplay: true,
@@ -667,6 +682,8 @@ export async function tryAutoplayNextTrack(finishedTrack) {
     if (!button) return false;
 
     await handlePlay(nextTrack.file, button, nextTrack.basePath, {
+      playlistId: nextTrack.playlistId,
+      trackId: nextTrack.trackId,
       playlistIndex: nextTrack.playlistIndex,
       playlistPosition: nextTrack.playlistPosition,
       fromAutoplay: true,

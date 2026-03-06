@@ -1,17 +1,60 @@
 // public/modules/touch.js — touch interactions, zones pan, playlist reorder
 
-import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state } from './state.js';
+import { COLLAPSED_PLAYLIST_TAP_MAX_DURATION_MS, COLLAPSED_PLAYLIST_TAP_MOVE_TOLERANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_DISTANCE_PX, COLLAPSED_PLAYLIST_TRIPLE_TAP_WINDOW_MS, PLAYLIST_COLLAPSE_HOLD_MS, PLAYLIST_COLLAPSE_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_REORDER_HOLD_MS, PLAYLIST_REORDER_POINTER_MOVE_TOLERANCE_PX, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_HOST, TOUCH_COPY_HOLD_MS, TOUCH_DRAG_ACTIVATION_DELAY_MS, TOUCH_DRAG_COMMIT_PX, TOUCH_DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_MIN_SPEED_PX_PER_FRAME, TOUCH_DRAG_EDGE_SCROLL_THRESHOLD_PX, TOUCH_DRAG_START_MOVE_PX, TOUCH_NATIVE_DRAG_BLOCK_WINDOW_MS, ZONES_PAN_DRAG_THRESHOLD_PX, ZONES_PAN_TOUCH_GAIN, ZONES_PAN_TOUCH_MOMENTUM_DECAY_PER_FRAME, ZONES_PAN_TOUCH_MOMENTUM_MIN_SPEED_PX_PER_MS, ZONES_PAN_TOUCH_MOMENTUM_STOP_SPEED_PX_PER_MS, ZONES_TWO_FINGER_PAN_TOUCH_GAIN, ZONES_WHEEL_SMOOTH_EASE, ZONES_WHEEL_SMOOTH_MIN_DELTA_PX, state } from './state.js';
 import { applyLiveVolumeToCurrentAudio } from './audio.js';
 import { isHostRole } from './roles.js';
 import { isDapTrackContext, updateDapSettingsUi } from './ui/dap.js';
 import { hideCollapsedPlaylistsOverlay,
   setStatus, showCollapsedPlaylistsHint, showCollapsedPlaylistsOverlay
 } from './ui/status.js';
+import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+let zonesContainer = null;
+let touchFullscreenToggleBtn = null;
+const PLAYLIST_REORDER_COMMAND = 'playlist-reorder';
+
+const hostPlaylistReorderCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole }) =>
+    sourceRole === ROLE_HOST
+      ? { allowed: true }
+      : { allowed: false, reason: 'ACCESS_DENIED', message: 'Только хост может менять порядок плей-листов.' },
+  execute: async (payload) => {
+    if (!payload || typeof payload.run !== 'function') {
+      throw new Error('Некорректная команда перестановки плей-листов.');
+    }
+    await payload.run();
+  },
+});
+
+async function dispatchHostPlaylistReorderCommand(run) {
+  let runResult;
+  const result = await hostPlaylistReorderCommandBus.dispatch(
+    {
+      sourceRole: ROLE_HOST,
+      commandType: PLAYLIST_REORDER_COMMAND,
+      target: 'self',
+    },
+    {
+      run: async () => {
+        runResult = await run();
+      },
+    },
+  );
+  if (!result.ok) {
+    throw new Error(result.message || 'Команда перестановки плей-листов отклонена.');
+  }
+  return runResult;
+}
 
 export function setTouchDeps(d) {
   Object.assign(_deps, d);
+  if (Object.prototype.hasOwnProperty.call(d, 'zonesContainer')) {
+    zonesContainer = d.zonesContainer;
+  }
+  if (Object.prototype.hasOwnProperty.call(d, 'touchFullscreenToggleBtn')) {
+    touchFullscreenToggleBtn = d.touchFullscreenToggleBtn;
+  }
 }
 
 export function isTouchPointerEvent(event) {
@@ -1255,7 +1298,7 @@ export function onZonesPanPointerMove(event) {
 export function onZonesPanPointerUp(event) {
   if (!state.zonesPanActive || event.pointerId !== state.zonesPanPointerId) return;
   const shouldUseMomentum = state.zonesPanMoved && state.zonesPanPointerType === 'touch';
-  const momentumVelocity = shouldUseMomentum ? -state.zonesPanVelocityX * zonesPanMoveGain : 0;
+  const momentumVelocity = shouldUseMomentum ? -state.zonesPanVelocityX * state.zonesPanMoveGain : 0;
   cleanupZonesPanInteraction();
   if (shouldUseMomentum) {
     startZonesPanMomentum(momentumVelocity);
@@ -1379,7 +1422,17 @@ export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPl
     setStatus('Порядок плей-листов может менять только хост.');
     return;
   }
+  try {
+    await dispatchHostPlaylistReorderCommand(() =>
+      reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPlaylistIndex),
+    );
+  } catch (err) {
+    console.error(err);
+    setStatus(err && err.message ? err.message : 'Не удалось изменить порядок плей-листов.');
+  }
+}
 
+async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPlaylistIndex) {
   state.layout = _deps.ensurePlaylists(state.layout);
   const sourceIndex = _deps.normalizePlaylistTrackIndex(sourcePlaylistIndex);
   const normalizedTargetIndex =
@@ -1404,7 +1457,7 @@ export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPl
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousCollapsedIndices = new Set(state.collapsedPlaylistIndices);
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
@@ -1415,7 +1468,7 @@ export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPl
         }
       : null;
   const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
 
   const nextLayout = moveArrayItem(previousLayout, sourceIndex, destinationIndex);
@@ -1513,11 +1566,11 @@ export function getPlaylistReorderPointerContentX(clientX) {
 }
 
 export function resolvePlaylistReorderSlotFromPointer(clientX) {
-  const centers = Array.isArray(state.playlistReorderHoldCandidateCenters) ? playlistReorderHoldCandidateCenters : [];
+  const centers = Array.isArray(state.playlistReorderHoldCandidateCenters) ? state.playlistReorderHoldCandidateCenters : [];
   if (!centers.length) return 0;
   const pointerContentX = getPlaylistReorderPointerContentX(clientX);
   if (!Number.isFinite(pointerContentX)) {
-    return Number.isInteger(state.playlistReorderHoldCurrentSlot) ? playlistReorderHoldCurrentSlot : 0;
+    return Number.isInteger(state.playlistReorderHoldCurrentSlot) ? state.playlistReorderHoldCurrentSlot : 0;
   }
 
   let slot = 0;
@@ -1528,7 +1581,7 @@ export function resolvePlaylistReorderSlotFromPointer(clientX) {
 }
 
 export function getPlaylistReorderTargetPlaylistBySlot(slotIndex) {
-  const candidateOrder = Array.isArray(state.playlistReorderHoldCandidateOrder) ? playlistReorderHoldCandidateOrder : [];
+  const candidateOrder = Array.isArray(state.playlistReorderHoldCandidateOrder) ? state.playlistReorderHoldCandidateOrder : [];
   if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= candidateOrder.length) return null;
   return candidateOrder[slotIndex];
 }
@@ -1539,7 +1592,7 @@ export function applyPlaylistReorderPreviewOrder(slotIndex = state.playlistReord
   if (sourcePlaylistIndex === null) return;
 
   const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
-    ? playlistReorderHoldInitialVisibleOrder
+    ? state.playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length || !initialOrder.includes(sourcePlaylistIndex)) return;
 
@@ -1582,7 +1635,7 @@ export function applyPlaylistReorderPreviewOrder(slotIndex = state.playlistReord
 export function restorePlaylistReorderPreviewOrder() {
   if (!zonesContainer) return;
   const initialOrder = Array.isArray(state.playlistReorderHoldInitialVisibleOrder)
-    ? playlistReorderHoldInitialVisibleOrder
+    ? state.playlistReorderHoldInitialVisibleOrder
     : [];
   if (!initialOrder.length) return;
   const initialSignature = initialOrder.join('|');

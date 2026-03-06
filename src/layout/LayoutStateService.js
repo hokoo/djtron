@@ -86,8 +86,6 @@ class LayoutStateService {
       nextDspSliceSeconds: 0,
       nextDspSourceSeconds: 0,
       playlistId: null,
-      playlistIndex: null,
-      playlistPosition: null,
       updatedAt: 0,
     };
   }
@@ -100,8 +98,6 @@ class LayoutStateService {
       currentTime: 0,
       duration: null,
       playlistId: null,
-      playlistIndex: null,
-      playlistPosition: null,
       interrupted: false,
       updatedAt: 0,
     };
@@ -464,8 +460,6 @@ class LayoutStateService {
       currentTime,
       duration,
       playlistId: playlistId || null,
-      playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
-      playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
       interrupted: Boolean(rawPlayback.interrupted),
       updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
     };
@@ -541,8 +535,6 @@ class LayoutStateService {
       nextDspSliceSeconds,
       nextDspSourceSeconds,
       playlistId,
-      playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistIndex),
-      playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(rawPlayback.playlistPosition),
       updatedAt: Date.now(),
     };
   }
@@ -561,10 +553,13 @@ class LayoutStateService {
       return !Array.isArray(nextPlaylists) || !nextPlaylists.some((playlist) => playlist && playlist.id === playlistId);
     }
 
-    const livePlaylistIndex = LayoutStateService.normalizePlaylistTrackIndex(this._playbackState.playlistIndex);
-    if (livePlaylistIndex === null) return false;
-
-    return !Array.isArray(nextPlaylists) || !nextPlaylists[livePlaylistIndex];
+    const trackId = typeof this._playbackState.trackId === 'string' ? this._playbackState.trackId.trim() : '';
+    if (!trackId) return false;
+    if (!Array.isArray(nextPlaylists)) return true;
+    return !nextPlaylists.some((playlist) =>
+      Array.isArray(playlist && playlist.tracks) &&
+      playlist.tracks.some((track) => track && track.id === trackId),
+    );
   }
 
   // ── Group 4: Persistence ────────────────────────────────────────────
@@ -641,8 +636,6 @@ class LayoutStateService {
           currentTime: normalizedDap.currentTime,
           duration: normalizedDap.duration,
           playlistId: normalizedDap.playlistId,
-          playlistIndex: normalizedDap.playlistIndex,
-          playlistPosition: normalizedDap.playlistPosition,
           interrupted: normalizedDap.interrupted,
         };
       })(),
@@ -650,8 +643,6 @@ class LayoutStateService {
       nextDspSliceSeconds: ConfigManager.parseBoundedNumberConfigValue(state.nextDspSliceSeconds, 0, { min: 0, max: 120 }),
       nextDspSourceSeconds: ConfigManager.parseBoundedNumberConfigValue(state.nextDspSourceSeconds, 0, { min: 0, max: 120 }),
       playlistId: typeof state.playlistId === 'string' ? state.playlistId : null,
-      playlistIndex: LayoutStateService.normalizePlaylistTrackIndex(state.playlistIndex),
-      playlistPosition: LayoutStateService.normalizePlaylistTrackIndex(state.playlistPosition),
     });
   }
 
@@ -684,8 +675,6 @@ class LayoutStateService {
         currentTime: normalizedDapPlayback.currentTime,
         duration: normalizedDapPlayback.duration,
         playlistId: normalizedDapPlayback.playlistId,
-        playlistIndex: normalizedDapPlayback.playlistIndex,
-        playlistPosition: normalizedDapPlayback.playlistPosition,
         interrupted: normalizedDapPlayback.interrupted,
         updatedAt: normalizedDapPlayback.updatedAt,
       },
@@ -699,8 +688,6 @@ class LayoutStateService {
         max: 120,
       }),
       playlistId: this._playbackState.playlistId,
-      playlistIndex: this._playbackState.playlistIndex,
-      playlistPosition: this._playbackState.playlistPosition,
       updatedAt: this._playbackState.updatedAt,
       sourceClientId,
     };

@@ -1,13 +1,54 @@
 // public/modules/dnd.js — desktop drag-and-drop
 
-import { DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX, DESKTOP_TRACK_DRAG_HOLD_MS, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, QUEUE_NEXT_CHAIN_WINDOW_MS, state } from './state.js';
-import { isRemoteLiveMirrorRole } from './roles.js';
+import { DESKTOP_TRACK_DRAG_CANCEL_MOVE_PX, DESKTOP_TRACK_DRAG_HOLD_MS, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, QUEUE_NEXT_CHAIN_WINDOW_MS, ROLE_HOST, state } from './state.js';
+import { isHostRole, isRemoteLiveMirrorRole } from './roles.js';
 import { setStatus } from './ui/status.js';
+import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+let zonesContainer = null;
+const TRACK_MUTATION_DELETE_FROM_CONTEXT = 'track-delete-from-context';
+const TRACK_MUTATION_QUEUE_NEXT_FROM_CONTEXT = 'track-queue-next-from-context';
+const TRACK_MUTATION_DROP = 'track-drop';
+
+const hostTrackMutationCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole }) =>
+    sourceRole === ROLE_HOST
+      ? { allowed: true }
+      : { allowed: false, reason: 'ACCESS_DENIED', message: 'Только хост может менять треки плей-листов.' },
+  execute: async (payload) => {
+    if (!payload || typeof payload.run !== 'function') {
+      throw new Error('Некорректная команда мутации трека.');
+    }
+    await payload.run();
+  },
+});
+
+async function dispatchHostTrackMutationCommand(commandType, run) {
+  let runResult;
+  const result = await hostTrackMutationCommandBus.dispatch(
+    {
+      sourceRole: ROLE_HOST,
+      commandType,
+      target: 'self',
+    },
+    {
+      run: async () => {
+        runResult = await run();
+      },
+    },
+  );
+  if (!result.ok) {
+    throw new Error(result.message || 'Команда мутации трека отклонена.');
+  }
+  return runResult;
+}
 
 export function setDndDeps(d) {
   Object.assign(_deps, d);
+  if (Object.prototype.hasOwnProperty.call(d, 'zonesContainer')) {
+    zonesContainer = d.zonesContainer;
+  }
 }
 
 export function isCopyDragModifier(event) {
@@ -283,11 +324,12 @@ export function resolveQueueNextPlaybackAnchor() {
     ? state.hostPlaybackState.trackFile.trim()
     : '';
   if (!hostTrackFile || state.hostPlaybackState.paused) return null;
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
 
   return {
     file: hostTrackFile,
-    playlistIndex: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-    playlistPosition: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
+    playlistIndex: _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex),
+    playlistPosition: _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistPosition),
   };
 }
 
@@ -780,9 +822,9 @@ export function resolveDropInsertIndex(targetBody, targetZoneIndex, layoutState)
 
   const marker =
     state.dragPreviewCard && state.dragPreviewCard.parentElement === targetBody
-      ? dragPreviewCard
+      ? state.dragPreviewCard
       : state.draggingCard && state.draggingCard.parentElement === targetBody
-        ? draggingCard
+        ? state.draggingCard
         : null;
 
   if (!marker) {
@@ -869,6 +911,19 @@ export function resolveTrackIndexByContext(layoutState, context) {
 }
 
 export async function handleDragDeleteFromContext() {
+  if (isHostRole()) {
+    try {
+      return await dispatchHostTrackMutationCommand(TRACK_MUTATION_DELETE_FROM_CONTEXT, () => handleDragDeleteFromContextLocally());
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось удалить трек.');
+      return false;
+    }
+  }
+  return handleDragDeleteFromContextLocally();
+}
+
+async function handleDragDeleteFromContextLocally() {
   if (!state.dragContext) return false;
 
   const snapshotLayout = _deps.cloneLayoutState(state.dragContext.snapshotLayout);
@@ -892,7 +947,7 @@ export async function handleDragDeleteFromContext() {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
 
   state.layout = _deps.ensurePlaylists(snapshotLayout);
   state.playlistNames = _deps.normalizePlaylistNames(snapshotNames, state.layout.length);
@@ -925,6 +980,22 @@ export async function handleDragDeleteFromContext() {
 }
 
 export async function handleDragQueueNextFromContext(event = null) {
+  if (isHostRole()) {
+    try {
+      return await dispatchHostTrackMutationCommand(
+        TRACK_MUTATION_QUEUE_NEXT_FROM_CONTEXT,
+        () => handleDragQueueNextFromContextLocally(event),
+      );
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось поставить трек следующим.');
+      return false;
+    }
+  }
+  return handleDragQueueNextFromContextLocally(event);
+}
+
+async function handleDragQueueNextFromContextLocally(event = null) {
   if (!state.dragContext) return false;
 
   const snapshotLayout = _deps.cloneLayoutState(state.dragContext.snapshotLayout);
@@ -1000,7 +1071,7 @@ export async function handleDragQueueNextFromContext(event = null) {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const undoSnapshot = _deps.createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
     namesState: previousNames,
@@ -1048,6 +1119,22 @@ export async function handleDragQueueNextFromContext(event = null) {
 }
 
 export async function handleDrop(event, targetZoneIndex) {
+  if (isHostRole()) {
+    try {
+      return await dispatchHostTrackMutationCommand(
+        TRACK_MUTATION_DROP,
+        () => handleDropLocally(event, targetZoneIndex),
+      );
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось переместить трек.');
+      return false;
+    }
+  }
+  return handleDropLocally(event, targetZoneIndex);
+}
+
+async function handleDropLocally(event, targetZoneIndex) {
   event.preventDefault();
   if (!state.draggingCard || !state.dragContext) {
     hideTrashDropzone();
@@ -1077,7 +1164,7 @@ export async function handleDrop(event, targetZoneIndex) {
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const undoSnapshot = _deps.createTrackRelocationUndoSnapshot({
     layoutState: previousLayout,
     namesState: previousNames,

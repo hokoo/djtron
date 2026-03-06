@@ -290,10 +290,10 @@ async function handleApiDspTransitionsPost(req, res) {
     return;
   }
 
-  const dspSnapshot = layoutService.buildDspLayoutSnapshot();
   const result = dspJobManager.enqueueBatch(body, {
-    layout: dspSnapshot.layout,
-    playlistDsp: dspSnapshot.playlistDsp,
+    playlists: layoutService.layoutState && Array.isArray(layoutService.layoutState.playlists)
+      ? layoutService.layoutState.playlists
+      : [],
   });
 
   if (result.error) {
@@ -438,12 +438,10 @@ function handleApiLayoutReset(req, res) {
 
   layoutService.persistLayoutState(layoutService.layoutState);
   layoutService.broadcastLayoutUpdate(null);
-  const dspSnapshot = layoutService.buildDspLayoutSnapshot();
-  dspJobManager.scheduleFromLayout(dspSnapshot.layout, {
+  dspJobManager.scheduleFromPlaylists(layoutService.layoutState.playlists, {
     source: 'layout-update',
     priority: 'normal',
     force: false,
-    playlistDspFlags: dspSnapshot.playlistDsp,
   });
 
   sendJson(res, 200, layoutService.buildLayoutPayload(null));
@@ -465,12 +463,10 @@ async function handleApiLayoutUpdate(req, res) {
   const result = layoutService.applyLayoutUpdate(body, {
     isServer: req.auth.isServer,
     onLayoutChanged: (state) => {
-      const dspSnapshot = layoutService.buildDspLayoutSnapshot(state);
-      dspJobManager.scheduleFromLayout(dspSnapshot.layout, {
+      dspJobManager.scheduleFromPlaylists(state.playlists, {
         source: 'layout-update',
         priority: 'normal',
         force: false,
-        playlistDspFlags: dspSnapshot.playlistDsp,
       });
     },
   });
@@ -764,12 +760,10 @@ if (DSP_ENABLED) {
     noGapEnergyMeanMultiplier: DSP_NO_GAP_ENERGY_MEAN_MULTIPLIER,
     tempoCacheItems: dspJobManager.getTempoCacheSize(),
   });
-  const startupDspSnapshot = layoutService.buildDspLayoutSnapshot();
-  dspJobManager.scheduleFromLayout(startupDspSnapshot.layout, {
+  dspJobManager.scheduleFromPlaylists(layoutService.layoutState.playlists, {
     source: 'startup',
     priority: 'normal',
     force: false,
-    playlistDspFlags: startupDspSnapshot.playlistDsp,
   });
 }
 

@@ -56,6 +56,20 @@ export class BrowserAudioEngine extends AudioEngine {
     this.stopFadeSeconds = Math.max(0, seconds);
   }
 
+  cancelFade() {
+    this._cancelFade();
+    this._isFading = false;
+    this.fadingOutAudio = null;
+  }
+
+  crossfade(outAudio, inAudio, targetVolume, durationSeconds) {
+    this._crossfade(outAudio, inAudio, targetVolume, durationSeconds);
+  }
+
+  fadeOut(audio, durationSeconds, onComplete) {
+    this._fadeOut(audio, durationSeconds, onComplete);
+  }
+
   // --- Core playback (implements AudioEngine interface) ---
 
   play(segment) {

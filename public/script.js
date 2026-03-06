@@ -4,7 +4,7 @@ import { setRoleDeps } from './modules/roles.js';
 import { applyRuntimeConfigFromSources,
   fetchRuntimeConfig, setConfigDeps
 } from './modules/config.js';
-import { setAudioDeps, getEffectiveLiveVolume } from './modules/audio.js';
+import { setAudioDeps, getEffectiveLiveVolume, seekCurrentPlaybackToSeconds } from './modules/audio.js';
 import { setStatusDeps,
   setStatus, hideCollapsedPlaylistsOverlay, removeCollapsedPlaylistsHint
 } from './modules/ui/status.js';
@@ -29,44 +29,59 @@ import { setDapDeps,
 import { setVolumeDeps,
   rebuildVolumePresetButtons, updateVolumePresetsUi, initVolumePresetControls
 } from './modules/ui/volume.js';
-import { setDndDeps, handleGlobalDragOver, attachDragHandlers } from './modules/dnd.js';
+import { setDndDeps,
+  applyDragModeBadge, applyDragPreview, attachDragHandlers, buildTrackOccurrenceMap, clearDesktopDragGhost,
+  clearDragModeBadge, clearDragPreviewCard, handleDragDeleteFromContext, handleDragQueueNextFromContext,
+  handleDrop, handleGlobalDragOver, hideTrashDropzone, isDesktopDragHoldReadyForPointer,
+  isPointOverQueueNextDropzone, isPointOverTrashDropzone, resolveEffectiveDragMode,
+  setDropEffectFromEvent, showTrashDropzone, syncQueueNextDropzoneVisibility
+} from './modules/dnd.js';
 import { setTouchDeps,
   cleanupTouchCopyDrag, cleanupZonesPanInteraction, cleanupZonesTouchPanInteraction,
-  clearPlaylistCollapseHold, clearTouchCopyHold, getCollapsedPlaylistIndicesInRenderOrder,
-  initTouchFullscreenToggle, initZonesPanControls, isTouchPlaylistCollapseEnabled,
-  onZonesFreeAreaTapCancel, restoreCollapsedPlaylistForLocalView, stopZonesPanMomentum,
-  stopZonesWheelSmoothScroll, toggleTouchFullscreenMode, updateTouchFullscreenToggleState
+  clearPlaylistCollapseHold, clearPlaylistReorderHold, clearTouchCopyHold, getCollapsedPlaylistIndicesInRenderOrder,
+  initTouchFullscreenToggle, initZonesPanControls, isLikelyTouchNativeDragEvent, isPlaylistCollapsedForLocalView,
+  isTouchPlaylistCollapseEnabled, isTouchPointerEvent, onZonesFreeAreaTapCancel, pruneCollapsedPlaylistIndices,
+  restoreCollapsedPlaylistForLocalView, startPlaylistCollapseHold, startPlaylistReorderHold, startTouchCopyHold,
+  stopZonesPanMomentum, stopZonesWheelSmoothScroll, toggleTouchFullscreenMode, updateTouchFullscreenToggleState
 } from './modules/touch.js';
 import { setDspLiveDeps,
-  resolveReadyDspSliceWindowSeconds, triggerLiveDspTransitionForTrack, tryAutoplayNextTrack
+  clearLiveDspContinuationWarmups, resolveReadyDspSliceWindowSeconds, triggerLiveDspTransitionForTrack, tryAutoplayNextTrack
 } from './modules/dsp-live.js';
 import { setPlaybackSyncDeps,
-  buildDapPlaybackSnapshotForSync, buildHostTrackHighlightDescriptor,
-  clearDspTransitionTrackHighlight, clearHostTrackHighlight, clearLiveDspNextTrackHighlight,
+  buildDapPlaybackSnapshotForSync, buildHostTrackHighlightDescriptor, buildLiveDspNextTrackDescriptor,
+  cacheTrackDuration, clearDspTransitionTrackHighlight, clearHostTrackHighlight, clearLiveDspNextTrackHighlight,
   clearQueuedCoHostSeekCommands, connectLayoutStream, getCurrentTrackDurationSeconds,
-  getCurrentTrackRemainingSeconds, getDapPlaybackElapsedSeconds, getDspTransitionDurationSeconds,
-  getHostPlaybackDurationSeconds, getHostPlaybackElapsedSeconds, getProgressUiFrameIntervalMs,
-  isDspTransitionPlaybackActive, normalizePlaylistTrackIndex, queueCoHostSeekCurrentPlayback,
-  refreshTrackDurationLabels, requestCoHostPlayTrack, requestCoHostSetLiveVolume,
+  getCurrentTrackRemainingSeconds, getDapPlaybackElapsedSeconds, getDefaultHostPlaybackState,
+  getDspTransitionDurationSeconds, getHostPlaybackDurationSeconds, getHostPlaybackElapsedSeconds,
+  getKnownDurationSeconds, getPlaylistDurationText, getProgressUiFrameIntervalMs, getVisibleDapInterruptedPlaybackDisplayState,
+  initializeLayoutState, initializePlaybackState, isDspTransitionPlaybackActive, isTrackPlaybackContextEqual,
+  keepKnownDurationsForFiles, normalizePlaylistTrackIndex, normalizeTrackPlaybackContext, preloadTrackDurations,
+  pushSharedLayout, queueCoHostSeekCurrentPlayback, reconcileDapInterruptedSnapshotWithLayout,
+  reconcileTrackContextWithLayout, refreshTrackDurationLabels, requestCoHostPlayTrack, requestCoHostSetLiveVolume,
   requestCoHostSetVolumePresetsVisibility, requestHostLiveSeekSync, requestHostPlaybackSync,
-  resetLiveDspNextTrackPreview, sanitizeIncomingDapPlaybackState,
-  seekDspTransitionPlaybackByRatio, setDapNowPlayingProgress, setDapNowPlayingReelActive,
-  setDapNowPlayingTime, setDspTransitionReelReverse, setHostNowPlayingProgress,
-  setHostNowPlayingReelActive, setHostNowPlayingTime, setNowPlayingProgress,
-  setNowPlayingReelActive, setNowPlayingTime, stopAndClearLocalPlayback,
-  stopDspTransitionPlayback, toggleNowPlayingPlayback,
-  getTrackDurationTextByKey
+  requestHostPlayTrack, requestHostSeekCurrentPlayback, requestHostSetLiveVolume, resetLiveDspNextTrackPreview,
+  resetTrackReferences, sanitizeIncomingDapPlaybackState, seekDspTransitionPlaybackByRatio, setDapNowPlayingProgress,
+  setDapNowPlayingReelActive, setDapNowPlayingTime, setDspTransitionReelReverse, setHostNowPlayingProgress,
+  setHostNowPlayingReelActive, setHostNowPlayingTime, setNowPlayingProgress, setNowPlayingReelActive, setNowPlayingTime,
+  stopAndClearLocalPlayback, stopDspTransitionPlayback, toggleNowPlayingPlayback, getTrackDurationTextByKey
 } from './modules/playback-sync.js';
 import { setPlaylistsDeps,
-  armDapNoSilenceByPlaylistIndex, bindProgress, captureDapInterruptedPlaybackSnapshot,
-  clearDapInterruptedPlaybackSnapshot, copyTextToClipboard, ensureDapNoSilencePlayback,
-  ensurePlaylists, getPlaylistDisplayLabel, getTrackCardByContext, initPlaylistControls,
-  isDapNoSilenceActive, isDapPauseLocked, isDapPlaylistIndex, loadTrackTitleModesByTrackSetting,
-  normalizeAudioStartOffsetSeconds, normalizeDapConfig, normalizeDapVolumePercent, renderZones,
-  requestTracksReload, resetProgress, resolveAutoplayNextTrack, sanitizePlaylistName,
-  seekAudioToOffset, setButtonPlaying, setTrackPaused, setTrackPausedByContext,
-  startAudioCatalogAutoRefresh, startProgressLoop, stopAudioCatalogAutoRefresh, stopProgressLoop,
-  stopUnexpectedLiveAudios, syncDapConfig, trackDisplayName, trackLiveAudioInstance
+  armDapNoSilenceByPlaylistIndex, bindProgress, buildPlaylistRenderOrder, captureDapInterruptedPlaybackSnapshot,
+  clearDapInterruptedPlaybackSnapshot, clearTrackRelocationHighlight, clearTrackRelocationUndoAction,
+  cloneLayoutState, clonePlaylistMetaState, copyTextToClipboard, createTrackRelocationUndoSnapshot, dapConfigEqual,
+  defaultPlaylistMeta, disarmDapNoSilence, ensureDapNoSilencePlayback, ensureFolderPlaylistsCoverage, ensurePlaylists,
+  getDapPlaylistIndex, getDuration, getPlaylistDisplayLabel, getTrackButton, getTrackCardByContext, initPlaylistControls,
+  isDapNoSilenceActive, isDapPauseLocked, isDapPlaylistIndex, isFolderPlaylistIndex, isServerLayoutEmpty,
+  isTrackCardDragBlocked, layoutsEqual, loadTrackTitleModesByTrackSetting, normalizeAudioStartOffsetSeconds,
+  normalizeDapConfig, normalizeDapVolumePercent, normalizeLayoutForFiles, normalizePlaylistAutoplayWithDap,
+  normalizePlaylistDspFlags, normalizePlaylistMeta, normalizePlaylistNames, normalizeTrackTitleModesByTrackForFiles,
+  playlistAutoplayEqual, playlistDspEqual, playlistMetaEqual, playlistNamesEqual, readLegacyLocalLayout,
+  registerTrackRelocationUndoAction, renderZones, requestTracksReload, resetProgress, resolveAutoplayNextTrack,
+  resolveDapInterruptedPlaybackTrack, sanitizePlaylistName, saveTrackTitleModesByTrackSetting, seekAudioToOffset,
+  serializeTrackTitleModesByTrack, setButtonPlaying, setTrackPaused, setTrackPausedByContext, startAudioCatalogAutoRefresh,
+  startProgressLoop, stopAudioCatalogAutoRefresh, stopProgressLoop, stopUnexpectedLiveAudios, syncDapConfig,
+  syncDapInterruptedTrackState, syncPlaylistHeaderActiveState, trackDisplayName, trackLiveAudioInstance,
+  trackTitleModesByTrackEqual, updateProgress
 } from './modules/playlists.js';
 const zonesContainer = document.getElementById('zones');
 const statusEl = document.getElementById('status');
@@ -196,6 +211,7 @@ function waitMs(ms) {
 }
 
 async function bootstrap() {
+  state.hostPlaybackSyncReady = false;
   applyRuntimeConfigFromSources(null);
 
   const authorized = await ensureAuthorizedUser();
@@ -216,6 +232,7 @@ async function bootstrap() {
   initDspSetupPanel();
   initPlaylistControls();
   initTouchFullscreenToggle();
+  state.hostPlaybackSyncReady = true;
   initNowPlayingControls();
   initZonesPanControls();
   startDapNoSilenceGuard();
@@ -360,7 +377,7 @@ setNowPlayingDeps({
   setDspTransitionReelReverse,
   getProgressUiFrameIntervalMs,
   buildHostTrackHighlightDescriptor, clearHostTrackHighlight,
-  normalizePlaylistTrackIndex, getTrackCardByContext,
+  normalizePlaylistTrackIndex, normalizeTrackPlaybackContext, getTrackCardByContext,
   trackDisplayName,
   getHostPlaybackElapsedSeconds, getDapPlaybackElapsedSeconds,
   getCurrentTrackRemainingSeconds, getCurrentTrackDurationSeconds,
@@ -369,9 +386,9 @@ setNowPlayingDeps({
   buildDapPlaybackSnapshotForSync, sanitizeIncomingDapPlaybackState,
   isDapTrackContext, isDapPauseLocked, isDspTransitionPlaybackActive,
   updateVolumePresetsUi,
-  requestHostPlaybackSync, requestHostLiveSeekSync,
+  requestHostPlaybackSync, requestHostLiveSeekSync, requestHostSeekCurrentPlayback,
   queueCoHostSeekCurrentPlayback, clearQueuedCoHostSeekCommands,
-  seekDspTransitionPlaybackByRatio, updateProgress,
+  seekDspTransitionPlaybackByRatio, seekCurrentPlaybackToSeconds, updateProgress,
   toggleNowPlayingPlayback,
   initVolumePresetControls,
   setStatus,
@@ -394,7 +411,7 @@ setVolumeDeps({
   getLocalVolumePresetButtons: () => localVolumePresetButtons,
   setLocalVolumePresetButtons: (v) => { localVolumePresetButtons = v; },
   getEffectiveLiveVolume,
-  requestCoHostSetLiveVolume, requestCoHostSetVolumePresetsVisibility,
+  requestCoHostSetLiveVolume, requestCoHostSetVolumePresetsVisibility, requestHostSetLiveVolume,
   requestHostPlaybackSync,
   saveSetting, loadBooleanSetting,
 });
@@ -418,10 +435,12 @@ setDndDeps({
   normalizePlaylistMeta,
   normalizePlaylistNames,
   normalizePlaylistTrackIndex,
+  normalizeTrackPlaybackContext,
   pushSharedLayout,
   registerTrackRelocationUndoAction,
   renderZones,
   startTouchCopyHold,
+  zonesContainer,
   stopZonesPanMomentum,
 });
 
@@ -460,6 +479,8 @@ setTouchDeps({
   sanitizePlaylistName,
   showTrashDropzone,
   syncQueueNextDropzoneVisibility,
+  touchFullscreenToggleBtn,
+  zonesContainer,
 });
 
 setDspLiveDeps({
@@ -482,6 +503,7 @@ setDspLiveDeps({
 });
 
 setPlaybackSyncDeps({
+  clientId,
   cleanupTouchCopyDrag,
   clearDapInterruptedPlaybackSnapshot,
   clearDesktopDragGhost,
@@ -513,6 +535,18 @@ setPlaybackSyncDeps({
   playlistDspEqual,
   playlistMetaEqual,
   playlistNamesEqual,
+  nowPlayingControlBtn,
+  nowPlayingProgressEl,
+  nowPlayingReelEl,
+  nowPlayingTimeEl,
+  hostNowPlayingControlEl,
+  hostNowPlayingProgressEl,
+  hostNowPlayingReelEl,
+  hostNowPlayingTimeEl,
+  dapNowPlayingControlEl,
+  dapNowPlayingProgressEl,
+  dapNowPlayingReelEl,
+  dapNowPlayingTimeEl,
   readLegacyLocalLayout,
   renderZones,
   resetProgress,
@@ -531,6 +565,7 @@ setPlaybackSyncDeps({
 });
 
 setPlaylistsDeps({
+  addPlaylistBtn,
   applyDragPreview,
   attachDragHandlers,
   buildDapPlaybackSnapshotForSync,
@@ -556,18 +591,24 @@ setPlaylistsDeps({
   preloadTrackDurations,
   pruneCollapsedPlaylistIndices,
   pushSharedLayout,
+  refreshPlaylistsBtn,
   reconcileDapInterruptedSnapshotWithLayout,
   reconcileTrackContextWithLayout,
   refreshTrackDurationLabels,
+  requestHostPlayTrack,
   requestHostPlaybackSync,
   resetTrackReferences,
   sanitizeIncomingDapPlaybackState,
   setDropEffectFromEvent,
   setNowPlayingProgress,
   setNowPlayingTime,
+  saveSetting,
   startPlaylistCollapseHold,
   startPlaylistReorderHold,
   stopAndClearLocalPlayback,
+  loadSetting,
+  resetPlaylistsBtn,
+  zonesContainer,
 });
 
 setConfigDeps({ normalizeDapVolumePercent, isDapEnabled, isDapTrackContext, rebuildVolumePresetButtons });

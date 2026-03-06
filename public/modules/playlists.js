@@ -1,6 +1,6 @@
 // public/modules/playlists.js — playlist management, track cards, audio catalog
 
-import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, LEGACY_LAYOUT_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
+import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, LAYOUT_STORAGE_KEY, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, handlePlay, setLivePlaybackVolume } from './audio.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole, isSlaveRole } from './roles.js';
@@ -13,8 +13,94 @@ import { syncDapNowPlayingPanel,
 import { hideCollapsedPlaylistsOverlay, removeCollapsedPlaylistsHint, setStatus } from './ui/status.js';
 import { updateVolumePresetsUi } from './ui/volume.js';
 import { addToMultiMap, getFirstFromSet, trackKey } from './utils.js';
+import { PlaybackCommandBus } from '/shared/playback/index.js';
 
 const _deps = {};
+const PLAYLIST_COMMAND_ADD = 'playlist-add';
+const PLAYLIST_COMMAND_RENAME = 'playlist-rename';
+const PLAYLIST_COMMAND_TOGGLE_AUTOPLAY = 'playlist-toggle-autoplay';
+const PLAYLIST_COMMAND_TOGGLE_DSP = 'playlist-toggle-dsp';
+const PLAYLIST_COMMAND_DELETE = 'playlist-delete';
+
+function normalizePlaylistMutationCommand(rawCommand) {
+  if (!rawCommand || typeof rawCommand !== 'object') return null;
+  const type = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
+  if (type === PLAYLIST_COMMAND_ADD) {
+    return { type: PLAYLIST_COMMAND_ADD };
+  }
+
+  const playlistIndex =
+    Number.isInteger(rawCommand.playlistIndex) && rawCommand.playlistIndex >= 0
+      ? rawCommand.playlistIndex
+      : null;
+  if (playlistIndex === null) return null;
+
+  if (type === PLAYLIST_COMMAND_RENAME) {
+    return {
+      type: PLAYLIST_COMMAND_RENAME,
+      playlistIndex,
+      rawName: typeof rawCommand.rawName === 'string' ? rawCommand.rawName : '',
+    };
+  }
+  if (type === PLAYLIST_COMMAND_TOGGLE_AUTOPLAY) {
+    return { type: PLAYLIST_COMMAND_TOGGLE_AUTOPLAY, playlistIndex };
+  }
+  if (type === PLAYLIST_COMMAND_TOGGLE_DSP) {
+    return { type: PLAYLIST_COMMAND_TOGGLE_DSP, playlistIndex };
+  }
+  if (type === PLAYLIST_COMMAND_DELETE) {
+    return { type: PLAYLIST_COMMAND_DELETE, playlistIndex };
+  }
+  return null;
+}
+
+async function executeHostPlaylistMutationCommand(command) {
+  if (command.type === PLAYLIST_COMMAND_ADD) {
+    await addPlaylistLocally();
+    return;
+  }
+  if (command.type === PLAYLIST_COMMAND_RENAME) {
+    await renamePlaylistLocally(command.playlistIndex, command.rawName);
+    return;
+  }
+  if (command.type === PLAYLIST_COMMAND_TOGGLE_AUTOPLAY) {
+    await togglePlaylistAutoplayLocally(command.playlistIndex);
+    return;
+  }
+  if (command.type === PLAYLIST_COMMAND_TOGGLE_DSP) {
+    await togglePlaylistDspLocally(command.playlistIndex);
+    return;
+  }
+  if (command.type === PLAYLIST_COMMAND_DELETE) {
+    await deletePlaylistLocally(command.playlistIndex);
+  }
+}
+
+const hostPlaylistMutationCommandBus = new PlaybackCommandBus({
+  authorize: ({ sourceRole }) =>
+    sourceRole === ROLE_HOST
+      ? { allowed: true }
+      : { allowed: false, reason: 'ACCESS_DENIED', message: 'Только хост может менять плей-листы.' },
+  execute: (payload) => executeHostPlaylistMutationCommand(payload),
+});
+
+async function dispatchHostPlaylistMutationCommand(command) {
+  const normalizedCommand = normalizePlaylistMutationCommand(command);
+  if (!normalizedCommand) {
+    throw new Error('Некорректная команда мутации плей-листа.');
+  }
+  const result = await hostPlaylistMutationCommandBus.dispatch(
+    {
+      sourceRole: ROLE_HOST,
+      commandType: normalizedCommand.type,
+      target: 'self',
+    },
+    normalizedCommand,
+  );
+  if (!result.ok) {
+    throw new Error(result.message || 'Команда мутации плей-листа отклонена.');
+  }
+}
 
 export function setPlaylistsDeps(d) {
   Object.assign(_deps, d);
@@ -368,7 +454,7 @@ export function isServerLayoutEmpty(playlists) {
 }
 
 export function readLegacyLocalLayout(files) {
-  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY) || localStorage.getItem(LEGACY_LAYOUT_KEY);
+  const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
   if (!raw) return null;
 
   try {
@@ -380,6 +466,8 @@ export function readLegacyLocalLayout(files) {
 }
 
 export function syncLayoutFromDom() {
+  const zonesContainer = _deps.zonesContainer;
+  if (!zonesContainer) return;
   const zones = Array.from(zonesContainer.querySelectorAll('.zone'));
   const nextLayout = ensurePlaylists(state.layout).map(() => []);
 
@@ -397,7 +485,6 @@ export function syncLayoutFromDom() {
   state.playlistNames = normalizePlaylistNames(state.playlistNames, state.layout.length);
   state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
   applyDapConstraintsForCurrentLayout();
-  syncPlaylistsFromLegacyState();
 }
 
 export function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
@@ -492,7 +579,7 @@ export function disarmDapNoSilence() {
 export function clearDapInterruptedPlaybackSnapshot() {
   const previousSnapshot =
     state.dapInterruptedPlaybackSnapshot && typeof state.dapInterruptedPlaybackSnapshot === 'object'
-      ? { ...dapInterruptedPlaybackSnapshot }
+      ? { ...state.dapInterruptedPlaybackSnapshot }
       : null;
   state.dapInterruptedPlaybackSnapshot = null;
 
@@ -745,13 +832,26 @@ export async function resetPlaylists() {
 }
 
 export async function addPlaylist() {
+  if (isHostRole()) {
+    try {
+      await dispatchHostPlaylistMutationCommand({ type: PLAYLIST_COMMAND_ADD });
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось добавить плей-лист.');
+    }
+    return;
+  }
+  await addPlaylistLocally();
+}
+
+async function addPlaylistLocally() {
   state.layout = ensurePlaylists(state.layout);
   state.layout.push([]);
-  state.playlistNames = normalizePlaylistNames([...playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta([...playlistMeta, defaultPlaylistMeta()], state.layout.length);
+  state.playlistNames = normalizePlaylistNames([...state.playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta([...state.playlistMeta, defaultPlaylistMeta()], state.layout.length);
   state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...playlistAutoplay, false], state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags([...playlistDsp, false], state.playlistAutoplay, state.layout.length);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...state.playlistAutoplay, false], state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags([...state.playlistDsp, false], state.playlistAutoplay, state.layout.length);
   renderZones();
 
   try {
@@ -764,6 +864,23 @@ export async function addPlaylist() {
 }
 
 export async function renamePlaylist(playlistIndex, rawName) {
+  if (isHostRole()) {
+    try {
+      await dispatchHostPlaylistMutationCommand({
+        type: PLAYLIST_COMMAND_RENAME,
+        playlistIndex,
+        rawName,
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось переименовать плей-лист.');
+    }
+    return;
+  }
+  await renamePlaylistLocally(playlistIndex, rawName);
+}
+
+async function renamePlaylistLocally(playlistIndex, rawName) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
 
   const nextNames = state.playlistNames.slice();
@@ -795,7 +912,18 @@ export async function togglePlaylistAutoplay(playlistIndex) {
     setStatus('Автовоспроизведение может менять только хост.');
     return;
   }
+  try {
+    await dispatchHostPlaylistMutationCommand({
+      type: PLAYLIST_COMMAND_TOGGLE_AUTOPLAY,
+      playlistIndex,
+    });
+  } catch (err) {
+    console.error(err);
+    setStatus(err && err.message ? err.message : 'Не удалось изменить автопроигрывание плей-листа.');
+  }
+}
 
+async function togglePlaylistAutoplayLocally(playlistIndex) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
   if (isDapPlaylistIndex(playlistIndex)) {
     setStatus('Для DAP-плей-листа автовоспроизведение всегда включено.');
@@ -841,7 +969,18 @@ export async function togglePlaylistDsp(playlistIndex) {
     setStatus('DSP для плей-листа может менять только хост.');
     return;
   }
+  try {
+    await dispatchHostPlaylistMutationCommand({
+      type: PLAYLIST_COMMAND_TOGGLE_DSP,
+      playlistIndex,
+    });
+  } catch (err) {
+    console.error(err);
+    setStatus(err && err.message ? err.message : 'Не удалось изменить DSP для плей-листа.');
+  }
+}
 
+async function togglePlaylistDspLocally(playlistIndex) {
   if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
   if (!state.playlistAutoplay[playlistIndex]) {
     setStatus('DSP можно включить только при активном автопроигрывании.');
@@ -888,11 +1027,11 @@ export async function syncDapConfig(nextDapConfig, { successMessage = 'DAP об�
     return false;
   }
 
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
   const previousDapInterruptedPlaybackSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
   const previousDapEnabled = Boolean(previousDap.enabled);
   const previousDapIndex = _deps.normalizePlaylistTrackIndex(previousDap.playlistIndex);
@@ -998,9 +1137,10 @@ export function getLiveLockedPlaylistIndex() {
     }
   }
 
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
   const hostPlaybackIndex =
     state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
-      ? _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
+      ? _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex)
       : null;
 
   if (hostPlaybackIndex !== null) {
@@ -1011,6 +1151,7 @@ export function getLiveLockedPlaylistIndex() {
 }
 
 export function syncPlaylistHeaderActiveState() {
+  const zonesContainer = _deps.zonesContainer;
   if (!zonesContainer) return;
 
   const dapPlaylistIndex = getDapPlaylistIndex(state.dapConfig);
@@ -1019,9 +1160,10 @@ export function syncPlaylistHeaderActiveState() {
       ? _deps.normalizePlaylistTrackIndex(state.currentTrack.playlistIndex)
       : null;
   const isLocalPlaybackPaused = Boolean(state.currentTrack && state.currentAudio && state.currentAudio.paused);
+  const hostPlaybackContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
   const hostPlaybackIndex =
     state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()
-      ? _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex)
+      ? _deps.normalizePlaylistTrackIndex(hostPlaybackContext.playlistIndex)
       : null;
   const livePlaybackIndex = isHostRole() ? localPlaybackIndex : hostPlaybackIndex;
   const isLivePlaybackPaused = isHostRole() ? isLocalPlaybackPaused : Boolean(state.hostPlaybackState.paused);
@@ -1032,8 +1174,9 @@ export function syncPlaylistHeaderActiveState() {
         ? state.hostPlaybackState.dapPlayback
         : null,
   );
+  const dapPlaybackContext = _deps.normalizeTrackPlaybackContext(dapPlaybackState);
   const dapPlaybackIndex = dapPlaybackState.trackFile
-    ? _deps.normalizePlaylistTrackIndex(dapPlaybackState.playlistIndex)
+    ? _deps.normalizePlaylistTrackIndex(dapPlaybackContext.playlistIndex)
     : null;
   const isDapPlaybackPaused = Boolean(!dapPlaybackState.trackFile || dapPlaybackState.paused);
   const zones = zonesContainer.querySelectorAll('.zone');
@@ -1119,6 +1262,22 @@ export function getPlaylistDeleteEligibility(playlistIndex) {
 }
 
 export async function deletePlaylist(playlistIndex) {
+  if (isHostRole()) {
+    try {
+      await dispatchHostPlaylistMutationCommand({
+        type: PLAYLIST_COMMAND_DELETE,
+        playlistIndex,
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Не удалось удалить плей-лист.');
+    }
+    return;
+  }
+  await deletePlaylistLocally(playlistIndex);
+}
+
+async function deletePlaylistLocally(playlistIndex) {
   const eligibility = getPlaylistDeleteEligibility(playlistIndex);
   if (!eligibility.canDelete) {
     setStatus(`Удаление запрещено: ${eligibility.reason}`);
@@ -1136,7 +1295,7 @@ export async function deletePlaylist(playlistIndex) {
   const previousMeta = clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
   const previousDsp = state.playlistDsp.slice();
-  const previousDap = { ...dapConfig };
+  const previousDap = { ...state.dapConfig };
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
     state.currentTrack && typeof state.currentTrack === 'object'
@@ -1146,7 +1305,7 @@ export async function deletePlaylist(playlistIndex) {
         }
       : null;
   const previousDapInterruptedSnapshot = state.dapInterruptedPlaybackSnapshot
-    ? { ...dapInterruptedPlaybackSnapshot }
+    ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
 
   const nextLayout = previousLayout.map((playlist) => playlist.slice());
@@ -1304,6 +1463,7 @@ export function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 }
 
 export function renderZones() {
+  const zonesContainer = _deps.zonesContainer;
   if (!zonesContainer) return;
   state.zoneBodiesCache = [];
   hideCollapsedPlaylistsOverlay();
@@ -1327,7 +1487,6 @@ export function renderZones() {
     removeCollapsedPlaylistsHint();
   }
   applyDapConstraintsForCurrentLayout();
-  syncPlaylistsFromLegacyState();
   updateDapSettingsUi(state.currentRole);
   const trackOccurrence = _deps.buildTrackOccurrenceMap(state.layout);
   const renderOrder = buildPlaylistRenderOrder(state.layout.length, state.dapConfig);
@@ -1527,14 +1686,24 @@ export function renderZones() {
 
     const body = document.createElement('div');
     body.className = 'zone-body';
+    const playlistEntry = Array.isArray(state.playlists) ? state.playlists[playlistIndex] : null;
 
     const playlistCards = playlistFiles.map((file, rowIndex) => {
       const canDeleteTrack = (trackOccurrence.get(file) || 0) > 1;
+      const trackEntry =
+        playlistEntry &&
+        Array.isArray(playlistEntry.tracks) &&
+        rowIndex >= 0 &&
+        rowIndex < playlistEntry.tracks.length
+          ? playlistEntry.tracks[rowIndex]
+          : null;
       return buildTrackCard(file, '/audio', {
         draggable: true,
         orderNumber: rowIndex + 1,
         playlistIndex,
         playlistPosition: rowIndex,
+        playlistId: typeof playlistEntry?.id === 'string' ? playlistEntry.id : null,
+        trackId: typeof trackEntry?.id === 'string' ? trackEntry.id : null,
         canDelete: canDeleteTrack,
       });
     });
@@ -1638,16 +1807,16 @@ export function buildAudioCatalogSignature(files, folders) {
 }
 
 export function setPlaylistControlsLoading(isLoading) {
-  if (refreshPlaylistsBtn) {
-    refreshPlaylistsBtn.disabled = isLoading;
-    refreshPlaylistsBtn.dataset.loading = isLoading ? 'true' : 'false';
-    refreshPlaylistsBtn.textContent = isLoading ? 'Обновление...' : 'Обновить';
+  if (_deps.refreshPlaylistsBtn) {
+    _deps.refreshPlaylistsBtn.disabled = isLoading;
+    _deps.refreshPlaylistsBtn.dataset.loading = isLoading ? 'true' : 'false';
+    _deps.refreshPlaylistsBtn.textContent = isLoading ? 'Обновление...' : 'Обновить';
   }
-  if (addPlaylistBtn) {
-    addPlaylistBtn.disabled = isLoading;
+  if (_deps.addPlaylistBtn) {
+    _deps.addPlaylistBtn.disabled = isLoading;
   }
-  if (resetPlaylistsBtn) {
-    resetPlaylistsBtn.disabled = isLoading;
+  if (_deps.resetPlaylistsBtn) {
+    _deps.resetPlaylistsBtn.disabled = isLoading;
   }
 }
 
@@ -1780,19 +1949,19 @@ export function stopAudioCatalogAutoRefresh() {
 }
 
 export function initPlaylistControls() {
-  if (addPlaylistBtn) {
-    addPlaylistBtn.addEventListener('click', addPlaylist);
+  if (_deps.addPlaylistBtn) {
+    _deps.addPlaylistBtn.addEventListener('click', addPlaylist);
   }
 
-  if (refreshPlaylistsBtn) {
-    refreshPlaylistsBtn.addEventListener('click', () => {
+  if (_deps.refreshPlaylistsBtn) {
+    _deps.refreshPlaylistsBtn.addEventListener('click', () => {
       setStatus('Обновляем список файлов и плей-листов...');
       requestTracksReload({ reason: 'manual' });
     });
   }
 
-  if (resetPlaylistsBtn) {
-    resetPlaylistsBtn.addEventListener('click', resetPlaylists);
+  if (_deps.resetPlaylistsBtn) {
+    _deps.resetPlaylistsBtn.addEventListener('click', resetPlaylists);
   }
 
   setPlaylistControlsLoading(false);
@@ -1876,11 +2045,17 @@ export function serializeTrackTitleModesByTrack(trackModesState = state.trackTit
 
 export function saveTrackTitleModesByTrackSetting() {
   const serialized = serializeTrackTitleModesByTrack();
-  saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
+  if (typeof _deps.saveSetting === 'function') {
+    _deps.saveSetting(SETTINGS_KEYS.trackTitleModesByTrack, JSON.stringify(serialized));
+  }
 }
 
 export function loadTrackTitleModesByTrackSetting() {
-  state.trackTitleModesByTrack = parseTrackTitleModesByTrack(loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}'));
+  const rawValue =
+    typeof _deps.loadSetting === 'function'
+      ? _deps.loadSetting(SETTINGS_KEYS.trackTitleModesByTrack, '{}')
+      : '{}';
+  state.trackTitleModesByTrack = parseTrackTitleModesByTrack(rawValue);
 }
 
 export function trackTitleModesByTrackEqual(leftState, rightState) {
@@ -2161,7 +2336,10 @@ export function stripExtension(filename) {
 }
 
 export function renderEmpty() {
-  zonesContainer.innerHTML = '<div class="empty-state">В папке /audio не найдено аудиофайлов (mp3, wav, ogg, m4a, flac).</div>';
+  if (_deps.zonesContainer) {
+    _deps.zonesContainer.innerHTML =
+      '<div class="empty-state">В папке /audio не найдено аудиофайлов (mp3, wav, ogg, m4a, flac).</div>';
+  }
 }
 
 export function resolveTrackUiContext(playbackContext = null) {
@@ -2173,13 +2351,24 @@ export function resolveTrackUiContext(playbackContext = null) {
     playbackContext && Number.isInteger(playbackContext.playlistPosition) && playbackContext.playlistPosition >= 0
       ? playbackContext.playlistPosition
       : null;
+  const playlistId =
+    playbackContext && typeof playbackContext.playlistId === 'string' && playbackContext.playlistId.trim()
+      ? playbackContext.playlistId.trim()
+      : null;
+  const trackId =
+    playbackContext && typeof playbackContext.trackId === 'string' && playbackContext.trackId.trim()
+      ? playbackContext.trackId.trim()
+      : null;
 
-  return { playlistIndex, playlistPosition };
+  return { playlistIndex, playlistPosition, playlistId, trackId };
 }
 
 export function cardMatchesTrackContext(card, playbackContext = null) {
   if (!card || !card.dataset) return false;
-  const { playlistIndex, playlistPosition } = resolveTrackUiContext(playbackContext);
+  const { playlistIndex, playlistPosition, playlistId, trackId } = resolveTrackUiContext(playbackContext);
+  if (playlistId && trackId) {
+    return card.dataset.playlistId === playlistId && card.dataset.trackId === trackId;
+  }
   if (playlistIndex === null || playlistPosition === null) return false;
 
   const cardPlaylistIndex = Number.parseInt(card.dataset.playlistIndex || '', 10);
@@ -2519,10 +2708,7 @@ export function isTrackCardDragBlocked(card) {
   }
 
   if (state.hostPlaybackState && typeof state.hostPlaybackState.trackFile === 'string' && state.hostPlaybackState.trackFile.trim()) {
-    const hostContext = {
-      playlistIndex: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistIndex),
-      playlistPosition: _deps.normalizePlaylistTrackIndex(state.hostPlaybackState.playlistPosition),
-    };
+    const hostContext = _deps.normalizeTrackPlaybackContext(state.hostPlaybackState);
     if (isTrackCardContextActive(card, state.hostPlaybackState.trackFile, hostContext)) {
       return true;
     }
@@ -2776,7 +2962,15 @@ export function startProgressLoop(audio, fileKey) {
 export function buildTrackCard(
   file,
   basePath = '/audio',
-  { draggable = true, orderNumber = null, playlistIndex = null, playlistPosition = null, canDelete = false } = {},
+  {
+    draggable = true,
+    orderNumber = null,
+    playlistIndex = null,
+    playlistPosition = null,
+    playlistId = null,
+    trackId = null,
+    canDelete = false,
+  } = {},
 ) {
   const key = trackKey(file, basePath);
   const card = document.createElement('div');
@@ -2789,6 +2983,12 @@ export function buildTrackCard(
   }
   if (Number.isInteger(playlistPosition) && playlistPosition >= 0) {
     card.dataset.playlistPosition = String(playlistPosition);
+  }
+  if (typeof playlistId === 'string' && playlistId.trim()) {
+    card.dataset.playlistId = playlistId.trim();
+  }
+  if (typeof trackId === 'string' && trackId.trim()) {
+    card.dataset.trackId = trackId.trim();
   }
   card.dataset.canDelete = canDelete ? '1' : '0';
   if (!canDelete) {
@@ -2837,12 +3037,28 @@ export function buildTrackCard(
   playButton.dataset.state = 'play';
   playButton.title = 'Воспроизвести';
   playButton.setAttribute('aria-label', 'Воспроизвести');
-  playButton.addEventListener('click', () =>
+  playButton.addEventListener('click', async () => {
+    if (isHostRole() && typeof _deps.requestHostPlayTrack === 'function') {
+      try {
+        await _deps.requestHostPlayTrack(file, basePath, {
+          playlistId,
+          trackId,
+          playlistIndex,
+          playlistPosition,
+        });
+      } catch (err) {
+        console.error(err);
+        setStatus(err && err.message ? err.message : 'Не удалось выполнить playback-команду хоста.');
+      }
+      return;
+    }
     handlePlay(file, playButton, basePath, {
+      playlistId,
+      trackId,
       playlistIndex,
       playlistPosition,
-    }),
-  );
+    });
+  });
   addToMultiMap(state.buttonsByFile, key, playButton);
 
   card.append(order, name, durationLabel, playButton);
@@ -2893,10 +3109,20 @@ export function resolveSequentialNextTrack(track, { requireAutoplay = false } = 
 
   const nextFile = playlist[nextIndex];
   if (typeof nextFile !== 'string' || !nextFile) return null;
+  const playlistEntry = Array.isArray(state.playlists) ? state.playlists[preferredPlaylistIndex] : null;
+  const trackEntry =
+    playlistEntry &&
+    Array.isArray(playlistEntry.tracks) &&
+    nextIndex >= 0 &&
+    nextIndex < playlistEntry.tracks.length
+      ? playlistEntry.tracks[nextIndex]
+      : null;
 
   return {
     file: nextFile,
     basePath: '/audio',
+    playlistId: typeof playlistEntry?.id === 'string' ? playlistEntry.id : null,
+    trackId: typeof trackEntry?.id === 'string' ? trackEntry.id : null,
     playlistIndex: preferredPlaylistIndex,
     playlistPosition: nextIndex,
   };
@@ -2925,9 +3151,19 @@ export function resolveAutoplayNextTrack(finishedTrack) {
       const wrappedNextIndex = (currentIndex + 1) % dapPlaylist.length;
       const wrappedNextFile = dapPlaylist[wrappedNextIndex];
       if (typeof wrappedNextFile === 'string' && wrappedNextFile) {
+        const playlistEntry = Array.isArray(state.playlists) ? state.playlists[dapPlaylistIndex] : null;
+        const trackEntry =
+          playlistEntry &&
+          Array.isArray(playlistEntry.tracks) &&
+          wrappedNextIndex >= 0 &&
+          wrappedNextIndex < playlistEntry.tracks.length
+            ? playlistEntry.tracks[wrappedNextIndex]
+            : null;
         return {
           file: wrappedNextFile,
           basePath: '/audio',
+          playlistId: typeof playlistEntry?.id === 'string' ? playlistEntry.id : null,
+          trackId: typeof trackEntry?.id === 'string' ? trackEntry.id : null,
           playlistIndex: dapPlaylistIndex,
           playlistPosition: wrappedNextIndex,
         };
@@ -2937,9 +3173,16 @@ export function resolveAutoplayNextTrack(finishedTrack) {
 
   const firstDapFile = dapPlaylist[0];
   if (typeof firstDapFile !== 'string' || !firstDapFile) return null;
+  const firstDapPlaylistEntry = Array.isArray(state.playlists) ? state.playlists[dapPlaylistIndex] : null;
+  const firstDapTrackEntry =
+    firstDapPlaylistEntry && Array.isArray(firstDapPlaylistEntry.tracks) && firstDapPlaylistEntry.tracks[0]
+      ? firstDapPlaylistEntry.tracks[0]
+      : null;
   return {
     file: firstDapFile,
     basePath: '/audio',
+    playlistId: typeof firstDapPlaylistEntry?.id === 'string' ? firstDapPlaylistEntry.id : null,
+    trackId: typeof firstDapTrackEntry?.id === 'string' ? firstDapTrackEntry.id : null,
     playlistIndex: dapPlaylistIndex,
     playlistPosition: 0,
   };

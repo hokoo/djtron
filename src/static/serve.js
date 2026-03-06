@@ -45,6 +45,7 @@ function serveFile(req, res, filePath, contentType) {
     const headers = {
       'Content-Type': contentType,
       'Content-Length': stat.size,
+      'Cache-Control': 'no-store',
     };
 
     if (req.method === 'HEAD') {

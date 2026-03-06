@@ -1,5 +1,4 @@
 // public/modules/state.js — shared mutable state and immutable constants
-import { legacyDapToM2A, legacyToPlaylists, m2aDapToLegacy, playlistsToLegacy } from './model-converter.js';
 
 export const SETTINGS_KEYS = {
   overlayTime: 'player:overlayTime',
@@ -14,7 +13,6 @@ export const SETTINGS_KEYS = {
   trackTitleModesByTrack: 'player:trackTitleModesByTrack',
 };
 export const LAYOUT_STORAGE_KEY = 'player:playlists';
-export const LEGACY_LAYOUT_KEY = 'player:zones';
 export const CLIENT_ID_STORAGE_KEY = 'djtron:clientId';
 export const RUNTIME_LOCAL_OVERRIDE_KEYS = {
   allowContextMenu: ['djtron:config:allowContextMenu', 'djtron:allowContextMenu'],
@@ -206,20 +204,17 @@ export const state = {
       currentTime: 0,
       duration: null,
       playlistId: null,
-      playlistIndex: null,
-      playlistPosition: null,
       interrupted: false,
       updatedAt: 0,
     },
     playlistId: null,
-    playlistIndex: null,
-    playlistPosition: null,
     updatedAt: 0,
     sourceClientId: null,
   },
   hostPlaybackSyncInFlight: false,
   hostPlaybackSyncQueued: false,
   hostPlaybackSyncQueuedForce: false,
+  hostPlaybackSyncReady: false,
   lastHostPlaybackSyncAt: 0,
   lastHostLiveSeekSyncAt: 0,
   hostProgressRaf: null,
@@ -368,6 +363,57 @@ export const state = {
   collapsedPlaylistLayoutLength: null,
 };
 
+function legacyToPlaylists(stateSnapshot) {
+  if (!stateSnapshot) return [];
+  if (Array.isArray(stateSnapshot.playlists)) return stateSnapshot.playlists;
+
+  const layout = Array.isArray(stateSnapshot.layout) ? stateSnapshot.layout : [];
+  const names = Array.isArray(stateSnapshot.playlistNames) ? stateSnapshot.playlistNames : [];
+  const meta = Array.isArray(stateSnapshot.playlistMeta) ? stateSnapshot.playlistMeta : [];
+  const autoplay = Array.isArray(stateSnapshot.playlistAutoplay) ? stateSnapshot.playlistAutoplay : [];
+  const dsp = Array.isArray(stateSnapshot.playlistDsp) ? stateSnapshot.playlistDsp : [];
+
+  return layout.map((trackPaths, index) => {
+    const playlistId = `p-${index}`;
+    const tracks = (trackPaths || []).map((filePath, trackIdx) => ({
+      id: `t-${index}-${trackIdx}`,
+      src: `/audio/${filePath}`,
+      meta: {
+        originalPath: filePath,
+        titleMode: stateSnapshot.trackTitleModesByTrack
+          ? stateSnapshot.trackTitleModesByTrack[filePath]
+          : undefined,
+      },
+    }));
+
+    const metaEntry = meta[index] || {};
+    return {
+      id: playlistId,
+      name: names[index] || `Playlist ${index + 1}`,
+      type: metaEntry.type || 'manual',
+      tracks,
+      settings: {
+        autoPlayEnabled: Boolean(autoplay[index]),
+        dspEnabled: Boolean(dsp[index]),
+      },
+      uiState: null,
+    };
+  });
+}
+
+function legacyDapToM2A(dapConfig) {
+  if (!dapConfig) return { enabled: false, playlistId: null, volumePercent: DAP_DEFAULT_VOLUME_PERCENT };
+  const explicitPlaylistId =
+    typeof dapConfig.playlistId === 'string' && dapConfig.playlistId.trim()
+      ? dapConfig.playlistId.trim()
+      : null;
+  return {
+    enabled: Boolean(dapConfig.enabled),
+    playlistId: explicitPlaylistId || (typeof dapConfig.playlistIndex === 'number' ? `p-${dapConfig.playlistIndex}` : null),
+    volumePercent: dapConfig.volumePercent || DAP_DEFAULT_VOLUME_PERCENT,
+  };
+}
+
 function serializeTrackTitleModesByTrackValue(value) {
   if (value instanceof Map) {
     const result = {};
@@ -435,24 +481,6 @@ export function syncPlaylistsFromLegacyState() {
   };
 
   return state.playlists;
-}
-
-export function syncLegacyStateFromPlaylists() {
-  const playlists = Array.isArray(state.playlists) ? state.playlists : [];
-  const legacy = playlistsToLegacy(playlists);
-  state.layout = Array.isArray(legacy.layout) ? legacy.layout : [[]];
-  state.playlistNames = Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [];
-  state.playlistMeta = Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [];
-  state.playlistAutoplay = Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [];
-  state.playlistDsp = Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [];
-
-  const legacyDap = m2aDapToLegacy(state.dapConfig, playlists);
-  state.dapConfig = {
-    ...(state.dapConfig || {}),
-    playlistIndex: legacyDap.playlistIndex,
-  };
-
-  return state.layout;
 }
 
 syncPlaylistsFromLegacyState();

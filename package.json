@@ -1,10 +1,17 @@
 {
   "name": "djtron-player",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "djTRON player for discos and music events with per-track controls and overlay transitions.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test"
+    "sync:playback-lib": "node scripts/sync-playback-lib.js",
+    "start": "npm run --silent sync:playback-lib && node server.js",
+    "lint:frontend": "eslint public/**/*.js --no-config-lookup --config eslint.frontend.config.mjs",
+    "test": "npm run --silent sync:playback-lib && npm run --silent lint:frontend && node --test",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "eslint": "^9.22.0"
   }
 }
