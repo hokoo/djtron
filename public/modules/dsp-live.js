@@ -11,6 +11,9 @@ import { trackKey } from './utils.js';
 
 const _deps = {};
 const LATE_SOURCE_REMAINING_EPSILON_SECONDS = 0.35;
+// Skip DSP transition if the source has less than this many seconds of overlap remaining.
+// Lets the source end naturally, then the ended-event path retries DSP from offset 0.
+const DSP_MIN_USEFUL_REMAINING_SECONDS = 3;
 
 // Stores last known ready pair: "fromFile|toFile" → { nextTrack, sliceSeconds }
 // Survives DSP state resets so we can immediately re-arm on track replay.
@@ -524,6 +527,21 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     currentAudioEnded: state.currentAudio && state.currentAudio.ended,
     outputUrl: details.outputUrl,
   });
+
+  // If the source track has too little time remaining for a useful crossfade, skip
+  // the DSP transition now and let the track end naturally.  The 'ended' event
+  // path will retry via tryAutoplayNextTrack → tryStartAutoplayWithDspTransition
+  // with remaining ≈ 0 (epsilon) which starts the DSP from offset 0 for a full fade-in.
+  const remainingSecondsAtTrigger = sourceSegmentSeconds - transitionStartOffsetSeconds;
+  if (remainingSecondsAtTrigger < DSP_MIN_USEFUL_REMAINING_SECONDS) {
+    console.warn('[DSP-DIAG] tryStartAutoplayWithDspTransition SKIP: remaining DSP overlap too short, letting source end', {
+      remainingSecondsAtTrigger,
+      transitionStartOffsetSeconds,
+      sourceSegmentSeconds,
+      threshold: DSP_MIN_USEFUL_REMAINING_SECONDS,
+    });
+    return false;
+  }
 
   if (_deps.isDspTransitionPlaybackActive()) {
     _deps.stopDspTransitionPlayback({ stopAudio: true, clearTrackState: true });
