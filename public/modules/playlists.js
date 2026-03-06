@@ -1663,19 +1663,18 @@ export function mountVirtualizedPlaylistCards(zoneBody, playlistCards) {
 export function renderZones() {
   const zonesContainer = _deps.zonesContainer;
   if (!zonesContainer) return;
+  const normalizedLayoutLength = ensurePlaylists(state.layout).length;
   state.zoneBodiesCache = [];
   hideCollapsedPlaylistsOverlay();
   zonesContainer.innerHTML = '';
   _deps.resetTrackReferences();
-  state.layout = ensurePlaylists(state.layout);
-  state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
   if (_deps.isTouchPlaylistCollapseEnabled()) {
-    if (state.collapsedPlaylistLayoutLength !== null && state.collapsedPlaylistLayoutLength !== state.layout.length) {
+    if (state.collapsedPlaylistLayoutLength !== null && state.collapsedPlaylistLayoutLength !== normalizedLayoutLength) {
       state.collapsedPlaylistIndices.clear();
       hideCollapsedPlaylistsOverlay();
     }
-    state.collapsedPlaylistLayoutLength = state.layout.length;
-    _deps.pruneCollapsedPlaylistIndices(state.layout.length);
+    state.collapsedPlaylistLayoutLength = normalizedLayoutLength;
+    _deps.pruneCollapsedPlaylistIndices(normalizedLayoutLength);
   } else {
     state.collapsedPlaylistLayoutLength = null;
     if (state.collapsedPlaylistIndices.size) {

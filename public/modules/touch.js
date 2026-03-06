@@ -1450,26 +1450,26 @@ export async function reorderPlaylistsByHeaderDrag(sourcePlaylistIndex, targetPl
 }
 
 async function reorderPlaylistsByHeaderDragLocally(sourcePlaylistIndex, targetPlaylistIndex) {
-  state.layout = _deps.ensurePlaylists(state.layout);
+  const normalizedCurrentLayout = _deps.ensurePlaylists(state.layout);
   const sourceIndex = _deps.normalizePlaylistTrackIndex(sourcePlaylistIndex);
   const normalizedTargetIndex =
     targetPlaylistIndex === null || targetPlaylistIndex === undefined
       ? null
       : _deps.normalizePlaylistTrackIndex(targetPlaylistIndex);
   if (sourceIndex === null) return;
-  if (sourceIndex < 0 || sourceIndex >= state.layout.length) return;
-  if (normalizedTargetIndex !== null && (normalizedTargetIndex < 0 || normalizedTargetIndex >= state.layout.length)) return;
+  if (sourceIndex < 0 || sourceIndex >= normalizedCurrentLayout.length) return;
+  if (normalizedTargetIndex !== null && (normalizedTargetIndex < 0 || normalizedTargetIndex >= normalizedCurrentLayout.length)) return;
 
   const destinationIndex =
     normalizedTargetIndex === null
-      ? state.layout.length - 1
+      ? normalizedCurrentLayout.length - 1
       : sourceIndex < normalizedTargetIndex
         ? normalizedTargetIndex - 1
         : normalizedTargetIndex;
-  if (!Number.isInteger(destinationIndex) || destinationIndex < 0 || destinationIndex >= state.layout.length) return;
+  if (!Number.isInteger(destinationIndex) || destinationIndex < 0 || destinationIndex >= normalizedCurrentLayout.length) return;
   if (sourceIndex === destinationIndex) return;
 
-  const previousLayout = _deps.cloneLayoutState(state.layout);
+  const previousLayout = _deps.cloneLayoutState(normalizedCurrentLayout);
   const previousNames = state.playlistNames.slice();
   const previousMeta = _deps.clonePlaylistMetaState(state.playlistMeta);
   const previousAutoplay = state.playlistAutoplay.slice();
