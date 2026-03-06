@@ -412,7 +412,6 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
   const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(normalizedSlice, transitionDetails);
 
   const sourceActive = isCurrentSourceTrackActive(sourceTrack);
-  const userSeeked = state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked === 'true';
 
   if (!sourceActive) {
     console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (source inactive)', {
@@ -428,7 +427,7 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
   const sourceCurrentTime = Number.isFinite(state.currentAudio.currentTime) ? Math.max(0, state.currentAudio.currentTime) : null;
   if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || sourceCurrentTime === null) {
     console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (no duration/time)', {
-      sourceDuration, sourceCurrentTime, userSeeked,
+      sourceDuration, sourceCurrentTime,
     });
     return 0;
   }
@@ -436,7 +435,7 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
   const remainingSeconds = Math.max(0, sourceDuration - sourceCurrentTime);
   if (remainingSeconds <= LATE_SOURCE_REMAINING_EPSILON_SECONDS) {
     console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds → 0 (late remaining)', {
-      remainingSeconds, LATE_SOURCE_REMAINING_EPSILON_SECONDS, userSeeked,
+      remainingSeconds, LATE_SOURCE_REMAINING_EPSILON_SECONDS,
     });
     return 0;
   }
@@ -448,7 +447,7 @@ export function resolveDspTransitionStartOffsetSeconds(sourceTrack, sliceSeconds
 
   console.warn('[DSP-DIAG] resolveDspTransitionStartOffsetSeconds', {
     normalizedSlice, sourceSegmentSeconds, sourceDuration, sourceCurrentTime,
-    remainingSeconds, offsetSeconds, result, userSeeked,
+    remainingSeconds, offsetSeconds, result,
   });
   return result;
 }
@@ -520,7 +519,6 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     preArmedSliceWindowSeconds,
     preArmedSliceWindowSecondsSnapshot,
     sourceTrackActiveAtPlanning,
-    userSeeked: state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked,
     currentAudioCurrentTime: state.currentAudio && state.currentAudio.currentTime,
     currentAudioDuration: state.currentAudio && state.currentAudio.duration,
     currentAudioPaused: state.currentAudio && state.currentAudio.paused,

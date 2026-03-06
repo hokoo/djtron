@@ -360,16 +360,10 @@ export function seekCurrentPlaybackToSeconds(nextTimeSeconds) {
   syncBrowserAudioEngineSource(state.currentTrack, state.currentAudio);
   try {
     liveAudioEngine.seekTo(safeNextTime);
-    if (state.currentAudio && state.currentAudio.dataset) {
-      state.currentAudio.dataset.userSeeked = 'true';
-    }
     return true;
   } catch (err) {
     try {
       state.currentAudio.currentTime = safeNextTime;
-      if (state.currentAudio && state.currentAudio.dataset) {
-        state.currentAudio.dataset.userSeeked = 'true';
-      }
       return true;
     } catch (fallbackErr) {
       return false;
@@ -425,7 +419,6 @@ export function maybeTriggerAutoplayOverlayTransition(audio, track) {
     audioDuration: audio.duration,
     audioCurrentTime: audio.currentTime,
     audioEnded: audio.ended,
-    userSeeked: audio.dataset && audio.dataset.userSeeked,
   });
 
   audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_PENDING;
@@ -450,7 +443,6 @@ export function createAudio(track) {
   audio.preload = 'metadata';
   audio.load();
   audio.dataset.autoplayOverlayState = AUTOPLAY_OVERLAY_STATE_IDLE;
-  audio.dataset.userSeeked = 'false';
 
   audio.addEventListener('timeupdate', () => {
     maybeTriggerAutoplayOverlayTransition(audio, track);
@@ -469,7 +461,6 @@ export function createAudio(track) {
       trackKey: key,
       overlayState,
       isAutoplayOverlayHandoff,
-      userSeeked: audio.dataset && audio.dataset.userSeeked,
       audioCurrentTime: audio.currentTime,
       audioDuration: audio.duration,
     });
