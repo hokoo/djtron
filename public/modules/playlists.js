@@ -263,6 +263,24 @@ function syncPlaylistsStateForMutation(playlistsState, { dapConfig = state.dapCo
   return state.playlists;
 }
 
+function applyLegacyLayoutProjection({
+  layout,
+  playlistNames,
+  playlistMeta,
+  playlistAutoplay,
+  playlistDsp,
+  dapConfig,
+}) {
+  state.layout = ensurePlaylists(layout);
+  state.playlistNames = normalizePlaylistNames(playlistNames, state.layout.length);
+  state.playlistMeta = normalizePlaylistMeta(playlistMeta, state.layout.length);
+  state.dapConfig = normalizeDapConfig(dapConfig, state.layout.length, dapConfig);
+  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(playlistAutoplay, state.dapConfig, state.layout.length);
+  state.playlistDsp = normalizePlaylistDspFlags(playlistDsp, state.playlistAutoplay, state.layout.length);
+  syncPlaylistsFromLegacyState();
+  return state.playlists;
+}
+
 export function cloneLayoutState(layoutState) {
   return ensurePlaylists(layoutState).map((playlist) => playlist.slice());
 }
@@ -581,11 +599,14 @@ export function dapConfigEqual(left, right, expectedLength) {
 }
 
 export function applyDapConstraintsForCurrentLayout() {
-  state.layout = ensurePlaylists(state.layout);
-  state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(state.playlistAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags(state.playlistDsp, state.playlistAutoplay, state.layout.length);
-  syncPlaylistsFromLegacyState();
+  applyLegacyLayoutProjection({
+    layout: state.layout,
+    playlistNames: state.playlistNames,
+    playlistMeta: state.playlistMeta,
+    playlistAutoplay: state.playlistAutoplay,
+    playlistDsp: state.playlistDsp,
+    dapConfig: state.dapConfig,
+  });
 }
 
 export function normalizeLayoutForFiles(rawLayout, files) {
@@ -626,10 +647,14 @@ export function syncLayoutFromDom() {
       .filter(Boolean);
   });
 
-  state.layout = ensurePlaylists(nextLayout);
-  state.playlistNames = normalizePlaylistNames(state.playlistNames, state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta(state.playlistMeta, state.layout.length);
-  applyDapConstraintsForCurrentLayout();
+  applyLegacyLayoutProjection({
+    layout: nextLayout,
+    playlistNames: state.playlistNames,
+    playlistMeta: state.playlistMeta,
+    playlistAutoplay: state.playlistAutoplay,
+    playlistDsp: state.playlistDsp,
+    dapConfig: state.dapConfig,
+  });
 }
 
 export function normalizeDapVolumePercent(value, fallback = DAP_DEFAULT_VOLUME_PERCENT) {
@@ -2037,13 +2062,15 @@ export async function loadTracks({ reason = 'manual', audioResult = null } = {})
   } catch (err) {
     console.error(err);
     const fallback = ensureFolderPlaylistsCoverage([state.availableFiles.filter((file) => !file.includes('/'))], [], []);
-    state.layout = normalizeLayoutForFiles(fallback.layout, state.availableFiles);
-    state.playlistNames = normalizePlaylistNames(fallback.playlistNames, state.layout.length);
-    state.playlistMeta = normalizePlaylistMeta(fallback.playlistMeta, state.layout.length);
-    state.dapConfig = normalizeDapConfig(DEFAULT_DAP_CONFIG, state.layout.length, DEFAULT_DAP_CONFIG);
-    state.playlistAutoplay = normalizePlaylistAutoplayWithDap([], state.dapConfig, state.layout.length);
-    state.playlistDsp = normalizePlaylistDspFlags([], state.playlistAutoplay, state.layout.length);
-    syncPlaylistsFromLegacyState();
+    const fallbackLayout = normalizeLayoutForFiles(fallback.layout, state.availableFiles);
+    applyLegacyLayoutProjection({
+      layout: fallbackLayout,
+      playlistNames: fallback.playlistNames,
+      playlistMeta: fallback.playlistMeta,
+      playlistAutoplay: [],
+      playlistDsp: [],
+      dapConfig: DEFAULT_DAP_CONFIG,
+    });
     setStatus('Не удалось загрузить состояние плей-листов, используется локальная раскладка.');
   }
 
@@ -2631,13 +2658,14 @@ export function scheduleTrackRelocationHighlightTimer() {
 export function applyTrackRelocationUndoSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return;
 
-  state.layout = ensurePlaylists(cloneLayoutState(snapshot.layout));
-  state.playlistNames = normalizePlaylistNames(snapshot.playlistNames, state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta(snapshot.playlistMeta, state.layout.length);
-  state.dapConfig = normalizeDapConfig(snapshot.dapConfig, state.layout.length, snapshot.dapConfig);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(snapshot.playlistAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags(snapshot.playlistDsp, state.playlistAutoplay, state.layout.length);
-  syncPlaylistsFromLegacyState();
+  applyLegacyLayoutProjection({
+    layout: cloneLayoutState(snapshot.layout),
+    playlistNames: snapshot.playlistNames,
+    playlistMeta: snapshot.playlistMeta,
+    playlistAutoplay: snapshot.playlistAutoplay,
+    playlistDsp: snapshot.playlistDsp,
+    dapConfig: snapshot.dapConfig,
+  });
 }
 
 export function renderTrackRelocationUndoButton(card, action) {
