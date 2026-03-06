@@ -565,14 +565,18 @@ function normalizePlayNextTrackFile(rawCommand) {
   return toLegacyFilePathFromTrack({ src: srcFromRef });
 }
 
-export function normalizeIncomingPlaybackCommand(rawCommand) {
+export function normalizeIncomingPlaybackCommand(
+  rawCommand,
+  { defaultOrigin = 'ui', defaultRole = null } = {},
+) {
   if (!rawCommand || typeof rawCommand !== 'object') return null;
 
   const type = typeof rawCommand.type === 'string' ? rawCommand.type.trim() : '';
   const sourceRole = normalizeCommandSourceRole(rawCommand.sourceRole)
-    || normalizeCommandSourceRole(rawCommand.actorRole);
+    || normalizeCommandSourceRole(rawCommand.actorRole)
+    || normalizeCommandSourceRole(defaultRole);
   const actorRole = normalizeCommandSourceRole(rawCommand.actorRole) || sourceRole;
-  const origin = normalizeCommandOrigin(rawCommand.origin, sourceRole ? 'api' : 'ui');
+  const origin = normalizeCommandOrigin(rawCommand.origin, defaultOrigin);
   const sourceClientId = typeof rawCommand.sourceClientId === 'string' ? rawCommand.sourceClientId : null;
   const sourceUsername = typeof rawCommand.sourceUsername === 'string' ? rawCommand.sourceUsername : null;
   const target = typeof rawCommand.target === 'string' && rawCommand.target.trim() ? rawCommand.target.trim() : 'host';
@@ -714,7 +718,10 @@ export function normalizeIncomingPlaybackCommand(rawCommand) {
 }
 
 export async function sendLivePlaybackCommand(command) {
-  const normalizedCommand = normalizeIncomingPlaybackCommand(command);
+  const normalizedCommand = normalizeIncomingPlaybackCommand(command, {
+    defaultOrigin: 'ui',
+    defaultRole: state.currentRole || ROLE_SLAVE,
+  });
   if (!normalizedCommand) {
     throw new Error('Некорректная live-команда');
   }
@@ -739,7 +746,11 @@ export async function dispatchHostPlaybackCommand(command) {
   const normalizedCommand = normalizeIncomingPlaybackCommand({
     ...command,
     sourceRole: ROLE_HOST,
+    actorRole: ROLE_HOST,
     target: 'self',
+  }, {
+    defaultOrigin: 'ui',
+    defaultRole: ROLE_HOST,
   });
   if (!normalizedCommand) {
     throw new Error('Некорректная playback-команда хоста');
@@ -763,7 +774,11 @@ export async function dispatchLocalPlaybackCommand(command) {
   const normalizedCommand = normalizeIncomingPlaybackCommand({
     ...command,
     sourceRole,
+    actorRole: sourceRole,
     target: 'self',
+  }, {
+    defaultOrigin: 'ui',
+    defaultRole: sourceRole,
   });
   if (!normalizedCommand) {
     throw new Error('Некорректная локальная playback-команда');
@@ -905,7 +920,10 @@ export async function requestHostSeekCurrentPlayback(positionRatio, { finalize =
 export async function executeIncomingPlaybackCommand(commandPayload) {
   if (!isHostRole()) return;
 
-  const command = normalizeIncomingPlaybackCommand(commandPayload);
+  const command = normalizeIncomingPlaybackCommand(commandPayload, {
+    defaultOrigin: 'api',
+    defaultRole: ROLE_COHOST,
+  });
   if (!command) return;
   if (command.sourceClientId && command.sourceClientId === _deps.clientId) return;
 

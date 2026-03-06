@@ -73,7 +73,10 @@ class PlaybackGateway {
       return fallback;
     };
     const sourceRole = auth.isServer ? this._ROLE_HOST : this._sanitizeSessionRole(auth.role);
-    const explicitActorRole = body && Object.prototype.hasOwnProperty.call(body, 'actorRole')
+    const explicitActorRole = body
+      && Object.prototype.hasOwnProperty.call(body, 'actorRole')
+      && typeof body.actorRole === 'string'
+      && body.actorRole.trim()
       ? this._sanitizeSessionRole(body.actorRole)
       : null;
     const actorRole = explicitActorRole || sourceRole;

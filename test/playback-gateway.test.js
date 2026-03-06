@@ -135,6 +135,23 @@ describe('PlaybackGateway', () => {
     assert.equal(result.payload.command.sourceRole, 'co-host');
   });
 
+  it('dispatchCommand ignores empty actorRole and falls back to auth role', async () => {
+    let dispatched = null;
+    const { gateway } = createTestGateway({
+      sanitizeSessionRole: (value) => value || 'slave',
+      commandBus: {
+        dispatch: async (ctx, payload) => { dispatched = { ctx, payload }; return { ok: true }; },
+      },
+    });
+
+    const auth = { isServer: false, role: 'co-host', username: 'dj' };
+    const result = await gateway.dispatchCommand({ type: 'toggle-current', actorRole: null }, auth);
+    assert.equal(result.ok, true);
+    assert.ok(dispatched);
+    assert.equal(dispatched.payload.sourceRole, 'co-host');
+    assert.equal(dispatched.payload.actorRole, 'co-host');
+  });
+
   it('sanitizePlaybackCommand normalizes stop command with target', () => {
     const command = PlaybackGateway.sanitizePlaybackCommand(
       { type: 'stop', target: 'self' },
