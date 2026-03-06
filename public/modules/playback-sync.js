@@ -1629,12 +1629,25 @@ export function requestHostPlaybackSync(force = false) {
     });
 }
 
-function toM2ADapConfigForPayload(dapConfig) {
+function resolveDapPlaylistIdForPayload(dapConfig, playlists) {
   const safeDapConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
-  const playlistId =
-    typeof safeDapConfig.playlistId === 'string' && safeDapConfig.playlistId.trim()
-      ? safeDapConfig.playlistId.trim()
-      : null;
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  const explicitPlaylistId = normalizePlaybackIdentity(safeDapConfig.playlistId, 64);
+  if (explicitPlaylistId && safePlaylists.some((playlist) => normalizePlaybackIdentity(playlist && playlist.id, 64) === explicitPlaylistId)) {
+    return explicitPlaylistId;
+  }
+
+  const playlistIndex = normalizePlaylistTrackIndex(safeDapConfig.playlistIndex);
+  if (playlistIndex === null || playlistIndex < 0 || playlistIndex >= safePlaylists.length) {
+    return null;
+  }
+
+  return normalizePlaybackIdentity(safePlaylists[playlistIndex] && safePlaylists[playlistIndex].id, 64);
+}
+
+function toM2ADapConfigForPayload(dapConfig, playlists = []) {
+  const safeDapConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
+  const playlistId = resolveDapPlaylistIdForPayload(safeDapConfig, playlists);
   const volumePercent = Number.isFinite(Number(safeDapConfig.volumePercent))
     ? Number(safeDapConfig.volumePercent)
     : (DEFAULT_DAP_CONFIG.volumePercent || 5);
@@ -1774,11 +1787,11 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
     dapConfig: payloadDapConfig,
     playlists: sourcePlaylists,
   });
-  const payloadPlaylists = toLayoutPayloadPlaylists(sourcePlaylists);
+  const payloadPlaylists = toLayoutPayloadPlaylists(Array.isArray(state.playlists) ? state.playlists : sourcePlaylists);
 
   const { ok, data } = await api.postLayout({
     playlists: payloadPlaylists,
-    dapConfig: toM2ADapConfigForPayload(payloadDapConfig),
+    dapConfig: toM2ADapConfigForPayload(payloadDapConfig, payloadPlaylists),
     trackTitleModesByTrack: payloadTrackTitleModes,
     clientId: _deps.clientId,
   });
