@@ -1,6 +1,6 @@
 // public/modules/playlists.js — playlist management, track cards, audio catalog
 
-import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncPlaylistsFromLegacyState } from './state.js';
+import { AUDIO_CATALOG_POLL_INTERVAL_MS, DAP_DEFAULT_VOLUME_PERCENT, DAP_MAX_VOLUME_PERCENT, DAP_MIN_VOLUME_PERCENT, DEFAULT_DAP_CONFIG, PLAYLIST_NAME_MAX_LENGTH, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, PLAYLIST_VIRTUALIZATION_FALLBACK_VIEWPORT_PX, PLAYLIST_VIRTUALIZATION_MIN_ITEMS, PLAYLIST_VIRTUALIZATION_OVERSCAN_ROWS, PLAYLIST_VIRTUALIZATION_ROW_HEIGHT_PX, ROLE_HOST, SETTINGS_KEYS, TRACK_RELOCATE_HIGHLIGHT_MS, TRACK_TITLE_MODE_ATTRIBUTES, TRACK_TITLE_MODE_FILE, state, syncLegacyStateFromPlaylists, syncPlaylistsFromLegacyState } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio, getEffectiveLiveVolume, setLivePlaybackVolume } from './audio.js';
 import { isCoHostRole, isHostRole, isRemoteLiveMirrorRole, isSlaveRole } from './roles.js';
@@ -104,6 +104,163 @@ async function dispatchHostPlaylistMutationCommand(command) {
 
 export function setPlaylistsDeps(d) {
   Object.assign(_deps, d);
+}
+
+function cloneTracksForMutation(tracks, playlistIndex) {
+  if (!Array.isArray(tracks)) return [];
+  return tracks.map((track, trackIndex) => ({
+    ...(track && typeof track === 'object' ? track : {}),
+    id:
+      track && typeof track.id === 'string' && track.id.trim()
+        ? track.id.trim()
+        : `t-${playlistIndex}-${trackIndex}`,
+    src: typeof track?.src === 'string' ? track.src : '',
+    meta: track && track.meta && typeof track.meta === 'object' ? { ...track.meta } : {},
+  }));
+}
+
+function clonePlaylistsForMutation(playlistsState = state.playlists) {
+  const safePlaylists = Array.isArray(playlistsState) ? playlistsState : [];
+  return safePlaylists.map((playlist, playlistIndex) => {
+    const safePlaylist = playlist && typeof playlist === 'object' ? playlist : {};
+    const safeSettings = safePlaylist.settings && typeof safePlaylist.settings === 'object' ? safePlaylist.settings : {};
+    return {
+      ...safePlaylist,
+      id:
+        typeof safePlaylist.id === 'string' && safePlaylist.id.trim()
+          ? safePlaylist.id.trim()
+          : `p-${playlistIndex}`,
+      name:
+        typeof safePlaylist.name === 'string'
+          ? safePlaylist.name
+          : defaultPlaylistName(playlistIndex),
+      type: safePlaylist.type === PLAYLIST_TYPE_FOLDER ? PLAYLIST_TYPE_FOLDER : PLAYLIST_TYPE_MANUAL,
+      settings: {
+        autoPlayEnabled: Boolean(safeSettings.autoPlayEnabled),
+        dspEnabled: Boolean(safeSettings.dspEnabled),
+      },
+      tracks: cloneTracksForMutation(safePlaylist.tracks, playlistIndex),
+      uiState:
+        typeof safePlaylist.uiState === 'string' && safePlaylist.uiState
+          ? safePlaylist.uiState
+          : null,
+    };
+  });
+}
+
+function ensurePlaylistsForMutation() {
+  if (Array.isArray(state.playlists)) {
+    return clonePlaylistsForMutation(state.playlists);
+  }
+  return clonePlaylistsForMutation(syncPlaylistsFromLegacyState());
+}
+
+function buildNextPlaylistId(playlistsState) {
+  const usedIds = new Set();
+  const safePlaylists = Array.isArray(playlistsState) ? playlistsState : [];
+  safePlaylists.forEach((playlist) => {
+    if (!playlist || typeof playlist !== 'object') return;
+    if (typeof playlist.id !== 'string') return;
+    const normalizedId = playlist.id.trim();
+    if (!normalizedId) return;
+    usedIds.add(normalizedId);
+  });
+  let cursor = safePlaylists.length;
+  let candidate = `p-${cursor}`;
+  while (usedIds.has(candidate)) {
+    cursor += 1;
+    candidate = `p-${cursor}`;
+  }
+  return candidate;
+}
+
+function resolveDapPlaylistId(config, playlistsState) {
+  const safeConfig = config && typeof config === 'object' ? config : {};
+  const safePlaylists = Array.isArray(playlistsState) ? playlistsState : [];
+  if (typeof safeConfig.playlistId === 'string' && safeConfig.playlistId.trim()) {
+    const explicitId = safeConfig.playlistId.trim();
+    if (safePlaylists.some((playlist) => playlist && playlist.id === explicitId)) {
+      return explicitId;
+    }
+  }
+  const playlistIndex = _deps.normalizePlaylistTrackIndex(safeConfig.playlistIndex);
+  if (playlistIndex !== null && playlistIndex >= 0 && playlistIndex < safePlaylists.length) {
+    const playlistEntry = safePlaylists[playlistIndex];
+    if (playlistEntry && typeof playlistEntry.id === 'string' && playlistEntry.id.trim()) {
+      return playlistEntry.id.trim();
+    }
+  }
+  return null;
+}
+
+function normalizeDapConfigForPlaylistsMutation(config, playlistsState) {
+  const safeConfig = config && typeof config === 'object' ? config : {};
+  const playlistId = resolveDapPlaylistId(safeConfig, playlistsState);
+  const playlistIndex = _deps.normalizePlaylistTrackIndex(safeConfig.playlistIndex);
+  const volumePercent = normalizeDapVolumePercent(safeConfig.volumePercent, DAP_DEFAULT_VOLUME_PERCENT);
+  const enabled = Boolean(safeConfig.enabled && playlistId);
+  return {
+    ...safeConfig,
+    enabled,
+    playlistIndex,
+    playlistId,
+    volumePercent,
+  };
+}
+
+function syncPlaylistsStateForMutation(playlistsState, { dapConfig = state.dapConfig } = {}) {
+  const nextPlaylists = clonePlaylistsForMutation(playlistsState);
+  const normalizedDapConfig = normalizeDapConfigForPlaylistsMutation(dapConfig, nextPlaylists);
+
+  if (normalizedDapConfig.enabled && normalizedDapConfig.playlistId) {
+    const dapPlaylistIndex = nextPlaylists.findIndex(
+      (playlist) => playlist && playlist.id === normalizedDapConfig.playlistId,
+    );
+    if (dapPlaylistIndex >= 0) {
+      const playlistEntry = nextPlaylists[dapPlaylistIndex];
+      const settings = playlistEntry.settings && typeof playlistEntry.settings === 'object'
+        ? playlistEntry.settings
+        : {};
+      nextPlaylists[dapPlaylistIndex] = {
+        ...playlistEntry,
+        settings: {
+          ...settings,
+          autoPlayEnabled: true,
+          dspEnabled: Boolean(settings.dspEnabled),
+        },
+      };
+    }
+  }
+
+  if (nextPlaylists.length === 0) {
+    state.playlists = [];
+    state.layout = [];
+    state.playlistNames = [];
+    state.playlistMeta = [];
+    state.playlistAutoplay = [];
+    state.playlistDsp = [];
+    const normalizedLegacyDap = normalizeDapConfig(
+      {
+        ...normalizedDapConfig,
+        enabled: false,
+        playlistIndex: null,
+      },
+      0,
+      normalizedDapConfig,
+    );
+    state.dapConfig = {
+      ...(state.dapConfig || {}),
+      ...normalizedLegacyDap,
+      playlistId: null,
+    };
+    return state.playlists;
+  }
+
+  syncLegacyStateFromPlaylists(nextPlaylists, {
+    dapConfig: normalizedDapConfig,
+    trackTitleModesByTrack: state.trackTitleModesByTrack,
+  });
+  return state.playlists;
 }
 
 export function cloneLayoutState(layoutState) {
@@ -836,20 +993,30 @@ export async function addPlaylist() {
 }
 
 async function addPlaylistLocally() {
-  state.layout = ensurePlaylists(state.layout);
-  state.layout.push([]);
-  state.playlistNames = normalizePlaylistNames([...state.playlistNames, defaultPlaylistName(state.layout.length - 1)], state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta([...state.playlistMeta, defaultPlaylistMeta()], state.layout.length);
-  state.dapConfig = normalizeDapConfig(state.dapConfig, state.layout.length, state.dapConfig);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap([...state.playlistAutoplay, false], state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags([...state.playlistDsp, false], state.playlistAutoplay, state.layout.length);
+  const previousPlaylists = ensurePlaylistsForMutation();
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  const nextPlaylistIndex = nextPlaylists.length;
+  nextPlaylists.push({
+    id: buildNextPlaylistId(nextPlaylists),
+    name: defaultPlaylistName(nextPlaylistIndex),
+    type: PLAYLIST_TYPE_MANUAL,
+    tracks: [],
+    settings: {
+      autoPlayEnabled: false,
+      dspEnabled: false,
+    },
+    uiState: null,
+  });
+  syncPlaylistsStateForMutation(nextPlaylists);
   renderZones();
 
   try {
     await _deps.pushSharedLayout();
-    setStatus(`Добавлен плей-лист ${state.layout.length}.`);
+    setStatus(`Добавлен плей-лист ${nextPlaylistIndex + 1}.`);
   } catch (err) {
     console.error(err);
+    syncPlaylistsStateForMutation(previousPlaylists);
+    renderZones();
     setStatus('Не удалось синхронизировать новый плей-лист.');
   }
 }
@@ -872,19 +1039,22 @@ export async function renamePlaylist(playlistIndex, rawName) {
 }
 
 async function renamePlaylistLocally(playlistIndex, rawName) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
+  const previousPlaylists = ensurePlaylistsForMutation();
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= previousPlaylists.length) return;
 
-  const nextNames = state.playlistNames.slice();
-  nextNames[playlistIndex] = rawName;
-  const normalizedNames = normalizePlaylistNames(nextNames, state.layout.length);
-
-  if (playlistNamesEqual(state.playlistNames, normalizedNames, state.layout.length)) {
+  const playlistEntry = previousPlaylists[playlistIndex];
+  const normalizedName = sanitizePlaylistName(rawName, playlistIndex);
+  if (sanitizePlaylistName(playlistEntry && playlistEntry.name, playlistIndex) === normalizedName) {
     renderZones();
     return;
   }
 
-  const previousNames = state.playlistNames.slice();
-  state.playlistNames = normalizedNames;
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  nextPlaylists[playlistIndex] = {
+    ...nextPlaylists[playlistIndex],
+    name: normalizedName,
+  };
+  syncPlaylistsStateForMutation(nextPlaylists);
   renderZones();
 
   try {
@@ -892,7 +1062,7 @@ async function renamePlaylistLocally(playlistIndex, rawName) {
     setStatus(`Переименован плей-лист ${playlistIndex + 1}.`);
   } catch (err) {
     console.error(err);
-    state.playlistNames = previousNames;
+    syncPlaylistsStateForMutation(previousPlaylists);
     renderZones();
     setStatus('Не удалось синхронизировать название плей-листа.');
   }
@@ -915,28 +1085,35 @@ export async function togglePlaylistAutoplay(playlistIndex) {
 }
 
 async function togglePlaylistAutoplayLocally(playlistIndex) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
+  const previousPlaylists = ensurePlaylistsForMutation();
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= previousPlaylists.length) return;
   if (isDapPlaylistIndex(playlistIndex)) {
     setStatus('Для DAP-плей-листа автовоспроизведение всегда включено.');
     return;
   }
 
-  const previousAutoplay = state.playlistAutoplay.slice();
-  const previousDsp = state.playlistDsp.slice();
-  const nextAutoplay = state.playlistAutoplay.slice();
-  nextAutoplay[playlistIndex] = !nextAutoplay[playlistIndex];
-  const normalizedAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
-  const normalizedDsp = normalizePlaylistDspFlags(state.playlistDsp, normalizedAutoplay, state.layout.length);
-
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  const playlistEntry = nextPlaylists[playlistIndex];
+  const currentSettings = playlistEntry.settings && typeof playlistEntry.settings === 'object'
+    ? playlistEntry.settings
+    : {};
+  const nextAutoPlay = !Boolean(currentSettings.autoPlayEnabled);
+  const nextDspEnabled = nextAutoPlay ? Boolean(currentSettings.dspEnabled) : false;
   if (
-    playlistAutoplayEqual(state.playlistAutoplay, normalizedAutoplay, state.layout.length) &&
-    playlistDspEqual(state.playlistDsp, normalizedDsp, normalizedAutoplay, state.layout.length)
+    Boolean(currentSettings.autoPlayEnabled) === nextAutoPlay &&
+    Boolean(currentSettings.dspEnabled) === nextDspEnabled
   ) {
     return;
   }
-
-  state.playlistAutoplay = normalizedAutoplay;
-  state.playlistDsp = normalizedDsp;
+  nextPlaylists[playlistIndex] = {
+    ...playlistEntry,
+    settings: {
+      ...currentSettings,
+      autoPlayEnabled: nextAutoPlay,
+      dspEnabled: nextDspEnabled,
+    },
+  };
+  syncPlaylistsStateForMutation(nextPlaylists);
   renderZones();
 
   try {
@@ -948,8 +1125,7 @@ async function togglePlaylistAutoplayLocally(playlistIndex) {
     );
   } catch (err) {
     console.error(err);
-    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    syncPlaylistsStateForMutation(previousPlaylists);
     renderZones();
     setStatus('Не удалось синхронизировать автопроигрывание плей-листа.');
   }
@@ -972,20 +1148,33 @@ export async function togglePlaylistDsp(playlistIndex) {
 }
 
 async function togglePlaylistDspLocally(playlistIndex) {
-  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= state.layout.length) return;
-  if (!state.playlistAutoplay[playlistIndex]) {
+  const previousPlaylists = ensurePlaylistsForMutation();
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= previousPlaylists.length) return;
+  const playlistEntry = previousPlaylists[playlistIndex];
+  const currentSettings = playlistEntry && playlistEntry.settings && typeof playlistEntry.settings === 'object'
+    ? playlistEntry.settings
+    : {};
+  if (!Boolean(currentSettings.autoPlayEnabled)) {
     setStatus('DSP можно включить только при активном автопроигрывании.');
     return;
   }
 
-  const previousDsp = state.playlistDsp.slice();
-  const nextDsp = state.playlistDsp.slice();
-  nextDsp[playlistIndex] = !nextDsp[playlistIndex];
-  const normalizedDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
-
-  if (playlistDspEqual(state.playlistDsp, normalizedDsp, state.playlistAutoplay, state.layout.length)) return;
-
-  state.playlistDsp = normalizedDsp;
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  const nextPlaylistEntry = nextPlaylists[playlistIndex];
+  const nextSettings = nextPlaylistEntry.settings && typeof nextPlaylistEntry.settings === 'object'
+    ? nextPlaylistEntry.settings
+    : {};
+  const nextDspEnabled = !Boolean(nextSettings.dspEnabled);
+  if (Boolean(nextSettings.dspEnabled) === nextDspEnabled) return;
+  nextPlaylists[playlistIndex] = {
+    ...nextPlaylistEntry,
+    settings: {
+      ...nextSettings,
+      autoPlayEnabled: true,
+      dspEnabled: nextDspEnabled,
+    },
+  };
+  syncPlaylistsStateForMutation(nextPlaylists);
   renderZones();
 
   try {
@@ -993,7 +1182,7 @@ async function togglePlaylistDspLocally(playlistIndex) {
     setStatus(`DSP для плей-листа ${playlistIndex + 1}: ${state.playlistDsp[playlistIndex] ? 'включен' : 'выключен'}.`);
   } catch (err) {
     console.error(err);
-    state.playlistDsp = previousDsp;
+    syncPlaylistsStateForMutation(previousPlaylists);
     renderZones();
     setStatus('Не удалось синхронизировать DSP плей-листа.');
   }
@@ -1275,17 +1464,15 @@ async function deletePlaylistLocally(playlistIndex) {
     return;
   }
 
-  const safeTitle = sanitizePlaylistName(state.playlistNames[playlistIndex], playlistIndex);
+  const previousPlaylists = ensurePlaylistsForMutation();
+  if (!Number.isInteger(playlistIndex) || playlistIndex < 0 || playlistIndex >= previousPlaylists.length) return;
+  const targetPlaylist = previousPlaylists[playlistIndex];
+  const safeTitle = sanitizePlaylistName(targetPlaylist && targetPlaylist.name, playlistIndex);
   const confirmed = window.confirm(`Удалить плей-лист "${safeTitle}"?`);
   if (!confirmed) {
     return;
   }
 
-  const previousLayout = ensurePlaylists(state.layout).map((playlist) => playlist.slice());
-  const previousNames = state.playlistNames.slice();
-  const previousMeta = clonePlaylistMetaState(state.playlistMeta);
-  const previousAutoplay = state.playlistAutoplay.slice();
-  const previousDsp = state.playlistDsp.slice();
   const previousDap = { ...state.dapConfig };
   const previousCurrentTrackWasDap = isDapTrackContext(state.currentTrack, previousDap);
   const previousCurrentTrackContext =
@@ -1299,34 +1486,24 @@ async function deletePlaylistLocally(playlistIndex) {
     ? { ...state.dapInterruptedPlaybackSnapshot }
     : null;
 
-  const nextLayout = previousLayout.map((playlist) => playlist.slice());
-  nextLayout.splice(playlistIndex, 1);
-
-  const nextNames = previousNames.slice();
-  nextNames.splice(playlistIndex, 1);
-  const nextMeta = previousMeta.slice();
-  nextMeta.splice(playlistIndex, 1);
-  const nextAutoplay = previousAutoplay.slice();
-  nextAutoplay.splice(playlistIndex, 1);
-  const nextDsp = previousDsp.slice();
-  nextDsp.splice(playlistIndex, 1);
+  const nextPlaylists = clonePlaylistsForMutation(previousPlaylists);
+  const removedPlaylists = nextPlaylists.splice(playlistIndex, 1);
+  const removedPlaylistId =
+    removedPlaylists.length && removedPlaylists[0] && typeof removedPlaylists[0].id === 'string'
+      ? removedPlaylists[0].id
+      : null;
   const nextDapRaw = { ...previousDap };
-  if (isDapPlaylistIndex(playlistIndex, previousDap)) {
+  const selectedPlaylistId = resolveDapPlaylistId(previousDap, previousPlaylists);
+  if (selectedPlaylistId) {
+    nextDapRaw.playlistId = selectedPlaylistId;
+  }
+  if (removedPlaylistId && selectedPlaylistId && removedPlaylistId === selectedPlaylistId) {
     nextDapRaw.enabled = false;
     nextDapRaw.playlistIndex = null;
-  } else {
-    const previousDapIndex = _deps.normalizePlaylistTrackIndex(previousDap.playlistIndex);
-    if (previousDapIndex !== null && previousDapIndex > playlistIndex) {
-      nextDapRaw.playlistIndex = previousDapIndex - 1;
-    }
+    nextDapRaw.playlistId = null;
   }
 
-  state.layout = ensurePlaylists(nextLayout);
-  state.playlistNames = normalizePlaylistNames(nextNames, state.layout.length);
-  state.playlistMeta = normalizePlaylistMeta(nextMeta, state.layout.length);
-  state.dapConfig = normalizeDapConfig(nextDapRaw, state.layout.length, nextDapRaw);
-  state.playlistAutoplay = normalizePlaylistAutoplayWithDap(nextAutoplay, state.dapConfig, state.layout.length);
-  state.playlistDsp = normalizePlaylistDspFlags(nextDsp, state.playlistAutoplay, state.layout.length);
+  syncPlaylistsStateForMutation(nextPlaylists, { dapConfig: nextDapRaw });
   const preferredCurrentTrackPlaylistIndex = previousCurrentTrackWasDap ? getDapPlaylistIndex(state.dapConfig) : null;
   const currentTrackContextChanged = _deps.reconcileTrackContextWithLayout(state.currentTrack, {
     preferredPlaylistIndex: preferredCurrentTrackPlaylistIndex,
@@ -1346,12 +1523,7 @@ async function deletePlaylistLocally(playlistIndex) {
     setStatus(`Плей-лист "${safeTitle}" удален.`);
   } catch (err) {
     console.error(err);
-    state.layout = previousLayout;
-    state.playlistNames = previousNames;
-    state.playlistMeta = previousMeta;
-    state.dapConfig = normalizeDapConfig(previousDap, state.layout.length, previousDap);
-    state.playlistAutoplay = normalizePlaylistAutoplayWithDap(previousAutoplay, state.dapConfig, state.layout.length);
-    state.playlistDsp = normalizePlaylistDspFlags(previousDsp, state.playlistAutoplay, state.layout.length);
+    syncPlaylistsStateForMutation(previousPlaylists, { dapConfig: previousDap });
     if (state.currentTrack && previousCurrentTrackContext) {
       state.currentTrack.playlistIndex = previousCurrentTrackContext.playlistIndex;
       state.currentTrack.playlistPosition = previousCurrentTrackContext.playlistPosition;
