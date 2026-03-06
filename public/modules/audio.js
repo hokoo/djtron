@@ -374,10 +374,13 @@ export function seekCurrentPlaybackToSeconds(nextTimeSeconds) {
 export async function resumeCurrentPlayback(track = state.currentTrack, audio = state.currentAudio) {
   if (!track || !audio) return false;
   syncBrowserAudioEngineSource(track, audio);
-  if (liveAudioEngine.resume()) return true;
+  if (!audio.paused) return true;
   try {
-    await audio.play();
-    return true;
+    const playResult = audio.play();
+    if (playResult && typeof playResult.then === 'function') {
+      await playResult;
+    }
+    return !audio.paused;
   } catch (err) {
     return false;
   }
