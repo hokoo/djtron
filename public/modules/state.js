@@ -418,7 +418,7 @@ function legacyDapToM2A(dapConfig) {
   };
 }
 
-function toLegacyFilePathFromTrack(track) {
+export function toLegacyFilePathFromTrack(track) {
   if (track && track.meta && typeof track.meta.originalPath === 'string' && track.meta.originalPath.trim()) {
     return track.meta.originalPath.trim();
   }

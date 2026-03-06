@@ -1,6 +1,6 @@
 // public/modules/playback-sync.js — playback state synchronization
 
-import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, deriveLegacyStateFromPlaylists, state } from './state.js';
+import { COHOST_SEEK_COMMAND_INTERVAL_MS, DEFAULT_DAP_CONFIG, DEFAULT_LIVE_VOLUME, HOST_LIVE_SEEK_SYNC_INTERVAL_MS, HOST_PLAYBACK_SYNC_INTERVAL_MS, LAYOUT_STORAGE_KEY, MOBILE_PROGRESS_UI_MIN_INTERVAL_MS, PLAYBACK_COMMAND_PLAY_NEXT_REQUEST, PLAYBACK_COMMAND_PLAY_TRACK, PLAYBACK_COMMAND_SEEK_CURRENT, PLAYBACK_COMMAND_SET_LIVE_SEEK_ENABLED, PLAYBACK_COMMAND_SET_VOLUME, PLAYBACK_COMMAND_SET_VOLUME_PRESETS_VISIBLE, PLAYBACK_COMMAND_STOP, PLAYBACK_COMMAND_TOGGLE_CURRENT, PLAYLIST_TYPE_FOLDER, PLAYLIST_TYPE_MANUAL, ROLE_COHOST, ROLE_HOST, ROLE_SLAVE, deriveLegacyStateFromPlaylists, state, syncPlaylistsFromLegacyState, toLegacyFilePathFromTrack } from './state.js';
 import * as api from './api.js';
 import { applyLiveVolumeToCurrentAudio,
   clearAudioEngineCurrentSource, getEffectiveLiveVolume, handlePlay, pauseCurrentPlayback, resetFadeState,
@@ -1589,178 +1589,20 @@ export function requestHostPlaybackSync(force = false) {
     });
 }
 
-function toLegacyFilePathFromTrack(track) {
-  if (track && track.meta && typeof track.meta.originalPath === 'string' && track.meta.originalPath.trim()) {
-    return track.meta.originalPath.trim();
-  }
-  const src = typeof track?.src === 'string' ? track.src.trim() : '';
-  if (!src) return '';
-
-  let normalized = src.replace(/^https?:\/\/[^/]+/i, '');
-  const queryIndex = normalized.indexOf('?');
-  if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
-  const hashIndex = normalized.indexOf('#');
-  if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
-  if (normalized.startsWith('/audio/')) normalized = normalized.slice('/audio/'.length);
-  else if (normalized.startsWith('audio/')) normalized = normalized.slice('audio/'.length);
-  else normalized = normalized.replace(/^\/+/, '');
-  return normalized.trim();
-}
-
-function buildLegacyShapeFromPlaylists(playlists, explicitTrackTitleModes = null) {
-  const normalizedPlaylists = Array.isArray(playlists) ? playlists : [];
-  const layout = [];
-  const playlistNames = [];
-  const playlistMeta = [];
-  const playlistAutoplay = [];
-  const playlistDsp = [];
-  const trackTitleModesByTrack =
-    explicitTrackTitleModes && typeof explicitTrackTitleModes === 'object'
-      ? { ...explicitTrackTitleModes }
-      : {};
-
-  normalizedPlaylists.forEach((playlist, playlistIndex) => {
-    const tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
-    const files = [];
-    tracks.forEach((track) => {
-      const filePath = toLegacyFilePathFromTrack(track);
-      if (!filePath) return;
-      files.push(filePath);
-      if (track?.meta?.titleMode === 'attributes') {
-        trackTitleModesByTrack[filePath] = 'attributes';
-      }
-    });
-    layout.push(files);
-    playlistNames.push(typeof playlist?.name === 'string' && playlist.name.trim() ? playlist.name.trim() : `Плей-лист ${playlistIndex + 1}`);
-    if (playlist?.type === PLAYLIST_TYPE_FOLDER) {
-      playlistMeta.push({
-        type: PLAYLIST_TYPE_FOLDER,
-        folderKey: typeof playlist?.folderKey === 'string' ? playlist.folderKey : undefined,
-        folderOriginalName: typeof playlist?.folderOriginalName === 'string' ? playlist.folderOriginalName : undefined,
-      });
-    } else {
-      playlistMeta.push({ type: 'manual' });
-    }
-    playlistAutoplay.push(Boolean(playlist?.settings?.autoPlayEnabled));
-    playlistDsp.push(Boolean(playlist?.settings?.dspEnabled) && Boolean(playlist?.settings?.autoPlayEnabled));
-  });
-
-  return {
-    layout,
-    playlistNames,
-    playlistMeta,
-    playlistAutoplay,
-    playlistDsp,
-    trackTitleModesByTrack,
-  };
-}
-
-function buildPlaylistsFromLegacyShape({
-  layout,
-  playlistNames,
-  playlistMeta,
-  playlistAutoplay,
-  playlistDsp,
-  trackTitleModesByTrack,
-} = {}) {
-  const safeLayout = Array.isArray(layout) ? layout : [[]];
-  const names = Array.isArray(playlistNames) ? playlistNames : [];
-  const meta = Array.isArray(playlistMeta) ? playlistMeta : [];
-  const autoplay = Array.isArray(playlistAutoplay) ? playlistAutoplay : [];
-  const dsp = Array.isArray(playlistDsp) ? playlistDsp : [];
-  const titleModes = trackTitleModesByTrack && typeof trackTitleModesByTrack === 'object' ? trackTitleModesByTrack : {};
-  const previousPlaylists = Array.isArray(state.playlists) ? state.playlists : [];
-
-  return safeLayout.map((files, playlistIndex) => {
-    const previousPlaylist = previousPlaylists[playlistIndex];
-    const playlistId =
-      previousPlaylist && typeof previousPlaylist.id === 'string' && previousPlaylist.id
-        ? previousPlaylist.id
-        : `p-${playlistIndex}`;
-    const tracks = (Array.isArray(files) ? files : []).map((filePath, trackIndex) => {
-      const previousTrack = previousPlaylist && Array.isArray(previousPlaylist.tracks) ? previousPlaylist.tracks[trackIndex] : null;
-      const cleanPath = typeof filePath === 'string' ? filePath.trim() : '';
-      return {
-        id: previousTrack && typeof previousTrack.id === 'string' && previousTrack.id ? previousTrack.id : `${playlistId}-t-${trackIndex}`,
-        src: `/audio/${cleanPath.replace(/^\/+/, '')}`,
-        meta: {
-          originalPath: cleanPath,
-          ...(titleModes[cleanPath] ? { titleMode: titleModes[cleanPath] } : {}),
-        },
-      };
-    });
-    const metaEntry = meta[playlistIndex] || {};
-    const playlist = {
-      id: playlistId,
-      name: typeof names[playlistIndex] === 'string' && names[playlistIndex].trim() ? names[playlistIndex].trim() : `Плей-лист ${playlistIndex + 1}`,
-      type: metaEntry.type === PLAYLIST_TYPE_FOLDER ? PLAYLIST_TYPE_FOLDER : 'manual',
-      tracks,
-      settings: {
-        autoPlayEnabled: Boolean(autoplay[playlistIndex]),
-        dspEnabled: Boolean(dsp[playlistIndex]) && Boolean(autoplay[playlistIndex]),
-      },
-      uiState: previousPlaylist?.uiState || null,
-    };
-    if (playlist.type === PLAYLIST_TYPE_FOLDER) {
-      if (typeof metaEntry.folderKey === 'string' && metaEntry.folderKey) {
-        playlist.folderKey = metaEntry.folderKey;
-      }
-      if (typeof metaEntry.folderOriginalName === 'string' && metaEntry.folderOriginalName) {
-        playlist.folderOriginalName = metaEntry.folderOriginalName;
-      }
-    }
-    return playlist;
-  });
-}
-
-function buildLegacyDapConfigFromM2A(dapConfig, playlists) {
-  const safeConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
-  const safePlaylists = Array.isArray(playlists) ? playlists : [];
-  let playlistIndex = null;
-
-  if (typeof safeConfig.playlistId === 'string' && safeConfig.playlistId.trim()) {
-    const normalizedId = safeConfig.playlistId.trim();
-    const foundIndex = safePlaylists.findIndex((playlist) => playlist && playlist.id === normalizedId);
-    if (foundIndex >= 0) {
-      playlistIndex = foundIndex;
-    } else {
-      const idxMatch = normalizedId.match(/^p-(\d+)$/);
-      playlistIndex = idxMatch ? parseInt(idxMatch[1], 10) : null;
-    }
-  }
-
-  return {
-    enabled: Boolean(safeConfig.enabled) && playlistIndex !== null,
-    playlistIndex,
-    playlistId: typeof safeConfig.playlistId === 'string' ? safeConfig.playlistId : null,
-    volumePercent: Number.isFinite(Number(safeConfig.volumePercent))
-      ? Number(safeConfig.volumePercent)
-      : (DEFAULT_DAP_CONFIG.volumePercent || 5),
-  };
-}
-
-function buildM2ADapConfigFromLegacy(dapConfig, playlists) {
-  const safeConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
-  const safePlaylists = Array.isArray(playlists) ? playlists : [];
-
-  let playlistId =
-    typeof safeConfig.playlistId === 'string' && safeConfig.playlistId.trim()
-      ? safeConfig.playlistId.trim()
+function toM2ADapConfigForPayload(dapConfig) {
+  const safeDapConfig = dapConfig && typeof dapConfig === 'object' ? dapConfig : {};
+  const playlistId =
+    typeof safeDapConfig.playlistId === 'string' && safeDapConfig.playlistId.trim()
+      ? safeDapConfig.playlistId.trim()
       : null;
-
-  if (!playlistId) {
-    const playlistIndex = normalizePlaylistTrackIndex(safeConfig.playlistIndex);
-    if (playlistIndex !== null && safePlaylists[playlistIndex] && typeof safePlaylists[playlistIndex].id === 'string') {
-      playlistId = safePlaylists[playlistIndex].id;
-    }
-  }
+  const volumePercent = Number.isFinite(Number(safeDapConfig.volumePercent))
+    ? Number(safeDapConfig.volumePercent)
+    : (DEFAULT_DAP_CONFIG.volumePercent || 5);
 
   return {
-    enabled: Boolean(safeConfig.enabled) && Boolean(playlistId),
+    enabled: Boolean(safeDapConfig.enabled) && Boolean(playlistId),
     playlistId: playlistId || null,
-    volumePercent: Number.isFinite(Number(safeConfig.volumePercent))
-      ? Number(safeConfig.volumePercent)
-      : (DEFAULT_DAP_CONFIG.volumePercent || 5),
+    volumePercent,
   };
 }
 
@@ -1771,20 +1613,20 @@ function normalizeServerLayoutPayload(data) {
   }
 
   const playlists = payload.playlists;
-  const legacy = buildLegacyShapeFromPlaylists(playlists, payload.trackTitleModesByTrack);
-  const explicitTrackTitleModes =
-    payload.trackTitleModesByTrack && typeof payload.trackTitleModesByTrack === 'object'
-      ? payload.trackTitleModesByTrack
-      : null;
+  const legacy = deriveLegacyStateFromPlaylists(playlists, {
+    dapConfig: payload.dapConfig,
+    trackTitleModesByTrack: payload.trackTitleModesByTrack,
+  });
+
   return {
     playlists,
-    layout: Array.isArray(legacy.layout) ? legacy.layout : [[]],
-    playlistNames: Array.isArray(legacy.playlistNames) ? legacy.playlistNames : [],
-    playlistMeta: Array.isArray(legacy.playlistMeta) ? legacy.playlistMeta : [],
-    playlistAutoplay: Array.isArray(legacy.playlistAutoplay) ? legacy.playlistAutoplay : [],
-    playlistDsp: Array.isArray(legacy.playlistDsp) ? legacy.playlistDsp : [],
-    dapConfig: buildLegacyDapConfigFromM2A(payload.dapConfig, playlists),
-    trackTitleModesByTrack: explicitTrackTitleModes || legacy.trackTitleModesByTrack || {},
+    layout: legacy.layout,
+    playlistNames: legacy.playlistNames,
+    playlistMeta: legacy.playlistMeta,
+    playlistAutoplay: legacy.playlistAutoplay,
+    playlistDsp: legacy.playlistDsp,
+    dapConfig: legacy.dapConfig,
+    trackTitleModesByTrack: legacy.trackTitleModesByTrack,
     version: Number.isFinite(Number(payload.version)) ? Number(payload.version) : 0,
   };
 }
@@ -1802,19 +1644,15 @@ export async function fetchSharedLayoutState() {
 
 export async function pushSharedLayout({ renderOnApply = true } = {}) {
   const payloadTrackTitleModes = _deps.serializeTrackTitleModesByTrack();
-  const sourceLegacyState = (() => {
-    if (Array.isArray(state.playlists) && state.playlists.length) {
-      return buildLegacyShapeFromPlaylists(state.playlists, payloadTrackTitleModes);
-    }
-    return {
-      layout: _deps.ensurePlaylists(state.layout),
-      playlistNames: Array.isArray(state.playlistNames) ? state.playlistNames.slice() : [],
-      playlistMeta: _deps.normalizePlaylistMeta(state.playlistMeta, _deps.ensurePlaylists(state.layout).length),
-      playlistAutoplay: Array.isArray(state.playlistAutoplay) ? state.playlistAutoplay.slice() : [],
-      playlistDsp: Array.isArray(state.playlistDsp) ? state.playlistDsp.slice() : [],
-      trackTitleModesByTrack: payloadTrackTitleModes,
-    };
-  })();
+  if (!Array.isArray(state.playlists) || !state.playlists.length) {
+    syncPlaylistsFromLegacyState();
+  }
+
+  const sourcePlaylists = Array.isArray(state.playlists) ? state.playlists : [];
+  const sourceLegacyState = deriveLegacyStateFromPlaylists(sourcePlaylists, {
+    dapConfig: state.dapConfig,
+    trackTitleModesByTrack: payloadTrackTitleModes,
+  });
   const payloadState = _deps.ensureFolderPlaylistsCoverage(
     sourceLegacyState.layout,
     sourceLegacyState.playlistNames,
@@ -1837,19 +1675,11 @@ export async function pushSharedLayout({ renderOnApply = true } = {}) {
   state.playlistAutoplay = payloadAutoplay;
   state.playlistDsp = payloadDsp;
   state.dapConfig = payloadDapConfig;
-  const payloadPlaylists = buildPlaylistsFromLegacyShape({
-    layout: payloadState.layout,
-    playlistNames: payloadState.playlistNames,
-    playlistMeta: payloadState.playlistMeta,
-    playlistAutoplay: payloadAutoplay,
-    playlistDsp: payloadDsp,
-    trackTitleModesByTrack: payloadTrackTitleModes,
-  });
-  state.playlists = payloadPlaylists;
+  const payloadPlaylists = syncPlaylistsFromLegacyState();
 
   const { ok, data } = await api.postLayout({
     playlists: payloadPlaylists,
-    dapConfig: buildM2ADapConfigFromLegacy(payloadDapConfig, payloadPlaylists),
+    dapConfig: toM2ADapConfigForPayload(payloadDapConfig),
     trackTitleModesByTrack: payloadTrackTitleModes,
     clientId: _deps.clientId,
     version: state.layoutVersion,
