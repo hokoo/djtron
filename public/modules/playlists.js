@@ -233,26 +233,19 @@ function syncPlaylistsStateForMutation(playlistsState, { dapConfig = state.dapCo
   }
 
   if (nextPlaylists.length === 0) {
-    state.playlists = [];
-    state.layout = [];
-    state.playlistNames = [];
-    state.playlistMeta = [];
-    state.playlistAutoplay = [];
-    state.playlistDsp = [];
-    const normalizedLegacyDap = normalizeDapConfig(
-      {
+    applyLegacyLayoutProjection({
+      layout: [],
+      playlistNames: [],
+      playlistMeta: [],
+      playlistAutoplay: [],
+      playlistDsp: [],
+      dapConfig: {
         ...normalizedDapConfig,
         enabled: false,
         playlistIndex: null,
+        playlistId: null,
       },
-      0,
-      normalizedDapConfig,
-    );
-    state.dapConfig = {
-      ...(state.dapConfig || {}),
-      ...normalizedLegacyDap,
-      playlistId: null,
-    };
+    });
     return state.playlists;
   }
 

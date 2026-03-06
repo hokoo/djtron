@@ -14,7 +14,6 @@ export function updateDapSettingsUi(role = state.currentRole) {
   const isHost = isHostRole(role);
   const normalizedLayout = _deps.ensurePlaylists(state.layout);
   const normalizedDap = _deps.normalizeDapConfig(state.dapConfig, normalizedLayout.length, state.dapConfig);
-  state.dapConfig = normalizedDap;
   updateDapNowPlayingVisibility(role);
 
   if (_deps.dapSettingsPanelEl) {
