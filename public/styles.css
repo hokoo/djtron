@@ -1645,6 +1645,11 @@ button.play {
   z-index: 1;
 }
 
+body[data-role='co-host'] button.play,
+body[data-role='slave'] button.play {
+  color: var(--border);
+}
+
 button.play:not(:disabled):hover,
 button.play:not(:disabled):focus-visible {
   outline: none;
