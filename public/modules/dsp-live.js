@@ -457,6 +457,19 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
   if ((nextTrack.basePath || '/audio') !== '/audio') return false;
   if (!isPlaylistDspEnabled(nextTrack.playlistIndex)) return false;
 
+  // Capture pre-arm state BEFORE the first async call. The descriptor can be
+  // cleared by a race (e.g., continuation track's triggerLiveDspTransitionForTrack
+  // firing during the HTTP GET below), so snapshot this synchronously.
+  const preArmedSliceWindowSecondsSnapshot = resolveReadyDspSliceWindowSeconds(nextTrack);
+  const cachedPairKey = `${finishedTrack.file}|${nextTrack.file}`;
+  const cachedPair = _lastReadyTransitionPairCache.get(cachedPairKey);
+  // Also check the pair cache as a fallback in case descriptor was already cleared.
+  const preArmedSliceWindowSeconds = (
+    (Number.isFinite(preArmedSliceWindowSecondsSnapshot) && preArmedSliceWindowSecondsSnapshot > 0)
+      ? preArmedSliceWindowSecondsSnapshot
+      : (cachedPair && cachedPair.sliceSeconds > 0 ? cachedPair.sliceSeconds : null)
+  );
+
   let details;
   try {
     details = await fetchDspTransitionPairDetails(finishedTrack.file, nextTrack.file);
@@ -488,7 +501,7 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     sliceSeconds,
     details.transition,
   );
-  const preArmedSliceWindowSeconds = resolveReadyDspSliceWindowSeconds(nextTrack);
+  // preArmedSliceWindowSeconds was captured before the async call above (see snapshot at top)
   const transitionWasPreArmed = Number.isFinite(preArmedSliceWindowSeconds) && preArmedSliceWindowSeconds > 0;
   const sourceSegmentSeconds = resolveDspSourceSegmentSeconds(sliceSeconds, details.transition);
   const sourceTrackActiveAtPlanning = isCurrentSourceTrackActive(sourceTrack);
@@ -502,6 +515,7 @@ export async function tryStartAutoplayWithDspTransition(finishedTrack, nextTrack
     transitionStartOffsetSeconds,
     transitionWasPreArmed,
     preArmedSliceWindowSeconds,
+    preArmedSliceWindowSecondsSnapshot,
     sourceTrackActiveAtPlanning,
     userSeeked: state.currentAudio && state.currentAudio.dataset && state.currentAudio.dataset.userSeeked,
     currentAudioCurrentTime: state.currentAudio && state.currentAudio.currentTime,
